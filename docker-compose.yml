@@ -1,0 +1,18 @@
+services:
+  openos:
+    build: .
+    ports:
+      - "8420:8420"
+    volumes:
+      - openos-data:/data
+    environment:
+      # 可选：首次启动回填 AI 配置（之后以「系统设置 → AI 服务」中的在线配置为准）
+      OPENOS_AI_BASE_URL: ""
+      OPENOS_AI_API_KEY: ""
+      OPENOS_AI_MODEL: "glm-4-flash"
+      # 生产建议设置固定密钥签发 JWT（否则首次启动自动生成并持久化在 SQLite）
+      OPENOS_JWT_SECRET: ""
+    restart: unless-stopped
+
+volumes:
+  openos-data:

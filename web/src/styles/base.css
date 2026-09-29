@@ -1,0 +1,89 @@
+/* OpenOS 全局样式与设计令牌（macOS 风格） */
+:root {
+  --os-accent: #0a84ff;
+  --os-radius: 12px;
+  --os-radius-sm: 8px;
+  --os-font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
+    "Helvetica Neue", "Microsoft YaHei", sans-serif;
+  --os-mono: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+
+  /* 亮色主题 */
+  --os-bg: #f5f5f7;
+  --os-text: #1d1d1f;
+  --os-text-secondary: #6e6e73;
+  --os-panel: rgba(255, 255, 255, 0.72);
+  --os-panel-solid: #ffffff;
+  --os-window: #edeef0;
+  --os-window-head: rgba(246, 246, 248, 0.85);
+  --os-border: rgba(0, 0, 0, 0.1);
+  --os-border-strong: rgba(0, 0, 0, 0.18);
+  --os-hover: rgba(0, 0, 0, 0.05);
+  --os-active: rgba(0, 0, 0, 0.1);
+  --os-sidebar: rgba(240, 240, 243, 0.9);
+  --os-input-bg: #ffffff;
+  --os-shadow: 0 18px 60px rgba(0, 0, 0, 0.22), 0 2px 8px rgba(0, 0, 0, 0.1);
+  --os-shadow-sm: 0 2px 10px rgba(0, 0, 0, 0.12);
+  --os-menubar: rgba(255, 255, 255, 0.55);
+  --os-dock: rgba(255, 255, 255, 0.45);
+  --os-selected: rgba(10, 132, 255, 0.14);
+}
+
+html.dark {
+  --os-bg: #1c1c1e;
+  --os-text: #f5f5f7;
+  --os-text-secondary: #98989d;
+  --os-panel: rgba(40, 40, 44, 0.72);
+  --os-panel-solid: #28282c;
+  --os-window: #232326;
+  --os-window-head: rgba(56, 56, 60, 0.85);
+  --os-border: rgba(255, 255, 255, 0.12);
+  --os-border-strong: rgba(255, 255, 255, 0.22);
+  --os-hover: rgba(255, 255, 255, 0.08);
+  --os-active: rgba(255, 255, 255, 0.14);
+  --os-sidebar: rgba(44, 44, 48, 0.9);
+  --os-input-bg: rgba(255, 255, 255, 0.08);
+  --os-shadow: 0 18px 60px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.4);
+  --os-shadow-sm: 0 2px 10px rgba(0, 0, 0, 0.4);
+  --os-menubar: rgba(28, 28, 30, 0.55);
+  --os-dock: rgba(40, 40, 44, 0.45);
+  --os-selected: rgba(10, 132, 255, 0.3);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body, #app { height: 100%; overflow: hidden; }
+
+body {
+  font-family: var(--os-font);
+  color: var(--os-text);
+  background: var(--os-bg);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  font-size: 14px;
+}
+
+input, textarea, [contenteditable] { user-select: text; font-family: inherit; }
+input:focus, textarea:focus, [contenteditable]:focus { outline: none; }
+
+button { font-family: inherit; }
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: var(--os-border-strong); border-radius: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* 通用工具类 */
+.os-glass {
+  background: var(--os-panel);
+  backdrop-filter: blur(28px) saturate(1.6);
+  -webkit-backdrop-filter: blur(28px) saturate(1.6);
+}
+.os-no-select { user-select: none; }
+.os-mono { font-family: var(--os-mono); }
+
+/* 动画 */
+@keyframes os-window-open {
+  from { opacity: 0; transform: scale(0.92) translateY(12px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+@keyframes os-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes os-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
