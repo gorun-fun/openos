@@ -109,7 +109,31 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
     <div ref="dockEl" class="dock os-glass" @pointermove="onMove" @pointerover="onOver" @pointerleave="onLeave">
       <div v-if="tip" class="dock-tip" :style="{ left: tip.x + 'px' }">{{ tip.text }}</div>
       <button class="dock-item launcher" data-name="启动台" aria-label="启动台" @click="emit('launchpad')">
-        <span class="launcher-icon">⊞</span>
+        <span class="launcher-icon">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" aria-hidden="true">
+            <defs>
+              <linearGradient id="lp-bg" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0" stop-color="#f2f4f8"/><stop offset="1" stop-color="#c4c9d4"/>
+              </linearGradient>
+              <linearGradient id="lp-gl" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0" stop-color="#fff" stop-opacity=".35"/><stop offset=".55" stop-color="#fff" stop-opacity="0"/>
+              </linearGradient>
+            </defs>
+            <rect width="64" height="64" rx="15" fill="url(#lp-bg)"/>
+            <rect width="64" height="64" rx="15" fill="url(#lp-gl)"/>
+            <g fill="#828b99">
+              <rect x="10.5" y="10.5" width="11" height="11" rx="3.5"/>
+              <rect x="26.5" y="10.5" width="11" height="11" rx="3.5"/>
+              <rect x="42.5" y="10.5" width="11" height="11" rx="3.5"/>
+              <rect x="10.5" y="26.5" width="11" height="11" rx="3.5"/>
+              <rect x="26.5" y="26.5" width="11" height="11" rx="3.5"/>
+              <rect x="42.5" y="26.5" width="11" height="11" rx="3.5"/>
+              <rect x="10.5" y="42.5" width="11" height="11" rx="3.5"/>
+              <rect x="26.5" y="42.5" width="11" height="11" rx="3.5"/>
+              <rect x="42.5" y="42.5" width="11" height="11" rx="3.5"/>
+            </g>
+          </svg>
+        </span>
       </button>
       <div class="dock-sep" />
       <button
@@ -141,9 +165,9 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
    规范计算为 auto，放大抬升的图标就会被容器整体裁掉 */
 .dock {
   display: flex; flex-wrap: wrap; justify-content: center; gap: 6px;
-  padding: 8px 10px; border-radius: 20px;
+  padding: 8px 10px; border-radius: 22px;
   border: 1px solid var(--os-border);
-  box-shadow: 0 10px 40px rgba(0,0,0,.25);
+  box-shadow: 0 14px 44px rgba(0,0,0,.28), inset 0 1px 0 var(--os-highlight-edge);
   pointer-events: auto; max-width: 92vw; overflow: visible;
   align-items: flex-end;
 }
@@ -158,12 +182,12 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
 .launcher {
   display: flex; align-items: center; justify-content: center;
 }
+/* 启动台按钮：与新 AppIcon 同一套 squircle 语言（圆角裁切 + 投影） */
 .launcher-icon {
-  width: 42px; height: 42px; border-radius: 23%; display: flex; align-items: center; justify-content: center;
-  background: linear-gradient(145deg, #d8dbe2, #a7abb5); color: #333; font-size: 24px; font-weight: 700;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.4), 0 2px 6px rgba(0,0,0,.25);
+  display: block; width: 42px; height: 42px; border-radius: 23%; overflow: hidden;
+  box-shadow: 0 1px 2px rgba(0,0,0,.18), 0 4px 10px rgba(0,0,0,.22);
 }
-html.dark .launcher-icon { background: linear-gradient(145deg, #5a5a60, #3a3a40); color: #eee; }
+.launcher-icon svg { display: block; width: 100%; height: 100%; }
 .dock-sep { width: 1px; align-self: stretch; background: var(--os-border-strong); margin: 4px 3px; flex: none; }
 .dot {
   position: absolute; bottom: -5px; left: 50%; transform: translateX(-50%);
@@ -172,9 +196,17 @@ html.dark .launcher-icon { background: linear-gradient(145deg, #5a5a60, #3a3a40)
 /* 悬停名称提示：锚定 Dock 顶部上方（避开邻居放大最大 ~29px 的抬升），不参与 flex 布局、不挡指针 */
 .dock-tip {
   position: absolute; bottom: calc(100% + 25px); transform: translateX(-50%);
-  padding: 4px 12px; border-radius: 8px; white-space: nowrap; z-index: 10;
-  background: var(--os-panel-solid); border: 1px solid var(--os-border);
+  padding: 4px 13px; border-radius: 9px; white-space: nowrap; z-index: 10;
+  background: var(--os-panel); backdrop-filter: blur(24px) saturate(1.8);
+  -webkit-backdrop-filter: blur(24px) saturate(1.8);
+  border: 1px solid var(--os-border);
   color: var(--os-text); font-size: 12.5px; pointer-events: none;
-  box-shadow: var(--os-shadow-sm); animation: os-fade-in .12s ease;
+  box-shadow: var(--os-shadow-sm), inset 0 1px 0 var(--os-highlight-edge);
+  animation: dock-tip-in .14s var(--os-ease-out);
+}
+/* 提示弹入动画须保留 translateX(-50%) 居中（通用 pop 动画会覆盖 transform 导致横向跳动） */
+@keyframes dock-tip-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(3px) scale(.96); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
 }
 </style>

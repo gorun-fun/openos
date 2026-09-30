@@ -4,3 +4,4 @@ server/data/
 server/openos-server
 .DS_Store
 *.log
+*.pid

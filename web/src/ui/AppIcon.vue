@@ -7,7 +7,7 @@ const def = computed(() => iconOf(props.app))
 </script>
 
 <template>
-  <!-- 图片图标（如 goder 官方图标）：同样圆角 + 投影，视觉与渐变方块一致 -->
+  <!-- 图片图标（如 goder 官方图标）：同样圆角 + 投影，视觉与 SVG 图标一致 -->
   <img
     v-if="def.src"
     class="app-icon app-icon-img"
@@ -16,25 +16,37 @@ const def = computed(() => iconOf(props.app))
     :style="{ width: size + 'px', height: size + 'px' }"
     draggable="false"
   >
+  <!-- SVG 图标：容器统一负责圆角裁切与投影，SVG 本体铺满缩放 -->
+  <span
+    v-else-if="def.svg"
+    class="app-icon app-icon-svg"
+    :style="{ width: size + 'px', height: size + 'px' }"
+    v-html="def.svg"
+  />
+  <!-- 兜底：图标定义异常时的中性占位 -->
   <span
     v-else
-    class="app-icon"
-    :style="{
-      width: size + 'px', height: size + 'px',
-      background: def.grad,
-      fontSize: Math.round(size * 0.48) + 'px',
-    }"
-  >{{ def.symbol }}</span>
+    class="app-icon app-icon-fallback"
+    :style="{ width: size + 'px', height: size + 'px' }"
+  />
 </template>
 
 <style scoped>
-.app-icon {
-  display: inline-flex; align-items: center; justify-content: center;
-  border-radius: 23%; color: #fff; flex: none;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.35), 0 2px 6px rgba(0,0,0,.25);
-  font-weight: 700; line-height: 1;
-  font-family: var(--os-mono);
-  text-shadow: 0 1px 2px rgba(0,0,0,.3);
+.app-icon { display: block; flex: none; }
+/* 图片图标（goder 官方黑底图标）：1px 亮边避免在深色壁纸上圆角轮廓消失 */
+.app-icon-img {
+  object-fit: cover; border-radius: 23%; box-sizing: border-box;
+  border: 1px solid rgba(255,255,255,.16);
+  box-shadow: 0 1px 2px rgba(0,0,0,.18), 0 4px 10px rgba(0,0,0,.22);
 }
-.app-icon-img { display: block; object-fit: cover; }
+.app-icon-svg {
+  border-radius: 23%; overflow: hidden;
+  box-shadow: 0 1px 2px rgba(0,0,0,.18), 0 4px 10px rgba(0,0,0,.22);
+}
+.app-icon-svg :deep(svg) { display: block; width: 100%; height: 100%; }
+.app-icon-fallback {
+  border-radius: 23%;
+  background: linear-gradient(145deg, #c3c7cf, #8e939e);
+  box-shadow: 0 1px 2px rgba(0,0,0,.18), 0 4px 10px rgba(0,0,0,.22);
+}
 </style>
