@@ -134,6 +134,20 @@ function onTitlePointerDown(e: PointerEvent) {
   el.addEventListener('pointerup', up)
 }
 
+// 融合窗体：应用内容里标记 data-os-drag 的区域（标题/留白条）可拖动窗口；控件自身不参与
+function draggableTarget(t: HTMLElement): boolean {
+  if (!t.closest('[data-os-drag]')) return false
+  return !t.closest('button, input, select, textarea, a, label, [data-os-no-drag]')
+}
+function onWinPointerDown(e: PointerEvent) {
+  store.focus(props.win.id)
+  if (merged.value && draggableTarget(e.target as HTMLElement)) onTitlePointerDown(e)
+}
+// 双击工具栏标题区最大化（与标准标题栏双击行为一致）
+function onWinDblClick(e: MouseEvent) {
+  if (merged.value && draggableTarget(e.target as HTMLElement)) store.toggleMaximize(props.win.id)
+}
+
 function onResizePointerDown(e: PointerEvent, dir: string) {
   e.stopPropagation()
   store.focus(props.win.id)
@@ -199,7 +213,7 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
       left: win.x + 'px', top: win.y + 'px', width: win.w + 'px', height: win.h + 'px', zIndex: win.z,
       ...(dockFly ? { transform: dockFly, opacity: 0 } : {}),
     }"
-    @pointerdown="store.focus(win.id)"
+    @pointerdown="onWinPointerDown" @dblclick="onWinDblClick"
   >
     <header
       class="titlebar" :class="{ merged }"

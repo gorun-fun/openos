@@ -29,6 +29,7 @@ const usage = ref({ used: 0, quota: 100 * 1024 * 1024 })
 const preview = ref<{ url: string; name: string } | null>(null)
 const uploadInput = ref<HTMLInputElement>()
 const menuOpen = ref(false) // 工具栏「更多操作」下拉菜单
+const ctxMenu = ref<{ x: number; y: number } | null>(null) // 右键上下文菜单（视口坐标）
 
 // 前进/后退历史
 const history = ref<string[]>([path.value])
@@ -248,7 +249,30 @@ async function onUpload(e: Event) {
 // 「更多操作」菜单里的上传入口：选择文件后先收起菜单再走上传
 function onUploadMenu(e: Event) {
   menuOpen.value = false
+  ctxMenu.value = null
   onUpload(e)
+}
+
+// —— 右键上下文菜单（Finder 行为）：文件上右键=选中并给操作；空白处=清空选中后给新建/上传 ——
+function openCtx(e: MouseEvent, f?: VFile) {
+  selected.value = f ? f.path : ''
+  // 靠近屏幕右/下缘时回退，避免菜单溢出视口
+  ctxMenu.value = {
+    x: Math.min(e.clientX, window.innerWidth - 190),
+    y: Math.min(e.clientY, window.innerHeight - 260),
+  }
+}
+// 点击内容区空白处取消选中（条目自身点击不触发）
+function onContentClick(e: MouseEvent) {
+  const t = e.target as HTMLElement
+  if (t.closest('.item, .list-table tbody tr, .col-item, .thumb, th')) return
+  selected.value = ''
+}
+// 应用根级右键：输入框保留系统菜单（复制/粘贴），其余区域屏蔽浏览器默认菜单
+function onRootCtx(e: MouseEvent) {
+  const t = e.target as HTMLElement
+  if (t.closest('input, textarea, select, [contenteditable="true"]')) return
+  e.preventDefault()
 }
 
 async function onDrop(e: DragEvent) {
@@ -332,9 +356,9 @@ watch(() => columnPaths.value.length, async () => {
 </script>
 
 <template>
-  <div class="files" @dragover.prevent @drop="onDrop">
-    <!-- 工具栏（融合窗体标题行）：左侧留红绿灯区，标题即当前文件夹；操作收进 ⋯ 菜单 -->
-    <div class="toolbar">
+  <div class="files" @dragover.prevent @drop="onDrop" @contextmenu="onRootCtx">
+    <!-- 工具栏（融合窗体标题行）：左侧留红绿灯区，标题即当前文件夹；data-os-drag = 可拖动窗口；操作收进 ⋯ 菜单 -->
+    <div class="toolbar" data-os-drag>
       <div class="nav-btns">
         <button class="tool-icon" :disabled="!canBack" title="后退" @click="goBack">‹</button>
         <button class="tool-icon" :disabled="!canForward" title="前进" @click="goForward">›</button>
@@ -401,7 +425,7 @@ watch(() => columnPaths.value.length, async () => {
         </template>
       </aside>
 
-      <main class="content" :class="'view-' + view">
+      <main class="content" :class="'view-' + view" @click="onContentClick" @contextmenu.prevent.stop="openCtx($event)">
         <div v-if="loading" class="state">加载中…</div>
         <OsEmpty v-else-if="view !== 'column' && !shown.length" :text="query ? '没有匹配的文件' : '此文件夹为空（可拖入文件上传）'" icon="📂" />
 
@@ -412,6 +436,7 @@ watch(() => columnPaths.value.length, async () => {
             class="item" :class="{ sel: selected === f.path }"
             @click="selected = f.path"
             @dblclick="openFile(f)"
+            @contextmenu.prevent.stop="openCtx($event, f)"
           >
             <div class="ic">{{ fileIcon(f) }}</div>
             <div class="name">{{ baseName(f.path) }}</div>
@@ -433,6 +458,7 @@ watch(() => columnPaths.value.length, async () => {
             <tr
               v-for="f in shown" :key="f.path" :class="{ sel: selected === f.path }"
               @click="selected = f.path" @dblclick="openFile(f)"
+              @contextmenu.prevent.stop="openCtx($event, f)"
             >
               <td class="tn">{{ fileIcon(f) }} {{ baseName(f.path) }}</td>
               <td class="dim">{{ f.updatedAt }}</td>
@@ -451,6 +477,7 @@ watch(() => columnPaths.value.length, async () => {
                 class="col-item" :class="{ sel: columnPaths[i + 1] === f.path || selected === f.path }"
                 @click="f.isDir ? enter(f.path) : (selected = f.path)"
                 @dblclick="openFile(f)"
+                @contextmenu.prevent.stop="openCtx($event, f)"
               >
                 <span class="ci">{{ fileIcon(f) }}</span>
                 <span class="cn">{{ baseName(f.path) }}</span>
@@ -470,7 +497,7 @@ watch(() => columnPaths.value.length, async () => {
         </div>
 
         <!-- 画廊视图：大图预览 + 底部缩略胶片 -->
-        <div v-else-if="view === 'gallery'" class="gallery" tabindex="0" @keydown.left.prevent="stepSel(-1)" @keydown.right.prevent="stepSel(1)">
+        <div v-else-if="view === 'gallery'" class="gallery" tabindex="0" @keydown.left.prevent="stepSel(-1)" @keydown.right.prevent="stepSel(1)" @contextmenu.prevent.stop="openCtx($event)">
           <div v-if="selectedFile" class="g-main">
             <img
               v-if="isImage(selectedFile) && blobUrl(selectedFile.path)"
@@ -490,6 +517,7 @@ watch(() => columnPaths.value.length, async () => {
               v-for="f in shown" :id="'thumb-' + encodeURIComponent(f.path)" :key="f.path"
               class="thumb" :class="{ sel: selected === f.path }"
               @click="selected = f.path" @dblclick="openFile(f)"
+              @contextmenu.prevent.stop="openCtx($event, f)"
             >
               <img v-if="isImage(f) && blobUrl(f.path)" :src="blobUrl(f.path)" alt="">
               <span v-else>{{ fileIcon(f) }}</span>
@@ -516,6 +544,23 @@ watch(() => columnPaths.value.length, async () => {
       <OsInput v-model="renameTo" @keydown.enter="doRename" />
     </OsModal>
 
+    <!-- 右键上下文菜单：有选中项时给文件操作，空白处给新建/上传 -->
+    <template v-if="ctxMenu">
+      <div class="menu-mask" @click="ctxMenu = null" @contextmenu.prevent="ctxMenu = null" />
+      <div class="menu ctx" :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }">
+        <template v-if="selectedFile">
+          <button class="mi" @click="ctxMenu = null; openFile(selectedFile)">打开</button>
+          <button class="mi" :disabled="selectedFile.isDir" @click="ctxMenu = null; doDownload()">下载</button>
+          <button class="mi" @click="ctxMenu = null; renaming = selected; renameTo = baseName(selected)">重命名</button>
+          <button class="mi danger" @click="ctxMenu = null; doRemove()">删除</button>
+          <div class="menu-sep" />
+        </template>
+        <button class="mi" @click="ctxMenu = null; creating = 'dir'; newName = ''">新建文件夹</button>
+        <button class="mi" @click="ctxMenu = null; creating = 'file'; newName = ''">新建文件</button>
+        <label class="mi">上传文件…<input type="file" multiple hidden @change="onUploadMenu" /></label>
+      </div>
+    </template>
+
     <!-- 图片快速预览 -->
     <div v-if="preview" class="img-viewer" @pointerdown.self="closePreview">
       <header>
@@ -529,11 +574,13 @@ watch(() => columnPaths.value.length, async () => {
 
 <style scoped>
 .files { width: 100%; display: flex; flex-direction: column; background: var(--os-window); }
-/* 工具栏 = 融合窗体标题行：左侧 84px 为红绿灯悬浮区（WindowFrame 绘制），单行不换行 */
+/* 工具栏 = 融合窗体标题行：左侧 84px 为红绿灯悬浮区（WindowFrame 绘制），单行不换行；
+   data-os-drag 标记整条可拖动窗口（控件由 WindowFrame 排除） */
 .toolbar {
   flex: none; height: 46px; display: flex; align-items: center; gap: 8px;
   padding: 0 12px 0 84px; overflow: hidden;
   background: var(--os-sidebar); border-bottom: 1px solid var(--os-border);
+  user-select: none; touch-action: none;
 }
 .nav-btns { display: flex; gap: 4px; }
 .tool-icon {
@@ -574,6 +621,8 @@ watch(() => columnPaths.value.length, async () => {
 .mi:disabled { opacity: .4; cursor: default; }
 .mi.danger:hover:not(:disabled) { background: #e5484d; }
 .menu-sep { height: 1px; margin: 4px 8px; background: var(--os-border); }
+/* 右键菜单：按视口坐标定位（openCtx 已做边缘回退） */
+.menu.ctx { position: fixed; z-index: 70; top: auto; right: auto; }
 
 /* 主体：侧边栏 + 内容区 */
 .body { flex: 1; display: flex; min-height: 0; }
