@@ -1,0 +1,91 @@
+# ============================================================================
+# OpenOS 持续集成 / 持续交付（与 grf-gateway 同套 Runner/仓库/发布机）
+# 触发方式：推送 tag（git tag v1.0.0 && git push origin v1.0.0）
+# 流程：    编译打包为 Docker 镜像 -> 推送到私有仓库 -> SSH 部署到 DEPLOY_HOSTS 各主机
+# 镜像仓库：10.8.0.6:5000（Registry 容器仅绑定该地址；构建/推送与发布机拉取共用）
+# ============================================================================
+
+# 使用 Docker 执行器（或已挂载 /var/run/docker.sock 的执行器）
+# 基础镜像：docker CLI；通过挂载的主机 Docker socket 直连守护进程
+image: docker:29.7.2-cli-alpine3.24
+
+variables:
+  # 镜像仓库地址（Registry 容器仅绑定 10.8.0.6:5000，docker0 网关地址 172.17.0.1:5000 已不可达）
+  REGISTRY: 10.8.0.6:5000
+  # 镜像名（不含 tag）
+  IMAGE_BASE: ${REGISTRY}/openos
+  # 直接复用主机 Docker 守护进程（Runner 需挂载 /var/run/docker.sock:ro）
+  DOCKER_HOST: unix:///var/run/docker.sock
+  # Dockerfile 为多阶段构建（node → go → alpine）。Docker 23+ 默认即 BuildKit，
+  # 此处显式声明，防将来基础镜像版本回退
+  DOCKER_BUILDKIT: "1"
+  # 发布目标主机（内网，通过 SSH 登录），多台以空格分隔
+  DEPLOY_HOSTS: 10.8.0.5 10.8.0.6
+  # 发布机拉取镜像的仓库地址（与构建/推送为同一仓库）
+  DEPLOY_REGISTRY: ${REGISTRY}
+  # 发布机上的应用工作目录
+  DEPLOY_APP_DIR: /app/openos
+  # SSH 登录用户
+  DEPLOY_USER: root
+
+stages:
+  - build
+  - push
+  - deploy
+
+# 多阶段 Dockerfile 内已完成：前端构建（Vite/Vue3）-> 后端编译（Go 纯静态）-> 精简运行镜像打包
+build-image:
+  stage: build
+  tags:
+    - docker
+  script:
+    - docker info
+    - docker build -t ${IMAGE_BASE}:${CI_COMMIT_TAG} .
+    - docker history ${IMAGE_BASE}:${CI_COMMIT_TAG}
+  rules:
+    - if: '$CI_COMMIT_TAG'      # 仅打 tag 触发
+
+push-image:
+  stage: push
+  tags:
+    - docker
+  # 内网仓库（10.8.0.6:5000）不启用认证，无需 login
+  script:
+    - docker push ${IMAGE_BASE}:${CI_COMMIT_TAG}
+  rules:
+    - if: '$CI_COMMIT_TAG'
+
+# 发布到 DEPLOY_HOSTS 各主机（bridge 网络映射 8420 端口），复用项目 docker-compose.yml，
+# 从内网仓库拉取镜像（服务器上已有同名镜像，compose 不会触发本地 build）
+deploy:
+  stage: deploy
+  tags:
+    - docker
+  # SSH 登录发布主机，需配置 CI/CD 变量：
+  #   DEPLOY_USER            （发布机 SSH 用户名）
+  #   DEPLOY_SSH_PRIVATE_KEY （发布机 SSH 私钥）
+  before_script:
+    # 使用国内 Alpine 源加速，并安装 ssh/scp（docker CLI 镜像不自带）
+    - sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
+    - apk add --no-cache openssh-client
+    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    # DEPLOY_SSH_PRIVATE_KEY 为文件类型变量，内容已在 $CI_PROJECT_DIR/$DEPLOY_SSH_PRIVATE_KEY
+    # （运行时其值是该文件路径），复制到预期位置并清权限
+    - cp "$DEPLOY_SSH_PRIVATE_KEY" ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - ssh-keyscan -H ${DEPLOY_HOSTS// / } >> ~/.ssh/known_hosts 2>/dev/null
+  script:
+    # 逐台部署：拷贝 docker-compose.yml，从内网仓库拉取镜像并按仓库内配置更新容器
+    # 数据卷 openos-data 持续复用，SQLite/用户沙箱在升级间保留
+    - |
+      for HOST in ${DEPLOY_HOSTS}; do
+        echo "===== 部署到 ${HOST} ====="
+        ssh ${DEPLOY_USER}@${HOST} "mkdir -p ${DEPLOY_APP_DIR}"
+        scp docker-compose.yml ${DEPLOY_USER}@${HOST}:${DEPLOY_APP_DIR}/docker-compose.yml
+        ssh ${DEPLOY_USER}@${HOST} "cd ${DEPLOY_APP_DIR} && OPENOS_REGISTRY=${DEPLOY_REGISTRY} OPENOS_TAG=${CI_COMMIT_TAG} docker compose pull && OPENOS_REGISTRY=${DEPLOY_REGISTRY} OPENOS_TAG=${CI_COMMIT_TAG} docker compose up -d --force-recreate"
+        # 部署完成后清理本应用旧镜像，避免占满磁盘：只删 openos 仓库中
+        # 非当前版本的 tag；rmi 不带 -f，仍被其他容器占用的镜像会被拒绝，不动其他应用
+        ssh ${DEPLOY_USER}@${HOST} "docker images --format '{{.Repository}}:{{.Tag}}' ${DEPLOY_REGISTRY}/openos | grep -v ':${CI_COMMIT_TAG}\$' | xargs -r docker rmi || true"
+      done
+  rules:
+    - if: '$CI_COMMIT_TAG'

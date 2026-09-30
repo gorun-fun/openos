@@ -217,6 +217,22 @@ openos/
 └── Makefile                 # dev/build/release/docker/test
 ```
 
+## CI/CD 发布（GitLab CI）
+
+与 grf-gateway 同套设施（`docker` Runner + 私有仓库 + 发布机），见 `.gitlab-ci.yml`。
+
+```bash
+git tag v1.0.0 && git push origin v1.0.0   # 推送 tag 即触发发布
+```
+
+流程（仅 tag 触发，三个 stage）：
+
+1. **build**：多阶段 Dockerfile 构建（Vite 前端 → Go 静态编译 → alpine 运行镜像），打 tag 为 `10.8.0.6:5000/openos:<tag>`
+2. **push**：推送镜像到内网 Registry（无认证）
+3. **deploy**：SSH 到 `DEPLOY_HOSTS`（10.8.0.5/6），拷贝 docker-compose.yml 后 `pull` + `up -d --force-recreate`，并清理本应用旧版本镜像
+
+部署机上的 compose 通过 `OPENOS_REGISTRY`/`OPENOS_TAG` 变量从仓库拉取对应版本；数据卷 `openos-data` 跨升级保留。发布机需要一次性配置 CI/CD 变量：`DEPLOY_SSH_PRIVATE_KEY`（文件类型，SSH 私钥）；`DEPLOY_USER` 默认 root。
+
 ## 生产部署清单
 
 - [ ] **修改默认密码**：admin/user/guest 三个默认账号，或删除不需要的账号

@@ -1,9 +1,15 @@
 services:
   openos:
+    # 本地开发：docker compose up -d --build 用仓库根 Dockerfile 构建；
+    # 服务器部署：CI 已推送同名镜像，compose 检测到本地镜像存在不会重新构建
     build: .
+    # 镜像来源；registry/tag 由变量注入（CI 发布时传 OPENOS_TAG=v1.0.0）
+    image: ${OPENOS_REGISTRY:-10.8.0.6:5000}/openos:${OPENOS_TAG:-latest}
+    container_name: openos
     ports:
       - "8420:8420"
     volumes:
+      # 运行时数据（openos.db、homes/ 用户沙箱）持久化到命名卷
       - openos-data:/data
     environment:
       # 可选：首次启动回填 AI 配置（之后以「系统设置 → AI 服务」中的在线配置为准）
