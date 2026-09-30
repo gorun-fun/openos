@@ -7,6 +7,7 @@
 //
 // 环境变量：
 //
+//	OPENOS_GODER       off 时整体停用（不启动子进程、store 下架 goder 应用；纯业务宿主建议开启）
 //	OPENOS_GODER_BIN   goder-serve 二进制（默认 <data>/bin/goder-serve；不存在则功能关闭）
 //	OPENOS_GODER_JS    goder.js 嵌入库路径（默认 <data>/goder/goder.js）
 //	OPENOS_GODER_ADDR  goder-serve 监听地址（默认 127.0.0.1:7711）
@@ -34,6 +35,9 @@ type Manager struct {
 	addr    string
 	ghBin   string
 	dataDir string
+	// disabled：OPENOS_GODER=off 时整体停用（纯业务宿主无需 AI IDE，
+	// 同时 store 侧会下架 goder 应用，前端也不再种快捷方式）
+	disabled bool
 
 	mu      sync.Mutex
 	cmd     *exec.Cmd
@@ -47,11 +51,15 @@ type Manager struct {
 // New 创建管理器；二进制不存在时 available=false（前端显示引导）。
 func New(dataDir string) *Manager {
 	m := &Manager{
-		binPath: envOr("OPENOS_GODER_BIN", filepath.Join(dataDir, "bin", "goder-serve")),
-		jsPath:  envOr("OPENOS_GODER_JS", filepath.Join(dataDir, "goder", "goder.js")),
-		addr:    envOr("OPENOS_GODER_ADDR", "127.0.0.1:7711"),
-		ghBin:   envOr("OPENOS_GH_BIN", "gh"),
-		dataDir: dataDir,
+		binPath:  envOr("OPENOS_GODER_BIN", filepath.Join(dataDir, "bin", "goder-serve")),
+		jsPath:   envOr("OPENOS_GODER_JS", filepath.Join(dataDir, "goder", "goder.js")),
+		addr:     envOr("OPENOS_GODER_ADDR", "127.0.0.1:7711"),
+		ghBin:    envOr("OPENOS_GH_BIN", "gh"),
+		dataDir:  dataDir,
+		disabled: os.Getenv("OPENOS_GODER") == "off",
+	}
+	if m.disabled {
+		m.lastErr = "goder 已通过 OPENOS_GODER=off 停用"
 	}
 	return m
 }
@@ -68,8 +76,11 @@ func (m *Manager) JSAvailable() bool {
 	return err == nil && !st.IsDir()
 }
 
-// Start 拉起 goder-serve 子进程（幂等；崩溃自动重启）。
+// Start 拉起 goder-serve 子进程（幂等；崩溃自动重启）。OPENOS_GODER=off 时为空操作。
 func (m *Manager) Start() {
+	if m.disabled {
+		return
+	}
 	if !m.Available() {
 		m.lastErr = "未找到 goder-serve 二进制：" + m.binPath
 		return
@@ -158,11 +169,21 @@ func (m *Manager) Ready() bool {
 // Status 状态汇总（前端引导用）。
 func (m *Manager) Status() map[string]any {
 	return map[string]any{
-		"available": m.Available() && m.JSAvailable(),
+		"available": !m.disabled && m.Available() && m.JSAvailable(),
 		"running":   m.Ready(),
+		"disabled":  m.disabled,
 		"addr":      m.addr,
 		"error":     m.lastErr,
 	}
+}
+
+// DeleteUserData 删除某用户的 goder 会话数据目录（header 身份模式下按 UID 分目录；
+// 删用户时级联清理，目录不存在时为空操作）。
+func (m *Manager) DeleteUserData(username string) {
+	if username == "" {
+		return
+	}
+	_ = os.RemoveAll(filepath.Join(m.dataDir, "goder", "serve-data", filepath.Base(username)))
 }
 
 // ---- HTTP ----

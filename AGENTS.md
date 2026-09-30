@@ -32,14 +32,16 @@ cd web && npm run typecheck    # vue-tsc --noEmit（仓库无 ESLint/Prettier，
 - **Vite 代理**：`/api`、`/goder-api`、`/vendor`、`/ws` → `http://127.0.0.1:8081`。
 - **SQLite 用 modernc 纯 Go 驱动**（WAL 模式），因此 CGO_ENABLED=0 可交叉编译——不要换成 mattn/go-sqlite3。
 - **goder 集成**遵循官方嵌入约定（`goder/docs/embedding.md`）：每用户独立 gh server 子进程，`/goder-api/*` 反代时先剥离外部伪造的 `X-GRF-*` 头再注入身份；二进制缺失时自动降级（应用内显示部署引导），不要让缺失变成启动错误。
-- **宿主应用框架化**（方式三集成，见 README「宿主应用集成」）：`web/src/framework.ts` 的 `createOpenOS(opts)` 是宿主组壳入口（注入业务 App/图标/品牌/SSO 登录/菜单栏扩展），`web/src/main.ts` 是独立部署薄壳；壳配置单例在 `web/src/shell.ts`，改动 LoginScreen/MenuBar/App 的登录与品牌逻辑时读它。令牌交换端点 `POST /api/auth/exchange` 由 `OPENOS_EXCHANGE_SECRET` 守护（空=禁用），自动开通的用户密码为随机值、只能经宿主登录；角色放开为安全字符集的自定义角色（admin 语义仅 `RequireAdmin` 认定），授权矩阵接口动态返回全部已出现角色。
+- **宿主应用框架化**（方式三集成，见 README「宿主应用集成」）：`web/src/framework.ts` 的 `createOpenOS(opts)` 是宿主组壳入口（注入业务 App/图标/品牌/SSO 登录/菜单栏扩展/主题色/壁纸/Dock 排序/应用菜单/自定义小组件），`web/src/main.ts` 是独立部署薄壳；壳配置单例在 `web/src/shell.ts`，改动 LoginScreen/MenuBar/App 的登录与品牌逻辑时读它。framework.ts 同时是公共 API 面（导出 bus/api/fsApi/ui/stores），宿主不应深入内部路径。令牌交换端点 `POST /api/auth/exchange` 由 `OPENOS_EXCHANGE_SECRET` 守护（空=禁用；`OPENOS_EXCHANGE_ROLES` 可加角色白名单），自动开通的用户密码为随机值、只能经宿主登录；角色放开为安全字符集的自定义角色（admin 语义仅 `RequireAdmin` 认定），授权矩阵接口动态返回全部已出现角色；`POST /api/users/sync` 为宿主批量幂等同步用户（角色/显示名/禁用态）。
+- **功能裁剪与数据边界**（宿主模式：SQLite 只留演示数据 + 每用户界面设置）：`OPENOS_VFS=off` 下架 VFS/终端类内置应用且 `/api/fs/*` 一律 503（vfs 包 `Guard` 包装 + `store.WithoutVFS()` 裁剪种子）；`OPENOS_GODER=off` 停用 goder；`OPENOS_SEED_DEMO=0` 关闭演示账号与示例文件。jwt_secret 在 `system_kv` 表（勿再放 user_settings，旧值有迁移）；audit/chat 按保留期清理（`OPENOS_AUDIT/CHAT_RETENTION_DAYS`，main.go `scheduleRetention`，默认 90 天）；删用户经 auth 的 onUserDeleted 钩子级联清磁盘（homes/ + goder serve-data）；新建用户 token_version 以 Unix 秒初始化（防删号重建后旧令牌复活）；用户禁用（users.disabled）全链路生效（登录 403/REST 401/WS 踢线）。
 - **应用列表 JSON 恒为数组**：`ListApps`/`ListAppsForRole` 空结果返回 `[]` 而非 `null`（前端按数组消费）。`apps.hidden` 标记的应用可编程打开但不出现在启动台/Dock（apps store 的 `visible` getter）。
 - **安全不变量**：VFS 严格限制在 `/home/<用户>`（单文件 ≤8MB、配额 100MB）；JWT 带 token_version，改角色/密码/删用户必须令旧令牌失效；真实终端默认沙箱（10s 超时、64KB 截断）；AI 密钥仅存服务端、接口返回脱敏。改动这些区域前先读 README 的「安全说明」。
 
 ## 已知事项
 
-- 默认账号：admin/admin123、user/user123、guest/guest123（auth 包 `SeedDefaults` 种子）。
-- 关键环境变量：`OPENOS_ADDR`（默认 127.0.0.1:8081）、`OPENOS_DATA`、`OPENOS_DIST`、`OPENOS_JWT_SECRET`、`OPENOS_EXCHANGE_SECRET`（宿主令牌交换密钥，空=禁用）、`OPENOS_AI_BASE_URL/API_KEY/MODEL`、`OPENOS_REAL_SHELL`（off/full）、`OPENOS_GODER_*`。
+- 默认账号：admin/admin123、user/user123、guest/guest123（auth 包 `SeedDefaults` 种子；`OPENOS_SEED_DEMO=0` 关闭）。
+- 关键环境变量：`OPENOS_ADDR`（默认 127.0.0.1:8081）、`OPENOS_DATA`、`OPENOS_DIST`、`OPENOS_JWT_SECRET`、`OPENOS_EXCHANGE_SECRET`（宿主令牌交换密钥，空=禁用）、`OPENOS_EXCHANGE_ROLES`（交换角色白名单）、`OPENOS_VFS`（off=下架文件系统类应用）、`OPENOS_GODER`（off=停用 goder）、`OPENOS_SEED_DEMO`（0=关闭演示数据）、`OPENOS_AI_BASE_URL/API_KEY/MODEL`、`OPENOS_REAL_SHELL`（off/full）、`OPENOS_GODER_*`、`OPENOS_AUDIT_RETENTION_DAYS`/`OPENOS_CHAT_RETENTION_DAYS`（保留期，默认 90，0=永久）。
+- 前端状态边界：便签内容以服务端 user_settings 的 `notes` 键为权威源（localStorage 仅缓存 + 一次性迁移），勿再只写 localStorage；壁纸列表是 desktop store 的 `wallpapers` 状态（宿主可注入），`DEFAULT_WALLPAPERS` 仅为缺省值；桌面小组件统一经 `desktop/widgetRegistry.ts` 注册（内置三件同通道），右键菜单按注册表动态渲染。
 - WebSocket 鉴权走查询参数 `?token=<jwt>`（浏览器 WS 无法带 header）。
 - `make goder` 从 `https://git.gorun.fun/share/goder.git` 克隆源码到仓库内 `.goder-src/`（已 gitignore；`GODER_REPO`/`GODER_SRC` 可覆盖，`GODER_SRC` 指向已有克隆即免拉取），需 go/npm/git；gh 是运行期依赖（PATH 上）。
 - **Docker 镜像自带 goder 全套组件**：Dockerfile 内克隆 goder 仓库编译 goder-serve/goder.js，并从 `download.gorun.fun/grf-harness/{平台}/{最新版}/gh` 下载 gh，经 `OPENOS_GODER_BIN/JS` + `OPENOS_GH_BIN` 指到 `/app/goder/`——容器部署无需跑 `make goder`。

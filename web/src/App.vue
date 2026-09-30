@@ -5,6 +5,7 @@ import { useSession } from './stores/session'
 import { shell } from './shell'
 import LoginScreen from './desktop/LoginScreen.vue'
 import DesktopShell from './desktop/Desktop.vue'
+import { OsToasts } from './ui'
 
 const session = useSession()
 
@@ -30,6 +31,8 @@ onMounted(() => {
   </div>
   <LoginScreen v-else-if="!session.user" />
   <DesktopShell v-else />
+  <!-- 全局轻提示（登录页与桌面均可触发） -->
+  <OsToasts />
 </template>
 
 <style scoped>

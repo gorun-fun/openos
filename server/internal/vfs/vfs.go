@@ -66,18 +66,50 @@ type FS struct {
 	realMu    sync.Mutex
 	realCwd   map[string]string
 	homesDir  string
+
+	// disabled：OPENOS_VFS=off 时整体关闭（宿主模式——业务文件交由集成方管理，
+	// OpenOS 只保留演示数据与界面设置）；seedDemo：OPENOS_SEED_DEMO=0 时不种示例文件
+	disabled bool
+	seedDemo bool
 }
 
 // New 创建服务。dataDir 用于真实终端的沙箱目录（<dataDir>/homes/<user>）。
 func New(dataDir string, db *store.DB, hub *bus.Hub, ai AIChat) *FS {
 	realShell := os.Getenv("OPENOS_REAL_SHELL") != "off" // 真实 shell 默认开启（受控执行）
-	fs := &FS{db: db, hub: hub, ai: ai, cwd: map[string]string{}, realCwd: map[string]string{}, realShell: realShell, homesDir: filepath.Join(dataDir, "homes")}
-	hub.Handle("term:*", fs.onTerminal)
+	fs := &FS{
+		db: db, hub: hub, ai: ai,
+		cwd: map[string]string{}, realCwd: map[string]string{},
+		realShell: realShell, homesDir: filepath.Join(dataDir, "homes"),
+		disabled: os.Getenv("OPENOS_VFS") == "off",
+		seedDemo: os.Getenv("OPENOS_SEED_DEMO") != "0",
+	}
+	if !fs.disabled {
+		hub.Handle("term:*", fs.onTerminal)
+	}
 	return fs
 }
 
+// Disabled 文件系统是否被整体关闭（OPENOS_VFS=off）。
+func (f *FS) Disabled() bool { return f.disabled }
+
+// Guard 包裹 fs REST 处理器：整体关闭时统一返回 503（防御纵深——即使前端残留旧引用）。
+func (f *FS) Guard(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if f.disabled {
+			http.Error(w, `{"error":"文件系统未启用（OPENOS_VFS=off）"}`, http.StatusServiceUnavailable)
+			return
+		}
+		h(w, r)
+	}
+}
+
 // RealShellEnabled 真实终端是否可用（状态展示用）。
-func (f *FS) RealShellEnabled() bool { return f.realShell }
+func (f *FS) RealShellEnabled() bool { return f.realShell && !f.disabled }
+
+// DeleteHome 删除用户的真实终端沙箱目录（删用户时级联清理）。
+func (f *FS) DeleteHome(user string) {
+	_ = os.RemoveAll(filepath.Join(f.homesDir, filepath.Base(user)))
+}
 
 // ---- 路径 ----
 
@@ -97,8 +129,12 @@ func clean(user, p string) (string, error) {
 
 // ---- REST Handlers ----
 
-// EnsureHome 为用户初始化 home 目录与示例文件。
+// EnsureHome 为用户初始化 home 目录与示例文件（文件系统整体关闭时跳过；
+// OPENOS_SEED_DEMO=0 时只建目录结构，不种欢迎文档与示例表格）。
 func (f *FS) EnsureHome(user string) {
+	if f.disabled {
+		return
+	}
 	home := homeOf(user)
 	var n int
 	f.db.QueryRow(`SELECT COUNT(*) FROM files WHERE owner=?`, user).Scan(&n)
@@ -109,9 +145,12 @@ func (f *FS) EnsureHome(user string) {
 	f.db.Exec(`INSERT OR IGNORE INTO files(owner,path,is_dir) VALUES(?,?,1)`, user, home)
 	f.db.Exec(`INSERT OR IGNORE INTO files(owner,path,is_dir) VALUES(?,?,1)`, user, home+"/文档")
 	f.db.Exec(`INSERT OR IGNORE INTO files(owner,path,is_dir) VALUES(?,?,1)`, user, home+"/表格")
-	f.db.Exec(`INSERT OR IGNORE INTO files(owner,path,content) VALUES(?,?,0,?)`, user, home+"/欢迎.md",
+	if !f.seedDemo {
+		return
+	}
+	f.db.Exec(`INSERT OR IGNORE INTO files(owner,path,is_dir,content) VALUES(?,?,0,?)`, user, home+"/欢迎.md",
 		"# 欢迎使用 OpenOS\n\n这是一份示例文档，可由「文档」应用打开编辑。\n\n- 前后端分离：Go + Vite\n- 事件总线通信\n- 多用户多角色\n")
-	f.db.Exec(`INSERT OR IGNORE INTO files(owner,path,content) VALUES(?,?,0,?)`, user, home+"/表格/收支.csv",
+	f.db.Exec(`INSERT OR IGNORE INTO files(owner,path,is_dir,content) VALUES(?,?,0,?)`, user, home+"/表格/收支.csv",
 		"项目,收入,支出\n工资,12000,0\n房租,0,3500\n餐饮,0,1800\n结余,=SUM(B2:B3)-SUM(C2:C4),\n")
 }
 
@@ -399,6 +438,9 @@ func (f *FS) ensureDirs(user, file string) {
 // ---- 终端（事件总线 topic: term:<user>）----
 
 func (f *FS) onTerminal(env bus.Envelope, reply func(string, any)) {
+	if f.disabled {
+		return // 防御：正常情况下 New 不会注册该处理器
+	}
 	topic := env.Topic
 	user := strings.TrimPrefix(topic, "term:")
 	isReal := strings.HasSuffix(topic, ":real")

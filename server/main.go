@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -33,21 +34,43 @@ import (
 func main() {
 	startedAt := time.Now()
 	dataDir := envOr("OPENOS_DATA", "data")
-	db, err := store.Open(dataDir)
+	// 功能裁剪（宿主集成：OPENOS_VFS=off / OPENOS_GODER=off 时下架对应内置应用与能力）
+	var storeOpts []store.Option
+	if envOr("OPENOS_VFS", "") == "off" {
+		storeOpts = append(storeOpts, store.WithoutVFS())
+	}
+	if envOr("OPENOS_GODER", "") == "off" {
+		storeOpts = append(storeOpts, store.WithoutGoder())
+	}
+	db, err := store.Open(dataDir, storeOpts...)
 	if err != nil {
 		log.Fatal("打开数据库失败:", err)
 	}
 
 	authSvc := auth.New(db, os.Getenv("OPENOS_JWT_SECRET"))
 	authSvc.SetExchangeSecret(os.Getenv("OPENOS_EXCHANGE_SECRET"))
+	authSvc.SetExchangeRoleWhitelist(os.Getenv("OPENOS_EXCHANGE_ROLES"))
 	if err := authSvc.SeedDefaults(); err != nil {
 		log.Fatal("初始化默认账号失败:", err)
 	}
 	hub := bus.New()
+	// 总线连接周期复核（30s）：令牌吊销（改角色/改密/删用户/禁用）或过期后踢下线，
+	// 客户端会用本地（可能已续期）的令牌自动重连，令牌确实失效则重连被 401 拒绝。
+	hub.SetRevalidator(func(user, role, token string) bool {
+		id, err := authSvc.VerifySession(token)
+		return err == nil && id.Username == user && id.Role == role
+	})
 	aiSvc := ai.New(db)
 	fs := vfs.New(dataDir, db, hub, aiSvc.Ask)
 	goderMgr := goder.New(dataDir)
-	goderMgr.Start() // 二进制不存在时自动降级（available=false）
+	goderMgr.Start() // OPENOS_GODER=off 或二进制缺失时自动降级（available=false）
+	// 删除用户后的级联磁盘清理：真实终端沙箱 + goder 会话数据
+	authSvc.SetUserDeletedHook(func(name string) {
+		fs.DeleteHome(name)
+		goderMgr.DeleteUserData(name)
+	})
+	// 数据保留期（防无限增长；0 = 永久保留）：启动清理一次，此后每天一次
+	go scheduleRetention(db)
 
 	mux := http.NewServeMux()
 
@@ -64,18 +87,15 @@ func main() {
 	// 宿主应用令牌交换（仅 OPENOS_EXCHANGE_SECRET 配置后可用）
 	mux.HandleFunc("POST /api/auth/exchange", authSvc.Exchange)
 
-	// ---- WebSocket 事件总线（token 走查询参数） ----
+	// ---- WebSocket 事件总线（token 走查询参数；升级时全量校验用户态，与 REST 同一套判定） ----
 	mux.HandleFunc("GET /ws", func(w http.ResponseWriter, r *http.Request) {
-		claims, err := authSvc.Verify(r.URL.Query().Get("token"))
+		token := r.URL.Query().Get("token")
+		id, err := authSvc.VerifySession(token)
 		if err != nil {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		q := r.URL.Query()
-		q.Set("user", claims.Sub)
-		q.Set("role", claims.Role)
-		r.URL.RawQuery = q.Encode()
-		hub.ServeWS(w, r)
+		hub.ServeWS(w, r, id.Username, id.Role, token)
 	})
 
 	// ---- 需要登录的接口 ----
@@ -161,9 +181,10 @@ func main() {
 		writeJSON(w, map[string]string{"ok": "1"})
 	})
 
-	// 用户管理（admin）
+	// 用户管理（admin；sync 为宿主批量幂等同步）
 	authed.HandleFunc("GET /api/users", auth.RequireAdmin(http.HandlerFunc(authSvc.ListUsers)).ServeHTTP)
 	authed.HandleFunc("POST /api/users", auth.RequireAdmin(http.HandlerFunc(authSvc.CreateUser)).ServeHTTP)
+	authed.HandleFunc("POST /api/users/sync", auth.RequireAdmin(http.HandlerFunc(authSvc.SyncUsers)).ServeHTTP)
 	authed.HandleFunc("PUT /api/users/{name}", auth.RequireAdmin(http.HandlerFunc(authSvc.UpdateUser)).ServeHTTP)
 	authed.HandleFunc("DELETE /api/users/{name}", auth.RequireAdmin(http.HandlerFunc(authSvc.DeleteUser)).ServeHTTP)
 
@@ -180,17 +201,17 @@ func main() {
 		writeJSON(w, db.Stats(startedAt))
 	})).ServeHTTP)
 
-	// 虚拟文件系统
-	authed.HandleFunc("GET /api/fs/list", fs.List)
-	authed.HandleFunc("GET /api/fs/read", fs.Read)
-	authed.HandleFunc("GET /api/fs/raw", fs.Raw)
-	authed.HandleFunc("GET /api/fs/usage", fs.Usage)
-	authed.HandleFunc("POST /api/fs/upload", fs.Upload)
-	authed.HandleFunc("PUT /api/fs/write", fs.Write)
-	authed.HandleFunc("POST /api/fs/mkdir", fs.Mkdir)
-	authed.HandleFunc("POST /api/fs/touch", fs.Touch)
-	authed.HandleFunc("DELETE /api/fs/remove", fs.Remove)
-	authed.HandleFunc("POST /api/fs/rename", fs.Rename)
+	// 虚拟文件系统（OPENOS_VFS=off 时统一 503）
+	authed.HandleFunc("GET /api/fs/list", fs.Guard(fs.List))
+	authed.HandleFunc("GET /api/fs/read", fs.Guard(fs.Read))
+	authed.HandleFunc("GET /api/fs/raw", fs.Guard(fs.Raw))
+	authed.HandleFunc("GET /api/fs/usage", fs.Guard(fs.Usage))
+	authed.HandleFunc("POST /api/fs/upload", fs.Guard(fs.Upload))
+	authed.HandleFunc("PUT /api/fs/write", fs.Guard(fs.Write))
+	authed.HandleFunc("POST /api/fs/mkdir", fs.Guard(fs.Mkdir))
+	authed.HandleFunc("POST /api/fs/touch", fs.Guard(fs.Touch))
+	authed.HandleFunc("DELETE /api/fs/remove", fs.Guard(fs.Remove))
+	authed.HandleFunc("POST /api/fs/rename", fs.Guard(fs.Rename))
 
 	// 用户个性化设置
 	authed.HandleFunc("GET /api/settings", func(w http.ResponseWriter, r *http.Request) {
@@ -410,6 +431,42 @@ func clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// scheduleRetention 数据保留期清理：审计日志与 AI 对话历史（含终端伪用户 __term__
+// 的孤儿数据）按天数删除。OPENOS_AUDIT_RETENTION_DAYS / OPENOS_CHAT_RETENTION_DAYS
+// 控制（默认 90 天，0 = 永久保留）。启动即清理一次，此后每天一次。
+func scheduleRetention(db *store.DB) {
+	run := func() {
+		if d := envDays("OPENOS_AUDIT_RETENTION_DAYS", 90); d > 0 {
+			if n, err := db.PruneAuditBefore(time.Now().AddDate(0, 0, -d)); err == nil && n > 0 {
+				log.Printf("保留期清理：audit_log 删除 %d 行（%d 天前）", n, d)
+			}
+		}
+		if d := envDays("OPENOS_CHAT_RETENTION_DAYS", 90); d > 0 {
+			if n, err := db.PruneChatBefore(time.Now().AddDate(0, 0, -d)); err == nil && n > 0 {
+				log.Printf("保留期清理：chat_messages 删除 %d 行（%d 天前）", n, d)
+			}
+		}
+	}
+	run()
+	t := time.NewTicker(24 * time.Hour)
+	defer t.Stop()
+	for range t.C {
+		run()
+	}
+}
+
+func envDays(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return def
+	}
+	return n
 }
 
 // spaHandler 前端路由回退到 index.html。

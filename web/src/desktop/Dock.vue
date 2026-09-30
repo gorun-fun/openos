@@ -3,12 +3,24 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useApps } from '../stores/apps'
 import { useWindows } from '../stores/windows'
 import { useDesktop } from '../stores/desktop'
+import { shell } from '../shell'
 import AppIcon from '../ui/AppIcon.vue'
 
 const emit = defineEmits<{ launchpad: [] }>()
 const apps = useApps()
 const windows = useWindows()
 const desktop = useDesktop()
+
+/** Dock 应用：宿主经 createOpenOS({ dockOrder }) 指定排序，未列出的排在其后按服务器顺序。 */
+const dockApps = computed(() => {
+  const order = shell.dockOrder
+  if (!order.length) return apps.visible
+  const rank = (id: string) => {
+    const i = order.indexOf(id)
+    return i === -1 ? order.length : i
+  }
+  return [...apps.visible].sort((a, b) => rank(a.id) - rank(b.id) || a.id.localeCompare(b.id))
+})
 
 function dockClick(appId: string) {
   const wins = windows.list.filter((w) => w.appId === appId)
@@ -137,7 +149,7 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
       </button>
       <div class="dock-sep" />
       <button
-        v-for="app in apps.visible" :key="app.id"
+        v-for="app in dockApps" :key="app.id"
         class="dock-item"
         :data-name="app.name"
         :aria-label="app.name"

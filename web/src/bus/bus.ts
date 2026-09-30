@@ -9,6 +9,9 @@ import { getToken } from '../api/client'
 
 type Handler = (payload: any, from: string, topic: string) => void
 
+// 默认远程订阅的系统主题；业务/第三方主题在 bus.on 注册时自动补远程订阅
+const DEFAULT_REMOTE_SUBS = ['sys:*', 'fs:changed', 'app:*', 'chat:*']
+
 type Envelope = {
   action?: 'sub' | 'unsub' | 'pub'
   topics?: string[]
@@ -25,13 +28,15 @@ class Bus {
   private retry = 0
   private closed = false
   private me = ''
+  /** 已远程订阅的主题集合（重连重放的唯一事实来源） */
+  private remoteSubs = new Set<string>()
 
   /** 连接服务端总线（登录后调用）。 */
   connect(user: string) {
     this.me = user
     this.closed = false
+    this.remoteSubs = new Set([...DEFAULT_REMOTE_SUBS, ...this.handlers.keys()])
     this.open()
-    this.subscribeRemote(['sys:*', 'fs:changed', 'app:*', 'chat:*'])
   }
 
   private open() {
@@ -41,8 +46,7 @@ class Bus {
     ws.onopen = () => {
       this.retry = 0
       // 重连后重放订阅与积压消息
-      const subs = this.collectPatterns()
-      if (subs.length) this.send({ action: 'sub', topics: subs })
+      if (this.remoteSubs.size) this.send({ action: 'sub', topics: [...this.remoteSubs] })
       while (this.queue.length) this.send(this.queue.shift()!)
     }
     ws.onmessage = (ev) => {
@@ -66,11 +70,24 @@ class Bus {
     this.ws = null
   }
 
-  /** 订阅主题。pattern 支持结尾 "*" 通配。返回取消函数。 */
+  /** 订阅主题。pattern 支持结尾 "*" 通配。返回取消函数。
+   *  注册新主题时会自动向服务端补发远程订阅（否则要等下次重连才能收到推送）。 */
   on(pattern: string, fn: Handler): () => void {
     if (!this.handlers.has(pattern)) this.handlers.set(pattern, new Set())
     this.handlers.get(pattern)!.add(fn)
-    return () => { this.handlers.get(pattern)?.delete(fn) }
+    this.subscribePattern(pattern)
+    return () => {
+      const set = this.handlers.get(pattern)
+      set?.delete(fn)
+      if (set && set.size === 0) {
+        this.handlers.delete(pattern)
+        // 本地无消费者且非默认系统主题 → 退订远程
+        if (!DEFAULT_REMOTE_SUBS.includes(pattern)) {
+          this.remoteSubs.delete(pattern)
+          if (this.ws?.readyState === WebSocket.OPEN) this.send({ action: 'unsub', topics: [pattern] })
+        }
+      }
+    }
   }
 
   /** 一次性订阅。 */
@@ -101,17 +118,11 @@ class Bus {
     this.ws?.send(JSON.stringify(env))
   }
 
-  private collectPatterns(): string[] {
-    // 重连后需要向服务端重放全部远程订阅（含默认系统主题）
-    const remote = new Set<string>(['sys:*', 'fs:changed', 'app:*', 'chat:*'])
-    for (const p of this.handlers.keys()) remote.add(p)
-    return [...remote]
-  }
-
-  private subscribeRemote(topics: string[]) {
-    const env: Envelope = { action: 'sub', topics }
-    if (this.ws?.readyState === WebSocket.OPEN) this.send(env)
-    else this.queue.push(env)
+  private subscribePattern(p: string) {
+    if (this.remoteSubs.has(p)) return
+    this.remoteSubs.add(p)
+    // 未连接时无需入队：onopen 会按 remoteSubs 全量重放
+    if (this.ws?.readyState === WebSocket.OPEN) this.send({ action: 'sub', topics: [p] })
   }
 
   private dispatchLocal(topic: string, payload: any, from: string) {

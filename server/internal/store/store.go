@@ -39,6 +39,7 @@ type User struct {
 	Username    string `json:"username"`
 	DisplayName string `json:"displayName"`
 	Role        string `json:"role"`
+	Disabled    bool   `json:"disabled"`
 	CreatedAt   string `json:"createdAt"`
 }
 
@@ -85,6 +86,7 @@ CREATE TABLE IF NOT EXISTS users (
   role TEXT NOT NULL DEFAULT 'user',
   display_name TEXT NOT NULL DEFAULT '',
   token_version INTEGER NOT NULL DEFAULT 0,
+  disabled INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS apps (
@@ -117,6 +119,10 @@ CREATE TABLE IF NOT EXISTS user_settings (
   key TEXT NOT NULL,
   value TEXT NOT NULL,
   PRIMARY KEY (username, key)
+);
+CREATE TABLE IF NOT EXISTS system_kv (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS ai_config (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -159,6 +165,15 @@ var builtinApps = []AppDef{
 	{ID: "welcome", Name: "使用指南", Icon: "welcome", Category: "系统", Builtin: true, Width: 760, Height: 580},
 }
 
+// vfsAppIDs 依赖虚拟文件系统/终端的内置应用（OPENOS_VFS=off 时整体下架，
+// 业务宿主的文件与文档数据交由集成方自己管理）。
+var vfsAppIDs = map[string]bool{
+	"terminal": true, "files": true, "docs": true, "sheets": true, "slides": true, "pdf": true,
+}
+
+// goderAppID goder 应用（OPENOS_GODER=off 时下架，纯业务宿主无需 AI IDE）。
+const goderAppID = "goder"
+
 // 默认角色 → 应用授权矩阵。
 var defaultRoleApps = map[string][]string{
 	"admin": {"terminal", "files", "calculator", "settings", "docs", "sheets", "slides", "pdf", "goder", "notes", "welcome"},
@@ -169,8 +184,24 @@ var defaultRoleApps = map[string][]string{
 // StorageQuota 每用户虚拟文件空间上限（字节，按内容长度估算）。
 const StorageQuota = 100 * 1024 * 1024
 
+// ---- 功能裁剪选项（宿主集成：SQLite 只保留演示数据与每用户界面设置） ----
+
+type config struct {
+	withoutVFS   bool
+	withoutGoder bool
+}
+
+// Option 功能裁剪选项，配合 Open 使用。
+type Option func(*config)
+
+// WithoutVFS 下架 VFS/终端类内置应用（OPENOS_VFS=off 时由 main 传入）。
+func WithoutVFS() Option { return func(c *config) { c.withoutVFS = true } }
+
+// WithoutGoder 下架 goder 应用（OPENOS_GODER=off 时由 main 传入）。
+func WithoutGoder() Option { return func(c *config) { c.withoutGoder = true } }
+
 // Open 打开（或创建）数据库并完成迁移与种子数据。
-func Open(dir string) (*DB, error) {
+func Open(dir string, opts ...Option) (*DB, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
@@ -184,10 +215,17 @@ func Open(dir string) (*DB, error) {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	db := &DB{d}
+	cfg := &config{}
+	for _, o := range opts {
+		o(cfg)
+	}
 	if err := db.migrateColumns(); err != nil {
 		return nil, err
 	}
-	if err := db.seed(); err != nil {
+	if err := db.migrateSystemKV(); err != nil {
+		return nil, err
+	}
+	if err := db.seed(cfg); err != nil {
 		return nil, err
 	}
 	return db, nil
@@ -198,6 +236,7 @@ func (db *DB) migrateColumns() error {
 	type col struct{ table, name, ddl string }
 	for _, c := range []col{
 		{"users", "token_version", "ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0"},
+		{"users", "disabled", "ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0"},
 		{"files", "is_binary", "ALTER TABLE files ADD COLUMN is_binary INTEGER NOT NULL DEFAULT 0"},
 		{"apps", "hidden", "ALTER TABLE apps ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0"},
 	} {
@@ -214,21 +253,46 @@ func (db *DB) migrateColumns() error {
 	return nil
 }
 
+// migrateSystemKV 迁移历史遗留的系统级键：jwt_secret 原挂在 user_settings 的
+// 伪用户 __system 名下，与「用户界面设置」数据混存，迁入独立的 system_kv 表。
+func (db *DB) migrateSystemKV() error {
+	v, err := db.GetUserSetting("__system", "jwt_secret")
+	if err != nil || v == "" {
+		return err
+	}
+	if err := db.SetSystemKV("jwt_secret", v); err != nil {
+		return err
+	}
+	_, err = db.Exec(`DELETE FROM user_settings WHERE username='__system' AND key='jwt_secret'`)
+	return err
+}
+
 // seed 幂等初始化：内置应用一律 INSERT OR IGNORE（升级新增的 app 也会补上）；
 // 仅对**本次新增**的内置应用按默认矩阵补授权——不覆盖管理员已有的定制（如移除某 app）。
-func (db *DB) seed() error {
+// cfg 为功能裁剪：VFS / goder 关闭时对应内置应用不注册（存量则下架回收）。
+func (db *DB) seed(cfg *config) error {
+	apps := make([]AppDef, 0, len(builtinApps))
 	for _, a := range builtinApps {
+		if cfg.withoutVFS && vfsAppIDs[a.ID] {
+			continue
+		}
+		if cfg.withoutGoder && a.ID == goderAppID {
+			continue
+		}
+		apps = append(apps, a)
+	}
+	for _, a := range apps {
 		var exists int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM apps WHERE id=?`, a.ID).Scan(&exists); err != nil {
 			return err
 		}
-		cfg := ""
+		cfgJSON := ""
 		if len(a.Config) > 0 {
-			cfg = string(a.Config)
+			cfgJSON = string(a.Config)
 		}
 		if _, err := db.Exec(`INSERT INTO apps(id,name,icon,category,builtin,hidden,config,width,height) VALUES(?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(id) DO UPDATE SET name=excluded.name, icon=excluded.icon, width=excluded.width, height=excluded.height`,
-			a.ID, a.Name, a.Icon, a.Category, boolInt(a.Builtin), boolInt(a.Hidden), cfg, a.Width, a.Height); err != nil {
+			a.ID, a.Name, a.Icon, a.Category, boolInt(a.Builtin), boolInt(a.Hidden), cfgJSON, a.Width, a.Height); err != nil {
 			return err
 		}
 		if exists == 0 {
@@ -244,7 +308,11 @@ func (db *DB) seed() error {
 			}
 		}
 	}
-	// 首次建库：全量默认授权
+	// 首次建库：全量默认授权（仅限当前保留的应用集）
+	kept := make(map[string]bool, len(apps))
+	for _, a := range apps {
+		kept[a.ID] = true
+	}
 	var n int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM role_apps`).Scan(&n); err != nil {
 		return err
@@ -252,18 +320,16 @@ func (db *DB) seed() error {
 	if n == 0 {
 		for role, ids := range defaultRoleApps {
 			for _, id := range ids {
-				if _, err := db.Exec(`INSERT OR IGNORE INTO role_apps(role,app_id) VALUES(?,?)`, role, id); err != nil {
-					return err
+				if kept[id] {
+					if _, err := db.Exec(`INSERT OR IGNORE INTO role_apps(role,app_id) VALUES(?,?)`, role, id); err != nil {
+						return err
+					}
 				}
 			}
 		}
 	}
-	// 下架清理：已从 builtinApps 移除的内置应用（如 "ai"）从旧库删除，
+	// 下架清理：已从 builtinApps 移除（或被功能裁剪排除）的内置应用从旧库删除，
 	// 连同授权一并回收；仅动 builtin=1 的行，不影响管理员自建的第三方应用。
-	kept := make(map[string]bool, len(builtinApps))
-	for _, a := range builtinApps {
-		kept[a.ID] = true
-	}
 	rows, err := db.Query(`SELECT id FROM apps WHERE builtin=1`)
 	if err != nil {
 		return err
@@ -393,30 +459,73 @@ type UserAuthInfo struct {
 	Salt           string
 	DisplayName    string
 	TokenVersion   int64
+	Disabled       bool
 }
 
 // GetUserAuth 按用户名取认证信息。
 func (db *DB) GetUserAuth(username string) (UserAuthInfo, error) {
 	var u UserAuthInfo
-	err := db.QueryRow(`SELECT role,password_hash,salt,display_name,token_version FROM users WHERE username=?`, username).
-		Scan(&u.Role, &u.PasswordHash, &u.Salt, &u.DisplayName, &u.TokenVersion)
+	var disabled int
+	err := db.QueryRow(`SELECT role,password_hash,salt,display_name,token_version,disabled FROM users WHERE username=?`, username).
+		Scan(&u.Role, &u.PasswordHash, &u.Salt, &u.DisplayName, &u.TokenVersion, &disabled)
 	if err == sql.ErrNoRows {
 		return u, nil
 	}
 	u.Exists = err == nil
+	u.Disabled = disabled != 0
 	return u, err
 }
 
-// CountAdmins 管理员数量（用于最后管理员保护）。
+// CountAdmins 启用中的管理员数量（用于最后管理员保护）。
 func (db *DB) CountAdmins() int {
 	var n int
-	db.QueryRow(`SELECT COUNT(*) FROM users WHERE role='admin'`).Scan(&n)
+	db.QueryRow(`SELECT COUNT(*) FROM users WHERE role='admin' AND disabled=0`).Scan(&n)
 	return n
 }
 
 // BumpTokenVersion 使用户已签发的 JWT 全部失效。
 func (db *DB) BumpTokenVersion(username string) {
 	db.Exec(`UPDATE users SET token_version = token_version + 1 WHERE username=?`, username)
+}
+
+// ---- 系统级键值（与用户设置分离：清理用户设置不应波及系统配置） ----
+
+// GetSystemKV 读取系统级键值，不存在返回空串。
+func (db *DB) GetSystemKV(key string) (string, error) {
+	var v string
+	err := db.QueryRow(`SELECT value FROM system_kv WHERE key=?`, key).Scan(&v)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return v, err
+}
+
+// SetSystemKV 写入系统级键值。
+func (db *DB) SetSystemKV(key, value string) error {
+	_, err := db.Exec(`INSERT INTO system_kv(key,value) VALUES(?,?)
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
+	return err
+}
+
+// ---- 数据保留期（防无限增长） ----
+
+// PruneAuditBefore 删除 cutoff 之前的审计日志，返回删除行数。
+// login.fail 是最大来源（公开接口 + 限流），无保留期时单日可膨胀数十万行。
+func (db *DB) PruneAuditBefore(cutoff time.Time) (int64, error) {
+	return db.pruneBefore("audit_log", cutoff)
+}
+
+// PruneChatBefore 删除 cutoff 之前的 AI 对话历史（含终端伪用户 __term__ 的孤儿数据），返回删除行数。
+func (db *DB) PruneChatBefore(cutoff time.Time) (int64, error) {
+	return db.pruneBefore("chat_messages", cutoff)
+}
+
+func (db *DB) pruneBefore(table string, cutoff time.Time) (int64, error) {
+	res, err := db.Exec(`DELETE FROM `+table+` WHERE created_at < ?`, cutoff.UTC().Format("2006-01-02 15:04:05"))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // SystemStats 系统信息。

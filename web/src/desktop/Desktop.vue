@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useSession } from '../stores/session'
-import { useDesktop, WALLPAPERS } from '../stores/desktop'
+import { useDesktop } from '../stores/desktop'
 import { useApps } from '../stores/apps'
 import { useWindows } from '../stores/windows'
 import { bus } from '../bus/bus'
@@ -13,6 +13,8 @@ import Shortcuts from './Shortcuts.vue'
 import Widgets from './Widgets.vue'
 import { snapPreview } from './snapState'
 import { fsApi } from '../api/client'
+import { toast } from '../ui/toast'
+import { widgetDefs, widgetDef } from './widgetRegistry'
 
 const session = useSession()
 const desktop = useDesktop()
@@ -183,19 +185,10 @@ function restoreWindows(): boolean {
   } catch { return false }
 }
 
-// ---- 轻提示 ----
-const toasts = ref<{ id: number; text: string }[]>([])
-let toastSeq = 0
-function toast(text: string) {
-  const id = ++toastSeq
-  toasts.value.push({ id, text })
-  setTimeout(() => (toasts.value = toasts.value.filter((t) => t.id !== id)), 2600)
-}
-
 // ---- 桌面右键菜单（区分目标：桌面 / 快捷方式 / 小组件）----
 type CtxTarget =
   | { kind: 'shortcut'; key: string }
-  | { kind: 'widget'; type: 'clock' | 'note' | 'monitor'; noteId?: string }
+  | { kind: 'widget'; type: string; noteId?: string }
   | null
 const ctx = ref<{ x: number; y: number; target: CtxTarget } | null>(null)
 const ctxPos = ref({ x: 0, y: 0 })
@@ -213,7 +206,7 @@ function onContext(e: MouseEvent) {
   const widgetHost = t.closest<HTMLElement>('.widget')
   const shortcutHost = t.closest<HTMLElement>('.shortcut')
   const widgetType = widgetHost?.dataset.type
-  if (widgetType === 'clock' || widgetType === 'note' || widgetType === 'monitor') {
+  if (widgetType && widgetDef(widgetType)) {
     target = { kind: 'widget', type: widgetType, noteId: widgetHost?.dataset.note || undefined }
   } else if (shortcutHost?.dataset.id) {
     target = { kind: 'shortcut', key: shortcutHost.dataset.id }
@@ -257,7 +250,7 @@ function ctxCycleNoteColor() {
 </script>
 
 <template>
-  <div class="desktop" :style="{ background: WALLPAPERS[desktop.wallpaper] }" @pointerdown="ctx = null" @contextmenu="onContext" @dragover.prevent @drop="onDrop">
+  <div class="desktop" :style="{ background: desktop.wallpapers[desktop.wallpaper] }" @pointerdown="ctx = null" @contextmenu="onContext" @dragover.prevent @drop="onDrop">
     <MenuBar @launchpad="launchpadOpen = true" />
 
     <Widgets ref="widgetsRef" />
@@ -298,26 +291,19 @@ function ctxCycleNoteColor() {
       <!-- 右键桌面 -->
       <template v-else>
         <button @click="launchpadOpen = true; ctx = null">启动台</button>
-        <button @click="windows.open('terminal'); ctx = null">打开终端</button>
-        <button @click="windows.open('files'); ctx = null">打开文件</button>
-        <button @click="windows.open('goder'); ctx = null">Goder - AI助手</button>
-        <button @click="windows.open('notes'); ctx = null">便签</button>
+        <button v-if="apps.byId('terminal')" @click="windows.open('terminal'); ctx = null">打开终端</button>
+        <button v-if="apps.byId('files')" @click="windows.open('files'); ctx = null">打开文件</button>
+        <button v-if="apps.byId('goder')" @click="windows.open('goder'); ctx = null">Goder - AI助手</button>
+        <button v-if="apps.byId('notes')" @click="windows.open('notes'); ctx = null">便签</button>
         <div class="sep" />
         <div class="ctx-group">添加小组件</div>
-        <button @click="widgetsRef?.add('clock'); ctx = null">🕐 时钟</button>
-        <button @click="widgetsRef?.add('note'); ctx = null">📝 便签</button>
-        <button @click="widgetsRef?.add('monitor'); ctx = null">📊 系统监控</button>
+        <button v-for="d in widgetDefs()" :key="d.type" @click="widgetsRef?.add(d.type); ctx = null">
+          {{ d.icon ? d.icon + ' ' : '' }}{{ d.label }}
+        </button>
         <div class="sep" />
         <button @click="desktop.setWallpaper(desktop.wallpaper + 1); ctx = null">更换壁纸</button>
         <button @click="desktop.setDark(!desktop.dark); ctx = null">切换深浅色</button>
       </template>
-    </div>
-
-    <!-- 轻提示 -->
-    <div class="toasts">
-      <transition-group name="toast">
-        <div v-for="t in toasts" :key="t.id" class="toast os-glass">{{ t.text }}</div>
-      </transition-group>
     </div>
   </div>
 </template>
@@ -352,15 +338,4 @@ function ctxCycleNoteColor() {
 .ctxmenu button:hover { background: var(--os-accent); color: #fff; }
 .ctx-group { padding: 5px 12px 3px; font-size: 11px; font-weight: 600; color: var(--os-text-secondary); }
 .sep { height: 1px; background: var(--os-border); margin: 5px 10px; }
-
-.toasts {
-  position: fixed; top: 44px; left: 50%; transform: translateX(-50%);
-  display: flex; flex-direction: column; gap: 8px; z-index: 9800; align-items: center;
-}
-.toast {
-  padding: 9px 20px; border-radius: 999px; border: 1px solid var(--os-border);
-  font-size: 13px; box-shadow: var(--os-shadow-sm), inset 0 1px 0 var(--os-highlight-edge);
-}
-.toast-enter-active, .toast-leave-active { transition: all .25s ease; }
-.toast-enter-from, .toast-leave-to { opacity: 0; transform: translateY(-10px); }
 </style>

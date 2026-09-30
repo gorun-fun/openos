@@ -14,14 +14,14 @@ export class ApiError extends Error {
   constructor(status: number, msg: string) { super(msg); this.status = status }
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const headers: Record<string, string> = {}
-  if (body !== undefined) headers['Content-Type'] = 'application/json'
+async function request<T>(method: string, path: string, body?: unknown, headers?: Record<string, string>): Promise<T> {
+  const h: Record<string, string> = { ...headers }
+  if (body !== undefined) h['Content-Type'] = 'application/json'
   const t = getToken()
-  if (t) headers['Authorization'] = 'Bearer ' + t
+  if (t) h['Authorization'] = 'Bearer ' + t
   let resp: Response
   try {
-    resp = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
+    resp = await fetch(path, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body) })
   } catch {
     throw new ApiError(0, '网络不可达，请检查服务是否运行')
   }
@@ -45,9 +45,9 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 export const api = {
-  get: <T>(path: string) => request<T>('GET', path),
-  post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),
-  put: <T>(path: string, body?: unknown) => request<T>('PUT', path, body),
+  get: <T>(path: string, headers?: Record<string, string>) => request<T>('GET', path, undefined, headers),
+  post: <T>(path: string, body?: unknown, headers?: Record<string, string>) => request<T>('POST', path, body, headers),
+  put: <T>(path: string, body?: unknown, headers?: Record<string, string>) => request<T>('PUT', path, body, headers),
   del: <T>(path: string) => request<T>('DELETE', path),
 }
 

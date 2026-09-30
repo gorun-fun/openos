@@ -1,4 +1,4 @@
-// framework.ts — OpenOS 宿主应用组合入口。
+// framework.ts — OpenOS 宿主应用组合入口与公共 API 面。
 //
 // OpenOS 定位为通用桌面基础框架：宿主应用（业务系统）不 fork 壳代码，
 // 而是在自己的入口调用 createOpenOS() 注入业务应用与登录方式：
@@ -9,10 +9,18 @@
 //     icons: { dashboard: { svg: '<svg…>' } },                     // 业务图标（可选）
 //     login: { mode: 'sso', url: '/api/auth/sso/login' },         // 接宿主单点登录
 //     brand: { name: '业务系统', logo: '🏨' },
-//     menubarExtras: PropertySwitcher,                             // 菜单栏右侧扩展
+//     menubarExtras: PropertySwitcher,                             // 菜单栏右侧扩展（可传数组）
+//     theme: { accent: '#e91e63' },                                // 主题强调色
+//     wallpapers: [ 'linear-gradient(…)' ],                        // 壁纸注入（可选）
+//     dockOrder: ['dashboard', 'rooms'],                           // Dock 排序（可选）
+//     appMenus: { rooms: [{ label: '新建房态窗口', run: () => {} }] }, // 应用菜单注入
+//     widgets: { weather: { label: '天气', icon: '🌤', component: WeatherWidget } }, // 桌面小组件
 //   })
 //
 // 独立部署时 main.ts 调用 createOpenOS()（无参），行为与框架化之前完全一致。
+//
+// 本文件同时是公共 API 面：宿主可从 '@openos/framework' 直接导入总线 / API 客户端 /
+// 组件库 / 状态仓库，无需深入内部路径。
 import { createApp, type Component } from 'vue'
 import { createPinia } from 'pinia'
 import App from './App.vue'
@@ -22,6 +30,7 @@ import { builtinComponents } from './stores/apps'
 import { registerIcons, type IconDef } from './desktop/icons'
 import { shell, type ShellBrand } from './shell'
 import { setToken } from './api/client'
+import { registerWidget, type WidgetDef } from './desktop/widgetRegistry'
 
 export interface CreateOpenOSOptions {
   /** 编译期注册的宿主应用组件（key = appId，值为懒加载 loader），与内置应用合并 */
@@ -32,8 +41,8 @@ export interface CreateOpenOSOptions {
   login?: { mode: 'sso'; url: string; label?: string }
   /** 品牌覆盖（登录页 / 菜单栏关于） */
   brand?: Partial<ShellBrand>
-  /** 菜单栏右侧扩展组件（如业务上下文切换器），渲染在状态 chip 之前 */
-  menubarExtras?: Component
+  /** 菜单栏右侧扩展组件（如业务上下文切换器），渲染在状态 chip 之前；可传数组多槽 */
+  menubarExtras?: Component | Component[]
   /**
    * SSO 回跳后令牌经 URL 片段交接的片段名（#<name>=<jwt>）。
    * sso 模式默认 'os-token'；显式传 null 关闭。
@@ -41,6 +50,29 @@ export interface CreateOpenOSOptions {
   tokenFragment?: string | null
   /** 挂载点，默认 #app */
   root?: string | Element
+  /** 主题定制：accent 覆盖全局强调色（按钮/选中/焦点环等派生色自动计算） */
+  theme?: { accent?: string }
+  /** 壁纸列表（CSS background 值），覆盖内置 6 张；设置页可选列表同步变化 */
+  wallpapers?: string[]
+  /** Dock 应用排序（appId 列表，未列出的排在其后按服务器顺序） */
+  dockOrder?: string[]
+  /** 宿主注入的应用菜单项（菜单栏「当前应用」下拉，按 appId；可覆盖内置应用菜单） */
+  appMenus?: Record<string, { label: string; run: () => void }[]>
+  /** 注册自定义桌面小组件（右键菜单「添加小组件」自动出现） */
+  widgets?: Record<string, Omit<WidgetDef, 'type'> & Partial<Pick<WidgetDef, 'type'>>>
+}
+
+/** 应用主题强调色：设置 --os-accent 及其派生令牌（选中/焦点/渐变），立即生效。 */
+function applyTheme(accent: string) {
+  if (!accent) return
+  const s = document.documentElement.style
+  s.setProperty('--os-accent', accent)
+  // 派生色用 color-mix 现算（现代浏览器均支持），无需引入颜色库
+  s.setProperty('--os-accent-hover', `color-mix(in srgb, ${accent} 85%, #fff)`)
+  s.setProperty('--os-accent-grad', `linear-gradient(180deg, color-mix(in srgb, ${accent} 72%, #fff) 0%, ${accent} 100%)`)
+  s.setProperty('--os-accent-soft', `color-mix(in srgb, ${accent} 28%, transparent)`)
+  s.setProperty('--os-selected', `color-mix(in srgb, ${accent} 14%, transparent)`)
+  s.setProperty('--os-focus-ring', `0 0 0 3.5px color-mix(in srgb, ${accent} 25%, transparent)`)
 }
 
 export function createOpenOS(opts: CreateOpenOSOptions = {}) {
@@ -52,6 +84,15 @@ export function createOpenOS(opts: CreateOpenOSOptions = {}) {
   if (opts.brand) Object.assign(shell.brand, opts.brand)
   if (opts.login) shell.login = opts.login
   shell.menubarExtras = opts.menubarExtras || null
+  if (opts.dockOrder) shell.dockOrder = opts.dockOrder
+  if (opts.wallpapers) shell.wallpapers = opts.wallpapers
+  if (opts.appMenus) shell.appMenus = opts.appMenus
+  if (opts.widgets) {
+    for (const [type, def] of Object.entries(opts.widgets)) {
+      registerWidget({ type, ...def })
+    }
+  }
+  if (opts.theme?.accent) applyTheme(opts.theme.accent)
   if (opts.tokenFragment !== undefined) {
     shell.tokenFragment = opts.tokenFragment
   } else if (opts.login?.mode === 'sso') {
@@ -74,3 +115,24 @@ export function createOpenOS(opts: CreateOpenOSOptions = {}) {
   app.mount(opts.root || '#app')
   return app
 }
+
+// ---- 公共 API 面：宿主从 '@openos/framework' 直接导入，不深入内部路径 ----
+export { bus } from './bus/bus'
+export {
+  api, fsApi, rawFileUrl, fetchRawBlob, downloadFile,
+  getToken, setToken, clearToken,
+  setUnauthorizedHandler, ApiError,
+} from './api/client'
+export type { SessionUser, AppDef, VFile } from './api/client'
+export * from './ui'
+export { useSession } from './stores/session'
+export { useApps } from './stores/apps'
+export { useWindows } from './stores/windows'
+export { useDesktop, DEFAULT_WALLPAPERS } from './stores/desktop'
+export { useNotes, NOTE_COLORS } from './stores/notes'
+export { shell } from './shell'
+export type { ShellBrand, ShellLogin, AppMenuItem } from './shell'
+export { registerWidget, widgetDefs, widgetDef } from './desktop/widgetRegistry'
+export type { WidgetDef } from './desktop/widgetRegistry'
+export { registerIcons } from './desktop/icons'
+export type { IconDef } from './desktop/icons'

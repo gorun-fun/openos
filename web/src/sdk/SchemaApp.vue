@@ -12,9 +12,21 @@
 //     { "type": "cards", "title": "卡片", "fields": [{"key":"title","label":"标题","primary":true},{"key":"body","label":"内容"}] }
 //   ]
 // }
+//
+// dataSource.kind = "rest" 时的完整字段：
+//   url      请求地址。相对路径（/api/...）默认携带当前登录态（走统一 API 客户端）；
+//            跨域绝对地址默认裸 fetch，避免令牌外泄，可用 auth: true 强制携带
+//   method   可选，默认 GET；POST 时可携带 body（JSON）
+//   body     POST 请求体（对象）
+//   headers  自定义请求头（对象，键值对）
+//   path     响应取值路径，支持点路径（如 "data.items"）
+//   interval 轮询间隔秒（可选，最小 5s）
+//   topic    事件总线主题：收到该主题推送（本地或跨端）立即刷新，支持通配（如 "app:rooms"）
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import type { WinState } from '../stores/windows'
 import { OsTabs, OsTable, OsEmpty } from '../ui'
+import { api } from '../api/client'
+import { bus } from '../bus/bus'
 
 const props = defineProps<{ schema: any; win: WinState }>()
 
@@ -30,9 +42,16 @@ const loading = ref(true)
 const error = ref('')
 const view = ref('')
 let timer = 0
+let offTopic: (() => void) | null = null
 
 const views = computed<SchemaView[]>(() => props.schema?.views || [])
 const activeView = computed(() => views.value.find((v) => (v.title || v.type) === view.value) || views.value[0])
+
+// 点路径取值："data.items" → data?.items（越界安全）
+function getPath(data: any, path?: string): any {
+  if (!path) return data
+  return String(path).split('.').reduce((acc, k) => (acc == null ? undefined : acc[k.trim()]), data)
+}
 
 async function load() {
   const ds = props.schema?.dataSource
@@ -42,9 +61,27 @@ async function load() {
     if (ds.kind === 'static') {
       items.value = ds.items || []
     } else if (ds.kind === 'rest') {
-      const resp = await fetch(ds.url, ds.headers || {})
-      const data = await resp.json()
-      items.value = ds.path ? (data[ds.path] ?? data) : data
+      const method = String(ds.method || 'GET').toUpperCase()
+      const isPost = method === 'POST' && ds.body !== undefined
+      // 相对路径默认带登录态（同源 API）；跨域绝对地址用裸 fetch，避免令牌外泄
+      const withAuth = ds.auth ?? !/^(https?:)?\/\//i.test(ds.url)
+      let data: any
+      if (withAuth) {
+        data = isPost
+          ? await api.post(ds.url, ds.body, ds.headers)
+          : await api.get(ds.url, ds.headers)
+      } else {
+        const headers: Record<string, string> = { ...(ds.headers || {}) }
+        if (isPost) headers['Content-Type'] = 'application/json'
+        const resp = await fetch(ds.url, {
+          method: isPost ? 'POST' : method,
+          headers,
+          body: isPost ? JSON.stringify(ds.body) : undefined,
+        })
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+        data = await resp.json()
+      }
+      items.value = getPath(data, ds.path)
       if (!Array.isArray(items.value)) items.value = []
     }
   } catch (e: any) {
@@ -62,8 +99,13 @@ onMounted(() => {
   if (ds?.kind === 'rest' && ds.interval) {
     timer = window.setInterval(load, Math.max(5, ds.interval) * 1000)
   }
+  // 总线推送刷新：收到主题消息（本地或跨端）立即重取数据
+  if (ds?.topic) offTopic = bus.on(ds.topic, () => load())
 })
-onBeforeUnmount(() => clearInterval(timer))
+onBeforeUnmount(() => {
+  clearInterval(timer)
+  offTopic?.()
+})
 
 const stats = computed(() => {
   const f = (activeView.value?.fields) || []

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, type Component } from 'vue'
 import { useSession } from '../stores/session'
 import { useWindows } from '../stores/windows'
 import { useDesktop } from '../stores/desktop'
@@ -31,7 +31,8 @@ const activeApp = computed(() => {
   return { id: w.appId, name: apps.byId(w.appId)?.name || w.title || w.appId }
 })
 
-/** 各应用的专属菜单项（只放真正可用的动作；未登记的应用走通用项）。 */
+/** 各应用的专属菜单项（只放真正可用的动作；未登记的应用走通用项）。
+ *  宿主可经 createOpenOS({ appMenus }) 注入/覆盖（如业务应用的快捷动作）。 */
 const APP_MENU_ITEMS: Record<string, { label: string; run: () => void }[]> = {
   terminal: [{ label: '新建终端窗口', run: () => newWin('terminal') }],
   files: [{ label: '新建文件窗口', run: () => newWin('files') }],
@@ -41,6 +42,10 @@ const APP_MENU_ITEMS: Record<string, { label: string; run: () => void }[]> = {
   goder: [{ label: '新建工作台窗口', run: () => newWin('goder') }],
   notes: [{ label: '新建便签窗口', run: () => newWin('notes') }],
 }
+/** 当前生效的应用菜单 = 内置 ∪ 宿主注入（宿主可覆盖同名内置应用）。 */
+const appMenuOf = (appId: string) => shell.appMenus[appId] || APP_MENU_ITEMS[appId] || []
+/** 菜单栏右侧扩展（单个或数组多槽）。 */
+const extras = computed(() => (shell.menubarExtras ? ([] as Component[]).concat(shell.menubarExtras) : []))
 /** 打开同应用的新窗口（携带时间戳参数避开“同参数去重”）。 */
 function newWin(appId: string) { windows.open(appId, { n: Date.now() }) }
 
@@ -127,10 +132,10 @@ defineExpose({ closeMenu })
           <button class="mb app-name" @click="toggle('app')">{{ activeApp.name }}</button>
           <div class="dropdown" v-if="menuOpen === 'app'">
             <button
-              v-for="item in APP_MENU_ITEMS[activeApp.id] || []" :key="item.label"
+              v-for="item in appMenuOf(activeApp.id)" :key="item.label"
               @click="item.run(); closeMenu()"
             >{{ item.label }}</button>
-            <div v-if="(APP_MENU_ITEMS[activeApp.id] || []).length" class="sep" />
+            <div v-if="appMenuOf(activeApp.id).length" class="sep" />
             <button :disabled="!activeWin" @click="activeWin && windows.minimize(activeWin.id); closeMenu()">隐藏（Alt+M）</button>
             <button :disabled="!activeWin" @click="activeWin && windows.toggleMaximize(activeWin.id); closeMenu()">缩放（Alt+↩）</button>
             <div class="sep" />
@@ -156,16 +161,16 @@ defineExpose({ closeMenu })
         <div class="menu-anchor">
           <button class="mb" @click="toggle('help')">帮助</button>
           <div class="dropdown" v-if="menuOpen === 'help'">
-            <button @click="windows.open('welcome'); closeMenu()">使用指南</button>
-            <button @click="windows.open('goder'); closeMenu()">Goder - AI助手</button>
+            <button v-if="apps.byId('welcome')" @click="windows.open('welcome'); closeMenu()">使用指南</button>
+            <button v-if="apps.byId('goder')" @click="windows.open('goder'); closeMenu()">Goder - AI助手</button>
           </div>
         </div>
       </template>
     </nav>
 
     <nav class="right">
-      <!-- 宿主应用注入的菜单栏扩展（门店切换器/业务状态角标等），见 createOpenOS({menubarExtras}) -->
-      <component :is="shell.menubarExtras" v-if="shell.menubarExtras" />
+      <!-- 宿主应用注入的菜单栏扩展（门店切换器/业务状态角标等），见 createOpenOS({menubarExtras})；支持数组多槽 -->
+      <component :is="x" v-for="(x, i) in extras" :key="i" />
       <span class="mb chip" :title="online.join('、')">👥 {{ online.length }} 在线</span>
       <span class="mb chip" :title="aiOn ? 'AI 已接入' : 'AI 演示模式（设置 → AI 服务 可配置）'">{{ aiOn ? '✦ AI' : '✦ AI·demo' }}</span>
       <button class="mb chip icon" title="切换深浅色" @click="desktop.setDark(!desktop.dark)">

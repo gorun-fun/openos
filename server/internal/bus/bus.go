@@ -36,13 +36,14 @@ type Handler func(env Envelope, reply func(topic string, payload any))
 
 // Client 一个 WebSocket 连接。
 type Client struct {
-	hub  *Hub
-	conn *websocket.Conn
-	send chan []byte
-	User string
-	Role string
-	subs map[string]struct{}
-	mu   sync.Mutex
+	hub   *Hub
+	conn  *websocket.Conn
+	send  chan []byte
+	User  string
+	Role  string
+	token string // 原始 JWT：供周期复核（吊销 / 过期检测）
+	subs  map[string]struct{}
+	mu    sync.Mutex
 }
 
 // Hub 事件总线中心。
@@ -51,6 +52,11 @@ type Hub struct {
 	clients  map[*Client]struct{}
 	handlers map[string][]Handler
 	upgrader websocket.Upgrader
+
+	// 连接周期复核：返回 false 的连接被踢下线（令牌吊销 / 过期后 30s 内生效）
+	revalidate func(user, role, token string) bool
+	stopCh     chan struct{}
+	stopOnce   sync.Once
 }
 
 // New 创建 Hub。
@@ -58,12 +64,65 @@ func New() *Hub {
 	return &Hub{
 		clients:  map[*Client]struct{}{},
 		handlers: map[string][]Handler{},
+		stopCh:   make(chan struct{}),
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  4096,
 			WriteBufferSize: 4096,
 			CheckOrigin:     func(r *http.Request) bool { return true },
 		},
 	}
+}
+
+// revalidateInterval 周期复核间隔。令牌吊销（改角色/改密/删用户）在此窗口内踢下线。
+const revalidateInterval = 30 * time.Second
+
+// SetRevalidator 注册连接周期复核函数（仅允许设置一次，注册后启动后台复核）。
+// 函数应做全量校验：签名、有效期、用户存在性、角色与 token_version 是否仍匹配。
+func (h *Hub) SetRevalidator(fn func(user, role, token string) bool) {
+	h.mu.Lock()
+	if h.revalidate != nil {
+		h.mu.Unlock()
+		return
+	}
+	h.revalidate = fn
+	h.mu.Unlock()
+	go h.revalidateLoop()
+}
+
+func (h *Hub) revalidateLoop() {
+	t := time.NewTicker(revalidateInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C:
+			for _, c := range h.invalidClients() {
+				// WriteControl 可与其他写并发；先发关闭帧再断开，客户端会带新令牌重连
+				_ = c.conn.WriteControl(websocket.CloseMessage,
+					websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "凭证已失效"),
+					time.Now().Add(time.Second))
+				c.conn.Close()
+			}
+		case <-h.stopCh:
+			return
+		}
+	}
+}
+
+// invalidClients 返回未通过复核的连接快照（不持锁关闭，避免与读循环死锁）。
+func (h *Hub) invalidClients() []*Client {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	fn := h.revalidate
+	if fn == nil {
+		return nil
+	}
+	var bad []*Client
+	for c := range h.clients {
+		if !fn(c.User, c.Role, c.token) {
+			bad = append(bad, c)
+		}
+	}
+	return bad
 }
 
 // Handle 注册服务端主题处理器（如终端命令）。
@@ -154,10 +213,9 @@ func (c *Client) deliver(env Envelope) {
 	}
 }
 
-// ServeWS 处理 /ws 升级请求。user/role 由鉴权中间件注入查询参数。
-func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
-	user := r.URL.Query().Get("user")
-	role := r.URL.Query().Get("role")
+// ServeWS 处理 /ws 升级请求。身份（user/role/token）由调用方完成鉴权后显式传入，
+// 本包不再从查询参数读取，杜绝连接内的身份伪造。
+func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request, user, role, token string) {
 	if user == "" {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -166,7 +224,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	c := &Client{hub: h, conn: conn, send: make(chan []byte, 256), User: user, Role: role, subs: map[string]struct{}{}}
+	c := &Client{hub: h, conn: conn, send: make(chan []byte, 256), User: user, Role: role, token: token, subs: map[string]struct{}{}}
 	h.mu.Lock()
 	h.clients[c] = struct{}{}
 	h.mu.Unlock()
@@ -246,8 +304,9 @@ func (c *Client) writePump() {
 	}
 }
 
-// Close 优雅关闭：断开全部连接（服务停机时调用）。
+// Close 优雅关闭：停止复核循环并断开全部连接（服务停机时调用）。
 func (h *Hub) Close() {
+	h.stopOnce.Do(func() { close(h.stopCh) })
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for c := range h.clients {

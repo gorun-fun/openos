@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useSession } from '../stores/session'
-import { WALLPAPERS, useDesktop } from '../stores/desktop'
+import { useDesktop } from '../stores/desktop'
 import { shell } from '../shell'
 
 const session = useSession()
@@ -41,7 +41,7 @@ onBeforeUnmount(() => clearTimeout(ssoTimer))
 </script>
 
 <template>
-  <div class="login" :style="{ background: WALLPAPERS[desktop.wallpaper] }">
+  <div class="login" :style="{ background: desktop.wallpapers[desktop.wallpaper] }">
     <div class="login-card">
       <div class="avatar">{{ shell.brand.logo }}</div>
       <h1>{{ shell.brand.name }}</h1>

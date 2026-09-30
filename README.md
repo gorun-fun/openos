@@ -11,7 +11,7 @@
 | 🪟 窗体管理 | 拖拽、八向缩放、红绿灯、**边缘吸附（上=最大化/左右=半屏，带预览）**、最小化飞入 Dock 动画、焦点层级、窗口状态跨会话恢复 |
 | 🚀 桌面体验 | 启动台（F4 / Alt+Space，支持搜索）、Dock 邻居放大、完整菜单栏（系统/窗口/帮助/关于）、快捷键（Alt+W/M/↩/\`）、窗口级错误边界、401 全局登出 |
 | 🚌 事件总线 | WebSocket 主题订阅/发布，`*` 通配；本地即时分发 + 跨端广播；断线自动重连并重放订阅；服务端处理器同总线挂载 |
-| 🧩 开放能力 | ① 组件型：`OpenOS.registerApp()`（支持 template 字符串）② 声明式：JSON Schema 注册即得新应用（第三方只管数据） |
+| 🧩 开放能力 | ① 组件型：`OpenOS.registerApp()`（支持 template 字符串）② 声明式：JSON Schema 注册即得新应用（**带鉴权 REST / POST / 点路径 / 总线推送刷新**）③ Os* 业务组件库：**表格分页排序与单元格渲染插槽、表单校验（OsForm/OsField）、上传（OsUpload 带进度）、全局 Toast** |
 | ✦ Goder - AI助手 | **完整 AI 编程 IDE 内置**（goder 嵌入式集成：项目/会话/聊天/审查/终端/事件台，每用户独立 gh server，与 grf-play 同款集成方式），**默认置于桌面** |
 | 🗒 便签 | 多张彩色便签随手记（自动保存、换色、删除），一键**钉到桌面**成为小组件；桌面便签可拖动、右下角缩放（**尺寸为网格整数倍，精确对齐**） |
 | 📦 内置应用 | **双模式终端（虚拟 ⇄ 真实 shell，ANSI 彩色，Tab 补全）**、文件（上传/下载/搜索/排序/双视图/图片预览/配额）、计算器、系统设置 |
@@ -64,7 +64,18 @@ export OPENOS_AI_MODEL=glm-4-flash
 
 未配置时相关 AI 能力（终端 `ai` 指令、`/api/ai/chat` 开放接口）运行于本地演示模式。
 
-其他环境变量：`OPENOS_ADDR`（默认 127.0.0.1:8081，容器内为 0.0.0.0:8081）、`OPENOS_DATA`（数据目录）、`OPENOS_DIST`（前端目录）、`OPENOS_JWT_SECRET`（默认自动生成并持久化）。
+其他环境变量：`OPENOS_ADDR`（默认 127.0.0.1:8081，容器内为 0.0.0.0:8081）、`OPENOS_DATA`（数据目录）、`OPENOS_DIST`（前端目录）、`OPENOS_JWT_SECRET`（默认自动生成并持久化到 system_kv 表）。
+
+**功能裁剪与数据治理**（宿主集成 / 数据边界，详见「方式三」）：
+
+| 环境变量 | 说明 |
+|---|---|
+| `OPENOS_VFS=off` | 下架 VFS/终端类内置应用（终端/文件/文档/表格/幻灯片/PDF），`/api/fs/*` 统一 503——业务文件交由集成方管理 |
+| `OPENOS_GODER=off` | 停用 goder（不启动子进程、下架应用）——纯业务宿主不必携带 AI IDE |
+| `OPENOS_SEED_DEMO=0` | 不种默认演示账号与 VFS 示例文件（宿主模式账号体系完全交由集成方） |
+| `OPENOS_EXCHANGE_ROLES` | exchange 角色白名单（逗号分隔，如 `front,boss,manager`）——共享密钥泄露也无法铸造 admin |
+| `OPENOS_AUDIT_RETENTION_DAYS` | 审计日志保留天数（默认 90，0=永久）；启动与每日自动清理 |
+| `OPENOS_CHAT_RETENTION_DAYS` | AI 对话历史保留天数（默认 90，0=永久），含终端伪用户 `__term__` 孤儿数据 |
 
 ## 架构
 
@@ -108,6 +119,9 @@ bus.emit('app:calc', { a: 1 }, { remote: false })  // 仅本地
 bus.remote('term:admin', 'ls')                     // 仅发服务端处理器
 ```
 
+订阅任意主题（含业务自定义主题，如 `hotel:rooms`）时会自动向服务端补发远程订阅，
+跨端推送即订即达；本地最后一个消费者移除后自动退订。
+
 ## goder 工作台（内置 AI 编程 IDE）
 
 OpenOS 按官方嵌入约定（`goder/docs/embedding.md`，与 grf-play 同款方式）把 [goder](https://git.gorun.fun/share/goder.git) 作为内置应用：
@@ -131,7 +145,7 @@ cp <goder 源码>/frontend/dist-embed/goder.js <openos>/server/data/goder/
 # 前置：gh 可执行文件在 PATH（GODER_BIN 可覆盖）；组件缺失时 goder 应用内显示部署引导
 ```
 
-相关环境变量：`OPENOS_GODER_BIN` / `OPENOS_GODER_JS` / `OPENOS_GODER_ADDR`（默认 127.0.0.1:7711）/ `OPENOS_GH_BIN`。
+相关环境变量：`OPENOS_GODER_BIN` / `OPENOS_GODER_JS` / `OPENOS_GODER_ADDR`（默认 127.0.0.1:7711）/ `OPENOS_GH_BIN`；`OPENOS_GODER=off` 可整体停用（不启动子进程、下架应用，纯业务宿主建议开启此开关）。
 
 ### 真实终端
 
@@ -152,7 +166,7 @@ cp <goder 源码>/frontend/dist-embed/goder.js <openos>/server/data/goder/
 {
   "title": "团队公告板",
   "dataSource": {
-    "kind": "static",                    // 或 "rest" + url/path/interval 秒
+    "kind": "static",                    // 或 "rest"（字段见下）
     "items": [{ "title": "v1.0 发布", "author": "admin", "date": "周一" }]
   },
   "views": [
@@ -165,6 +179,17 @@ cp <goder 源码>/frontend/dist-embed/goder.js <openos>/server/data/goder/
 }
 ```
 
+`dataSource.kind = "rest"` 完整字段：
+
+| 字段 | 说明 |
+|---|---|
+| `url` | 请求地址。**相对路径（`/api/...`）默认携带当前登录态**（走统一 API 客户端，含 401 全局处理）；跨域绝对地址默认裸 fetch 避免令牌外泄，可用 `auth: true` 强制携带 |
+| `method` / `body` | 默认 GET；`POST` + `body`（JSON 对象）发送请求体 |
+| `headers` | 自定义请求头（键值对象） |
+| `path` | 响应取值路径，支持点路径（如 `"data.items"`） |
+| `interval` | 轮询间隔秒（最小 5s），适合无推送的旧接口 |
+| `topic` | **总线推送刷新**：收到该主题消息（本地或跨端）立即重取数据，支持通配（如 `"app:rooms"`），与 `interval` 可叠加 |
+
 注册后立即可在 Dock 使用，并可授权给任意角色（授权变更实时广播到所有在线端）。
 
 ### 方式二：组件型应用（完整前端能力）
@@ -173,7 +198,7 @@ cp <goder 源码>/frontend/dist-embed/goder.js <openos>/server/data/goder/
 
 ```js
 // OpenOS.registerApp(id, { name, width, height, component })
-// 可用：OpenOS.bus / OpenOS.ui（基础组件库）/ OpenOS.api（带登录态）/ OpenOS.open/close
+// 可用：OpenOS.bus / OpenOS.ui（基础组件库）/ OpenOS.api（带登录态）/ OpenOS.open/close / OpenOS.toast
 OpenOS.registerApp('todo', {
   name: '待办', width: 420, height: 400,
   component: {
@@ -218,6 +243,37 @@ curl -X POST http://127.0.0.1:8081/api/auth/exchange \
 配套能力：应用可标记 `hidden`（可编程打开、不出现在启动台/Dock，适合详情窗口）；
 角色不限于内置三角色——宿主可注入业务角色并按 `role_apps` 矩阵授权（授权矩阵接口
 会动态返回全部已出现角色）。401 时 SSO 模式自动跳回宿主登录入口。
+
+**令牌自愈**：`GET /api/auth/refresh` 会**回发新 token**（并续种 Cookie）。宿主的 401
+自愈可直接调它换新令牌，无需每次回 SSO 重新交换（openos 令牌仍有效、仅酒店会话过期
+等场景）；独立部署下前端已内置每 12 小时 + 回前台的滑动续期，长开桌面不掉线。
+
+**批量用户同步**：`POST /api/users/sync`（admin）幂等推送用户清单——不存在则开通
+（随机密码），存在则按字段更新（角色/显示名/禁用态，变化即热吊销）；最后一名管理员
+的降级/禁用会被跳过并在响应 `skipped` 中说明。配合 exchange 的惰性开通，宿主可选
+「登录时开通」或「启动时全量同步」两种策略。
+
+**裁剪部署（数据边界）**：宿主以 SQLite 只保存**演示数据与每用户界面设置**为目标时：
+
+```bash
+OPENOS_VFS=off OPENOS_GODER=off OPENOS_SEED_DEMO=0 \
+OPENOS_EXCHANGE_SECRET=<密钥> OPENOS_EXCHANGE_ROLES=front,boss,manager \
+./openos-server
+```
+
+- VFS/终端类与 goder 内置应用整体下架（含授权矩阵回收），`/api/fs/*` 返回 503；
+- 无演示账号、无示例文件，用户全部经 exchange / users/sync 进入；
+- 用户禁用（`PUT /api/users/{name}` `{"disabled":true}`）即时生效：REST 立即 401、
+  在线总线连接 30s 内踢下线；
+- 删除用户级联清理磁盘数据（真实终端沙箱目录、goder 会话目录）；
+- 审计与对话历史按保留期自动清理，jwt_secret 存于独立的 `system_kv` 表
+  （用户设置数据可安全导出/清理，不波及系统密钥）。
+
+**壳定制**（`createOpenOS()` 新增选项）：`theme: { accent }`（全局强调色，选中/焦点/
+渐变派生色自动计算）、`wallpapers`（壁纸注入）、`dockOrder`（Dock 排序）、
+`appMenus`（应用菜单注入）、`widgets`（自定义桌面小组件，右键菜单自动出现）、
+`menubarExtras` 支持数组多槽。宿主可从 `@openos/framework` 直接导入 `bus` / `api` /
+`fsApi` / 全部 Os* 组件 / 状态仓库，无需深入内部路径。
 
 ### goder 界面操控指令
 
@@ -288,7 +344,16 @@ git tag v0.0.1 && git push origin v0.0.1   # 推送 tag 即触发发布
 ## 安全说明
 
 - 密码 pbkdf2-SHA256（20000 轮 + 随机盐；升级前的存量 hash 自动透明升级）
-- JWT HS256，24 小时有效，携带 token_version：**改角色/改密码/删用户后旧令牌立即失效**
+- JWT HS256，24 小时有效，携带 token_version：**改角色/改密码/删用户/禁用后旧令牌立即失效**
+  （REST 每请求实时核对；WebSocket 升级时同套校验，已建立的总线连接经 30s 周期复核踢下线，
+  客户端以续期后的令牌自动重连，吊销令牌重连被拒；新建用户 token_version 以当前时间初始化，
+  杜绝「删号重建后旧令牌复活」）
+- 前端令牌滑动续期：每 12 小时及页面回到前台时静默调 `/api/auth/refresh` 换新令牌
+- 用户禁用（`disabled`）：登录 403、在线会话踢下线；最后一名启用中的管理员不可禁用/降级/删除
+- exchange 令牌交换：密钥恒定时间比较；可选角色白名单（`OPENOS_EXCHANGE_ROLES`）；
+  已禁用用户拒绝交换；显示名变更留审计
+- 审计日志 / AI 对话历史按保留期自动清理（默认 90 天，可配置），防止无限膨胀
+- jwt_secret 等系统级键存于独立的 `system_kv` 表，与用户界面设置（user_settings）分离
 - 登录防爆破：每 用户名+IP 10 分钟 8 次失败锁定 15 分钟；全局限流 600 次/分钟/IP
 - 虚拟文件系统严格限制在 `/home/<用户>` 内，单文件 ≤8MB，单用户配额 100MB，用户间完全隔离
 - 终端默认**虚拟 shell**；真实模式为受控执行（沙箱目录 + 超时 + 截断），可用 `OPENOS_REAL_SHELL=off` 整体关闭

@@ -1,7 +1,8 @@
 <script setup lang="ts">
-// 桌面小组件：时钟 / 便签 / 系统监控。拖动把手移动，释放后吸附网格
-// 并与其他小组件/快捷方式互不覆盖；右键（经桌面菜单）移除或换色，
-// 经桌面右键菜单或 defineExpose 的 add() 添加。位置持久化。
+// 桌面小组件：时钟 / 便签 / 系统监控 / 宿主自定义（widgetRegistry 注册）。
+// 拖动把手移动，释放后吸附网格并与其他小组件/快捷方式互不覆盖；
+// 右键（经桌面菜单）移除或换色，经桌面右键菜单或 defineExpose 的 add() 添加。
+// 位置持久化；自定义小组件经 { widget, update } props 读写自己的持久化字段。
 //
 // 便签小组件与便签应用（NotesApp）共用 notes 仓库：每张便签可单独钉到桌面，
 // 尺寸为网格的整数倍（sc×sr 格，精确到像素对齐），右下角把手缩放时吸附网格。
@@ -12,16 +13,20 @@ import { useNotes, NOTE_COLORS } from '../stores/notes'
 import { bus } from '../bus/bus'
 import { api } from '../api/client'
 import { GRID, cellAt, findFree, gridMetrics, isFree, posOf, registerItem, unregisterItem } from './grid'
+import { widgetDef } from './widgetRegistry'
 
-type WidgetType = 'clock' | 'note' | 'monitor'
 interface Widget {
-  type: WidgetType
+  type: string
   c: number
   r: number
   /** 便签小组件：横向/纵向跨格数（网格整数倍）与关联便签 id */
   sc?: number
   sr?: number
   noteId?: string
+  /** 自定义小组件实例标识（非单例类型可多实例，作网格登记键） */
+  id?: string
+  /** 自定义小组件的任意持久化字段（经 update() 合并写入） */
+  [k: string]: any
 }
 
 const session = useSession()
@@ -33,7 +38,7 @@ const OLD_KEY = () => `openos_widgets_${session.user!.username}`
 const NOTE_KEY = () => `openos_note_${session.user!.username}`
 
 const list = ref<Widget[]>([])
-/** 时钟/监控按实际尺寸换算的格子数（挂载后测量）；便签用自身 sc/sr。 */
+/** 时钟/监控/自定义小组件按实际尺寸换算的格子数（挂载后测量）；便签用自身 sc/sr。 */
 const spans = ref<Record<string, { sc: number; sr: number }>>({})
 const now = ref(new Date())
 const online = ref(0)
@@ -42,8 +47,8 @@ const usage = ref({ used: 0, quota: 1 })
 let timer = 0
 const offs: (() => void)[] = []
 
-const keyOf = (w: { type: string; noteId?: string }) =>
-  w.type === 'note' ? `w:note:${w.noteId}` : `w:${w.type}`
+const keyOf = (w: { type: string; noteId?: string; id?: string }) =>
+  w.type === 'note' ? `w:note:${w.noteId}` : (w.id ? `w:${w.type}:${w.id}` : `w:${w.type}`)
 const spanOf = (w: Widget) =>
   w.type === 'note' ? { sc: w.sc || 2, sr: w.sr || 2 } : (spans.value[w.type] || { sc: 2, sr: 1 })
 /** 便签小组件像素尺寸 = 跨格数 × 格宽 - 8（8 为格间隙，保证与网格精确对齐）。 */
@@ -60,7 +65,7 @@ onMounted(() => {
       const old: any[] = JSON.parse(localStorage.getItem(OLD_KEY()) || 'null')
       if (old) {
         list.value = old.map((w) => ({
-          type: w.type as WidgetType,
+          type: String(w.type),
           c: Math.max(0, Math.round((w.x - GRID.left) / GRID.cw)),
           r: Math.max(0, Math.round((w.y - GRID.top) / GRID.ch)),
         }))
@@ -158,11 +163,13 @@ function emitNotes() {
   bus.emit('notes:widgets', { ids: list.value.filter((w) => w.type === 'note').map((w) => w.noteId!) }, { remote: false })
 }
 
-function add(type: WidgetType) {
-  if (type !== 'note' && list.value.some((w) => w.type === type)) return
+function add(type: string) {
+  const def = widgetDef(type)
+  if (!def) return
+  if (def.singleton && list.value.some((w) => w.type === type)) return
   const w: Widget = type === 'note'
     ? { type, c: 0, r: 0, sc: 2, sr: 2, noteId: notes.create().id }
-    : { type, c: 0, r: 0 }
+    : { type, c: 0, r: 0, ...def.defaults, ...(def.singleton ? {} : { id: Date.now().toString(36) }) }
   list.value.push(w)
   void nextTick(async () => {
     await measure() // measure 内会 relayout，把新组件放进最近空位
@@ -182,7 +189,15 @@ function addNote(id: string) {
   })
 }
 
-function remove(type: WidgetType, noteId?: string) {
+/** 自定义小组件合并持久化字段（{ widget, update } props 的 update 回调）。 */
+function updateWidget(w: Widget, patch: Record<string, any>) {
+  Object.assign(w, patch)
+  const sp = spanOf(w)
+  registerItem(keyOf(w), { c: w.c, r: w.r, sc: sp.sc, sr: sp.sr, kind: 'widget' })
+  save()
+}
+
+function remove(type: string, noteId?: string) {
   const dead = list.value.filter((w) => w.type === type && (type !== 'note' || w.noteId === noteId))
   if (!dead.length) return
   for (const w of dead) unregisterItem(keyOf(w))
@@ -344,6 +359,14 @@ defineExpose({ add, remove, cycleNoteColor, relayout })
         <div class="row"><span>🪟 窗口</span><b>{{ windows.list.length }}</b></div>
         <div class="row"><span>💾 存储</span><b :title="fmtMB(usage.used) + ' / ' + fmtMB(usage.quota)">{{ fmtMB(usage.used) }}</b></div>
       </div>
+
+      <!-- 宿主/第三方注册的自定义小组件（widgetRegistry） -->
+      <component
+        v-else
+        :is="widgetDef(w.type)?.component"
+        :widget="w"
+        :update="(patch: Record<string, any>) => updateWidget(w, patch)"
+      />
     </div>
   </div>
 </template>

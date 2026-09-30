@@ -12,12 +12,14 @@ import (
 	"crypto/pbkdf2"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -43,20 +45,27 @@ type Service struct {
 	ttl    time.Duration
 	// exchangeSecret 非空时启用令牌交换（宿主应用集成：SSO 会话换 OpenOS JWT）。
 	exchangeSecret string
+	// exchangeRoles 非空时限制 exchange 可指定的角色（白名单，逗号分隔），
+	// 防止共享密钥泄露后被用于铸造 admin。
+	exchangeRoles map[string]bool
 
-	// 用户态缓存（角色/token_version），TTL 10s
+	// 用户态缓存（角色/token_version/禁用态），TTL 10s
 	cacheMu sync.Mutex
 	cache   map[string]cacheEntry
 
 	// 登录防爆破
 	bruteMu sync.Mutex
 	brute   map[string]*attempt
+
+	// 用户删除后的级联清理钩子（main 注入：清理磁盘沙箱 / goder 数据）
+	onUserDeleted func(username string)
 }
 
 type cacheEntry struct {
-	role string
-	tv   int64
-	at   time.Time
+	role     string
+	tv       int64
+	disabled bool
+	at       time.Time
 }
 
 type attempt struct {
@@ -71,7 +80,7 @@ const (
 	lockDuration = 15 * time.Minute
 )
 
-// New 创建认证服务；secret 为空时自动生成并持久化。
+// New 创建认证服务；secret 为空时自动生成并持久化到 system_kv（与用户设置数据分离）。
 func New(db *store.DB, secret string) *Service {
 	s := &Service{
 		db:    db,
@@ -80,12 +89,12 @@ func New(db *store.DB, secret string) *Service {
 		brute: map[string]*attempt{},
 	}
 	if secret == "" {
-		v, _ := db.GetUserSetting("__system", "jwt_secret")
+		v, _ := db.GetSystemKV("jwt_secret")
 		if v == "" {
 			buf := make([]byte, 32)
 			rand.Read(buf)
 			v = base64.RawStdEncoding.EncodeToString(buf)
-			db.SetUserSetting("__system", "jwt_secret", v)
+			db.SetSystemKV("jwt_secret", v)
 		}
 		secret = v
 	}
@@ -96,6 +105,24 @@ func New(db *store.DB, secret string) *Service {
 // SetExchangeSecret 配置令牌交换密钥（宿主应用服务端持有，用于换取 OpenOS 身份）；
 // 为空（默认）时交换端点返回 503，保持独立部署的安全面不变。
 func (s *Service) SetExchangeSecret(v string) { s.exchangeSecret = v }
+
+// SetExchangeRoleWhitelist 配置 exchange 可指定的角色白名单（逗号分隔，空 = 不限制）。
+func (s *Service) SetExchangeRoleWhitelist(v string) {
+	if v == "" {
+		s.exchangeRoles = nil
+		return
+	}
+	m := map[string]bool{}
+	for _, r := range strings.Split(v, ",") {
+		if r = strings.TrimSpace(r); r != "" {
+			m[r] = true
+		}
+	}
+	s.exchangeRoles = m
+}
+
+// SetUserDeletedHook 注册用户删除后的级联清理（main 注入：磁盘沙箱、goder 数据目录）。
+func (s *Service) SetUserDeletedHook(fn func(username string)) { s.onUserDeleted = fn }
 
 // ---- JWT ----
 
@@ -142,23 +169,37 @@ func (s *Service) Verify(token string) (*Claims, error) {
 	return &c, nil
 }
 
-// currentUserRole 取用户当前角色与 token 版本（10s 缓存）。
-func (s *Service) currentUserRole(username string) (bool, string, int64) {
+// VerifySession 校验令牌并实时核对用户态（存在性 / 角色 / token_version / 禁用态），
+// 与 REST 中间件同一套判定。供 WebSocket 升级、连接周期复核等非中间件场景复用。
+func (s *Service) VerifySession(token string) (*Identity, error) {
+	c, err := s.Verify(token)
+	if err != nil {
+		return nil, err
+	}
+	exists, role, tv, disabled := s.currentUserRole(c.Sub)
+	if !exists || role != c.Role || tv != c.TV || disabled {
+		return nil, errors.New("凭证已失效")
+	}
+	return &Identity{Username: c.Sub, Role: role}, nil
+}
+
+// currentUserRole 取用户当前角色、token 版本与禁用态（10s 缓存）。
+func (s *Service) currentUserRole(username string) (exists bool, role string, tv int64, disabled bool) {
 	s.cacheMu.Lock()
 	if e, ok := s.cache[username]; ok && time.Since(e.at) < 10*time.Second {
 		s.cacheMu.Unlock()
-		return true, e.role, e.tv
+		return true, e.role, e.tv, e.disabled
 	}
 	s.cacheMu.Unlock()
 
 	info, err := s.db.GetUserAuth(username)
 	if err != nil || !info.Exists {
-		return false, "", 0
+		return false, "", 0, false
 	}
 	s.cacheMu.Lock()
-	s.cache[username] = cacheEntry{role: info.Role, tv: info.TokenVersion, at: time.Now()}
+	s.cache[username] = cacheEntry{role: info.Role, tv: info.TokenVersion, disabled: info.Disabled, at: time.Now()}
 	s.cacheMu.Unlock()
-	return true, info.Role, info.TokenVersion
+	return true, info.Role, info.TokenVersion, info.Disabled
 }
 
 // InvalidateCache 用户态变更后调用，立即生效。
@@ -289,8 +330,8 @@ func (s *Service) Middleware(next http.Handler) http.Handler {
 			jsonError(w, http.StatusUnauthorized, "未认证或登录已过期")
 			return
 		}
-		exists, role, tv := s.currentUserRole(c.Sub)
-		if !exists || role != c.Role || tv != c.TV {
+		exists, role, tv, disabled := s.currentUserRole(c.Sub)
+		if !exists || role != c.Role || tv != c.TV || disabled {
 			jsonError(w, http.StatusUnauthorized, "凭证已失效，请重新登录")
 			return
 		}
@@ -345,6 +386,11 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 401, "用户名或密码错误")
 		return
 	}
+	if info.Disabled {
+		s.db.Audit(req.Username, "login.denied", "disabled", ip)
+		jsonError(w, 403, "账号已被禁用，请联系管理员")
+		return
+	}
 	// 旧参数 hash（4096 轮）透明升级到当前参数
 	if hashWithIters(req.Password, info.Salt, pbkdf2Iters) != info.PasswordHash {
 		ns := newSalt()
@@ -383,9 +429,10 @@ func (s *Service) Logout(w http.ResponseWriter, r *http.Request) {
 //
 // 供「宿主应用集成 OpenOS」场景：宿主完成自己的 SSO 认证后，服务端到服务端
 // 调用本端点为该用户换取 OpenOS 身份（浏览器无需再过 OpenOS 登录）。
-//   - 请求头 X-Exchange-Secret 与 OPENOS_EXCHANGE_SECRET 比对；
+//   - 请求头 X-Exchange-Secret 与 OPENOS_EXCHANGE_SECRET 恒定时间比对；
+//   - 配置 OPENOS_EXCHANGE_ROLES 白名单后，共享密钥泄露也无法铸造白名单外角色（如 admin）；
 //   - 用户不存在时自动开通（随机不可登录密码，登录只能经宿主）；
-//   - 角色变化时同步并 Bump 旧令牌；显示名变化时同步；
+//   - 角色变化时同步并 Bump 旧令牌；显示名变化时同步（留审计）；
 //   - 响应与登录一致：{token, user}，并种同源 Cookie 供嵌入组件使用。
 func (s *Service) Exchange(w http.ResponseWriter, r *http.Request) {
 	ip := s.clientIP(r)
@@ -393,7 +440,7 @@ func (s *Service) Exchange(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusServiceUnavailable, "令牌交换未启用")
 		return
 	}
-	if r.Header.Get("X-Exchange-Secret") != s.exchangeSecret {
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Exchange-Secret")), []byte(s.exchangeSecret)) != 1 {
 		s.db.Audit("?", "auth.exchange.deny", "ip="+ip, ip)
 		jsonError(w, http.StatusUnauthorized, "交换密钥错误")
 		return
@@ -414,6 +461,11 @@ func (s *Service) Exchange(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 400, "非法角色")
 		return
 	}
+	if s.exchangeRoles != nil && !s.exchangeRoles[req.Role] {
+		s.db.Audit(req.Username, "auth.exchange.deny", "role not allowed: "+req.Role, ip)
+		jsonError(w, 400, "角色不在交换白名单内（OPENOS_EXCHANGE_ROLES）")
+		return
+	}
 
 	info, err := s.db.GetUserAuth(req.Username)
 	if err != nil {
@@ -424,14 +476,18 @@ func (s *Service) Exchange(w http.ResponseWriter, r *http.Request) {
 		// 自动开通：密码置为随机值（宿主体系外的登录通道不可用）
 		pw := randomHex(24)
 		salt := newSalt()
-		if _, err := s.db.Exec(`INSERT INTO users(username,password_hash,salt,role,display_name) VALUES(?,?,?,?,?)`,
-			req.Username, hashPassword(pw, salt), salt, req.Role, req.DisplayName); err != nil {
+		if _, err := s.db.Exec(`INSERT INTO users(username,password_hash,salt,role,display_name,token_version) VALUES(?,?,?,?,?,?)`,
+			req.Username, hashPassword(pw, salt), salt, req.Role, req.DisplayName, initialTokenVersion()); err != nil {
 			jsonError(w, 400, "开通用户失败（用户名可能已存在）")
 			return
 		}
 		s.InvalidateCache(req.Username)
 		s.db.Audit(req.Username, "user.exchange-provision", "role="+req.Role, ip)
 	} else {
+		if info.Disabled {
+			jsonError(w, 403, "用户已被禁用")
+			return
+		}
 		if info.Role != req.Role {
 			if _, err := s.db.Exec(`UPDATE users SET role=? WHERE username=?`, req.Role, req.Username); err != nil {
 				jsonError(w, 500, "同步角色失败")
@@ -443,6 +499,7 @@ func (s *Service) Exchange(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.DisplayName != "" && req.DisplayName != info.DisplayName {
 			s.db.Exec(`UPDATE users SET display_name=? WHERE username=?`, req.DisplayName, req.Username)
+			s.db.Audit(req.Username, "user.displayname", "exchange → "+req.DisplayName, ip)
 		}
 	}
 
@@ -477,7 +534,20 @@ func randomHex(n int) string {
 	return hex.EncodeToString(buf)
 }
 
-// Refresh GET /api/auth/refresh（Bearer）—— 为嵌入组件（goder 等靠 Cookie 的同源请求）续种 Cookie。
+// initialTokenVersion 新建用户的起始 token_version：取当前 Unix 秒，
+// 防止「删除用户后同名重建（tv 从 0 重新计数）导致删除前签发的旧令牌复活」。
+func initialTokenVersion() int64 { return time.Now().Unix() }
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// Refresh GET /api/auth/refresh（Bearer）—— 滑动续期：回发新 token 并续种 Cookie
+// （goder 等靠 Cookie 的同源请求依赖后者）。前端定时调用即可长期在线不掉线，
+// 宿主集成（SSO）场景也可用它做 401 自愈，而不必每次回宿主重新交换。
 func (s *Service) Refresh(w http.ResponseWriter, r *http.Request) {
 	id := FromContext(r)
 	info, err := s.db.GetUserAuth(id.Username)
@@ -494,7 +564,9 @@ func (s *Service) Refresh(w http.ResponseWriter, r *http.Request) {
 		Name: TokenCookie, Value: token, Path: "/", HttpOnly: true,
 		SameSite: http.SameSiteStrictMode, MaxAge: int(s.ttl.Seconds()),
 	})
-	writeJSON(w, map[string]string{"ok": "1"})
+	writeJSON(w, map[string]any{"token": token, "user": map[string]any{
+		"username": id.Username, "role": info.Role, "displayName": info.DisplayName,
+	}})
 }
 
 // Me GET /api/auth/me
@@ -528,7 +600,7 @@ func (s *Service) ChangePassword(w http.ResponseWriter, r *http.Request) {
 
 // ListUsers GET /api/users （admin）
 func (s *Service) ListUsers(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.Query(`SELECT id,username,display_name,role,created_at FROM users ORDER BY id`)
+	rows, err := s.db.Query(`SELECT id,username,display_name,role,disabled,created_at FROM users ORDER BY id`)
 	if err != nil {
 		jsonError(w, 500, err.Error())
 		return
@@ -537,7 +609,11 @@ func (s *Service) ListUsers(w http.ResponseWriter, r *http.Request) {
 	users := []store.User{}
 	for rows.Next() {
 		var u store.User
-		rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.CreatedAt)
+		var disabled int
+		if err := rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &disabled, &u.CreatedAt); err != nil {
+			continue
+		}
+		u.Disabled = disabled != 0
 		users = append(users, u)
 	}
 	writeJSON(w, users)
@@ -564,8 +640,8 @@ func (s *Service) CreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	salt := newSalt()
-	_, err := s.db.Exec(`INSERT INTO users(username,password_hash,salt,role,display_name) VALUES(?,?,?,?,?)`,
-		req.Username, hashPassword(req.Password, salt), salt, req.Role, req.DisplayName)
+	_, err := s.db.Exec(`INSERT INTO users(username,password_hash,salt,role,display_name,token_version) VALUES(?,?,?,?,?,?)`,
+		req.Username, hashPassword(req.Password, salt), salt, req.Role, req.DisplayName, initialTokenVersion())
 	if err != nil {
 		jsonError(w, 400, "创建失败（用户名可能已存在）")
 		return
@@ -575,11 +651,99 @@ func (s *Service) CreateUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, ok())
 }
 
-// UpdateUser PUT /api/users/{name} （admin：改角色/显示名/重置密码）
+// SyncUsers POST /api/users/sync （admin）—— 宿主批量幂等同步用户。
+//
+// 宿主（身份源）按自己的账号体系推送用户清单：不存在则开通（随机密码，登录只能
+// 经宿主），存在则按字段更新（角色 / 显示名 / 禁用态，变化即热吊销旧令牌）。
+// 不在名单内的用户不动（单向同步语义，删除仍走 DELETE /api/users/{name}）。
+func (s *Service) SyncUsers(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Users []struct {
+			Username    string `json:"username"`
+			Role        string `json:"role"`
+			DisplayName string `json:"displayName"`
+			Disabled    *bool  `json:"disabled"`
+		} `json:"users"`
+	}
+	if err := jsonDecode(r, &req); err != nil || len(req.Users) == 0 {
+		jsonError(w, 400, "参数错误：需要 users 数组")
+		return
+	}
+	ip := s.clientIP(r)
+	operator := FromContext(r).Username
+	created, updated := 0, 0
+	skipped := []string{}
+	for _, u := range req.Users {
+		if u.Username == "" {
+			continue
+		}
+		if u.Role == "" {
+			u.Role = "user"
+		}
+		if !validRole(u.Role) {
+			skipped = append(skipped, u.Username+"（非法角色）")
+			continue
+		}
+		info, err := s.db.GetUserAuth(u.Username)
+		if err != nil {
+			skipped = append(skipped, u.Username+"（读取失败）")
+			continue
+		}
+		if !info.Exists {
+			pw := randomHex(24)
+			salt := newSalt()
+			disabled := u.Disabled != nil && *u.Disabled
+			if _, err := s.db.Exec(`INSERT INTO users(username,password_hash,salt,role,display_name,token_version,disabled) VALUES(?,?,?,?,?,?,?)`,
+				u.Username, hashPassword(pw, salt), salt, u.Role, u.DisplayName, initialTokenVersion(), boolInt(disabled)); err != nil {
+				skipped = append(skipped, u.Username+"（开通失败）")
+				continue
+			}
+			s.InvalidateCache(u.Username)
+			s.db.Audit(operator, "user.sync-create", u.Username+" role="+u.Role, ip)
+			created++
+			continue
+		}
+		changed := false
+		if info.Role != u.Role {
+			// 最后管理员保护：不允许把最后一名启用中的管理员降级
+			if info.Role == "admin" && u.Role != "admin" && s.db.CountAdmins() <= 1 {
+				skipped = append(skipped, u.Username+"（最后一名管理员不可降级）")
+				continue
+			}
+			s.db.Exec(`UPDATE users SET role=? WHERE username=?`, u.Role, u.Username)
+			changed = true
+		}
+		if u.Disabled != nil && *u.Disabled != info.Disabled {
+			// 最后管理员保护：不允许禁用最后一名启用中的管理员
+			if info.Role == "admin" && *u.Disabled && s.db.CountAdmins() <= 1 {
+				skipped = append(skipped, u.Username+"（最后一名管理员不可禁用）")
+				continue
+			}
+			s.db.Exec(`UPDATE users SET disabled=? WHERE username=?`, boolInt(*u.Disabled), u.Username)
+			changed = true
+		}
+		if u.DisplayName != "" && u.DisplayName != info.DisplayName {
+			s.db.Exec(`UPDATE users SET display_name=? WHERE username=?`, u.DisplayName, u.Username)
+			changed = true
+		}
+		if changed {
+			s.db.BumpTokenVersion(u.Username) // 角色/禁用变化：旧令牌即时失效
+			s.InvalidateCache(u.Username)
+			s.db.Audit(operator, "user.sync-update", u.Username, ip)
+			updated++
+		}
+	}
+	writeJSON(w, map[string]any{"created": created, "updated": updated, "skipped": skipped})
+}
+
+// UpdateUser PUT /api/users/{name} （admin：改角色/显示名/重置密码/禁用）
 func (s *Service) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	var req struct {
-		Role, DisplayName, Password *string
+		Role        *string
+		DisplayName *string
+		Password    *string
+		Disabled    *bool
 	}
 	if err := jsonDecode(r, &req); err != nil {
 		jsonError(w, 400, "参数错误")
@@ -603,6 +767,16 @@ func (s *Service) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		s.db.BumpTokenVersion(name) // 角色变更即时生效
 		s.InvalidateCache(name)
 		s.db.Audit(FromContext(r).Username, "user.role", name+" → "+*req.Role, s.clientIP(r))
+	}
+	if req.Disabled != nil && *req.Disabled != info.Disabled {
+		if info.Role == "admin" && *req.Disabled && s.db.CountAdmins() <= 1 {
+			jsonError(w, 400, "不能禁用最后一名管理员")
+			return
+		}
+		s.db.Exec(`UPDATE users SET disabled=? WHERE username=?`, boolInt(*req.Disabled), name)
+		s.db.BumpTokenVersion(name) // 禁用即时生效（REST + 总线复核踢线）
+		s.InvalidateCache(name)
+		s.db.Audit(FromContext(r).Username, "user.disabled", name+" = "+map[bool]string{true: "on", false: "off"}[*req.Disabled], s.clientIP(r))
 	}
 	if req.DisplayName != nil {
 		s.db.Exec(`UPDATE users SET display_name=? WHERE username=?`, *req.DisplayName, name)
@@ -628,7 +802,7 @@ func (s *Service) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 404, "用户不存在")
 		return
 	}
-	if info.Role == "admin" && s.db.CountAdmins() <= 1 {
+	if info.Role == "admin" && info.Disabled == false && s.db.CountAdmins() <= 1 {
 		jsonError(w, 400, "不能删除最后一名管理员")
 		return
 	}
@@ -638,11 +812,20 @@ func (s *Service) DeleteUser(w http.ResponseWriter, r *http.Request) {
 	s.db.Exec(`DELETE FROM chat_messages WHERE username=?`, name)
 	s.InvalidateCache(name)
 	s.db.Audit(FromContext(r).Username, "user.delete", name, s.clientIP(r))
+	// 级联清理磁盘数据（真实终端沙箱 / goder 会话目录），由 main 注入
+	if s.onUserDeleted != nil {
+		s.onUserDeleted(name)
+	}
 	writeJSON(w, ok())
 }
 
-// SeedDefaults 创建默认账号（仅当用户表为空时；产品部署后请立即修改密码）。
+// SeedDefaults 创建默认演示账号（仅当用户表为空且 OPENOS_SEED_DEMO 未关闭；
+// 宿主集成场景应设 OPENOS_SEED_DEMO=0，账号体系完全交由集成方）。
+// 产品部署后请立即修改密码。
 func (s *Service) SeedDefaults() error {
+	if os.Getenv("OPENOS_SEED_DEMO") == "0" {
+		return nil
+	}
 	var n int
 	s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&n)
 	if n > 0 {
@@ -655,8 +838,8 @@ func (s *Service) SeedDefaults() error {
 	}
 	for _, d := range defaults {
 		salt := newSalt()
-		if _, err := s.db.Exec(`INSERT INTO users(username,password_hash,salt,role,display_name) VALUES(?,?,?,?,?)`,
-			d.u, hashPassword(d.p, salt), salt, d.role, d.disp); err != nil {
+		if _, err := s.db.Exec(`INSERT INTO users(username,password_hash,salt,role,display_name,token_version) VALUES(?,?,?,?,?,?)`,
+			d.u, hashPassword(d.p, salt), salt, d.role, d.disp, initialTokenVersion()); err != nil {
 			return err
 		}
 	}

@@ -1,8 +1,11 @@
 // 桌面外观仓库：壁纸 / 深浅色，持久化到服务端（按用户）。
+// 壁纸列表可由宿主经 createOpenOS({ wallpapers }) 注入覆盖（shell 单例）。
 import { defineStore } from 'pinia'
 import { api } from '../api/client'
+import { shell } from '../shell'
 
-export const WALLPAPERS: string[] = [
+/** 内置默认壁纸（宿主未注入时使用）。 */
+export const DEFAULT_WALLPAPERS: string[] = [
   // 默认：暮蓝（类 Sonoma 夜色，多层渐变叠出光晕纵深）
   'radial-gradient(120% 90% at 18% 8%, rgba(88, 120, 255, 0.5) 0%, rgba(88, 120, 255, 0) 55%), radial-gradient(110% 100% at 85% 90%, rgba(23, 210, 190, 0.35) 0%, rgba(23, 210, 190, 0) 50%), linear-gradient(158deg, #101c33 0%, #173a5e 48%, #0e5e6b 100%)',
   // 极光青
@@ -22,13 +25,14 @@ interface State {
   dark: boolean
   dockAutoHide: boolean
   loaded: boolean
+  wallpapers: string[]
 }
 
 export const useDesktop = defineStore('desktop', {
   state: (): State => {
     const dark = localStorage.getItem('openos_dark') === '1'
     const dockAutoHide = localStorage.getItem('openos_dockhide') === '1'
-    return { wallpaper: 0, dark, dockAutoHide, loaded: false }
+    return { wallpaper: 0, dark, dockAutoHide, loaded: false, wallpapers: shell.wallpapers || DEFAULT_WALLPAPERS }
   },
   actions: {
     apply() {
@@ -38,7 +42,7 @@ export const useDesktop = defineStore('desktop', {
       if (this.loaded) return
       try {
         const s = await api.get<Record<string, string>>('/api/settings')
-        if (s['wallpaper']) this.wallpaper = Number(s['wallpaper']) || 0
+        if (s['wallpaper']) this.wallpaper = (Number(s['wallpaper']) || 0) % this.wallpapers.length
         if (s['dark']) this.dark = s['dark'] === '1'
         if (s['dockAutoHide']) this.dockAutoHide = s['dockAutoHide'] === '1'
       } catch { /* 离线容忍 */ }
@@ -48,7 +52,7 @@ export const useDesktop = defineStore('desktop', {
       this.loaded = true
     },
     setWallpaper(i: number) {
-      this.wallpaper = ((i % WALLPAPERS.length) + WALLPAPERS.length) % WALLPAPERS.length
+      this.wallpaper = ((i % this.wallpapers.length) + this.wallpapers.length) % this.wallpapers.length
       api.put('/api/settings', { key: 'wallpaper', value: String(this.wallpaper) }).catch(() => {})
     },
     setDark(v: boolean) {

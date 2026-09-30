@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import type { WinState } from '../../stores/windows'
 import { useSession } from '../../stores/session'
-import { useDesktop, WALLPAPERS } from '../../stores/desktop'
+import { useDesktop } from '../../stores/desktop'
 import { useApps } from '../../stores/apps'
 import { api, type AppDef } from '../../api/client'
 import { bus } from '../../bus/bus'
@@ -48,15 +48,12 @@ async function changePwd() {
 }
 
 // ---- 用户管理 ----
-interface UserRow { id: number; username: string; displayName: string; role: string; createdAt: string }
+interface UserRow { id: number; username: string; displayName: string; role: string; disabled: boolean; createdAt: string }
 const users = ref<UserRow[]>([])
 const showCreate = ref(false)
 const nu = ref({ username: '', password: '', role: 'user', displayName: '' })
-const roleOptions = [
-  { value: 'admin', label: '管理员' },
-  { value: 'user', label: '普通用户' },
-  { value: 'guest', label: '访客' },
-]
+// 创建用户的角色下拉跟随系统实际角色（含宿主注入的自定义角色）
+const roleOptions = computed(() => roles.value.map(r => ({ value: r, label: r })))
 
 async function loadUsers() { users.value = await api.get<UserRow[]>('/api/users') }
 
@@ -72,8 +69,14 @@ async function setRole(row: any, role: string) {
   await api.put(`/api/users/${row.username}`, { role })
   loadUsers()
 }
+async function setDisabled(row: any, disabled: boolean) {
+  try {
+    await api.put(`/api/users/${row.username}`, { disabled })
+    loadUsers()
+  } catch (e: any) { alert(e.message) }
+}
 async function removeUser(row: any) {
-  if (!confirm(`删除用户 ${row.username}？`)) return
+  if (!confirm(`删除用户 ${row.username}？其文件、设置与磁盘数据将被清理。`)) return
   try { await api.del(`/api/users/${row.username}`); loadUsers() } catch (e: any) { alert(e.message) }
 }
 
@@ -212,7 +215,7 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
       <OsPanel title="壁纸">
         <div class="wallpapers">
           <button
-            v-for="(w, i) in WALLPAPERS" :key="i"
+            v-for="(w, i) in desktop.wallpapers" :key="i"
             class="wall" :class="{ active: desktop.wallpaper === i }"
             :style="{ background: w }" @click="desktop.setWallpaper(i)"
           >{{ i + 1 }}</button>
@@ -252,19 +255,26 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
         <OsButton variant="primary" size="sm" @click="showCreate = true">＋ 新建用户</OsButton>
       </div>
       <OsTable :columns="[
-        { key: 'username', label: '用户名', width: '22%' },
-        { key: 'displayName', label: '显示名', width: '22%' },
-        { key: 'createdAt', label: '创建时间', width: '28%' },
+        { key: 'username', label: '用户名', width: '20%' },
+        { key: 'displayName', label: '显示名', width: '20%' },
+        { key: 'disabled', label: '状态', width: '12%' },
+        { key: 'createdAt', label: '创建时间', width: '24%' },
       ]" :rows="users">
+        <template #cell-disabled="{ value }">
+          <span class="ustate" :class="{ off: value }">{{ value ? '已禁用' : '正常' }}</span>
+        </template>
         <template #ops="{ row }">
           <OsSelect
             :model-value="row.role" :options="roleOptions" style="padding:3px 6px;font-size:12px"
             @update:model-value="(v: any) => setRole(row, String(v))"
           />
+          <OsButton size="sm" :variant="row.disabled ? 'primary' : 'plain'" :disabled="row.username === 'admin'" @click="setDisabled(row, !row.disabled)">
+            {{ row.disabled ? '启用' : '禁用' }}
+          </OsButton>
           <OsButton size="sm" variant="danger" :disabled="row.username === 'admin'" @click="removeUser(row)">删除</OsButton>
         </template>
       </OsTable>
-      <p class="hint">提示：新用户首次登录后会自动初始化个人空间（/home/用户名）。</p>
+      <p class="hint">提示：禁用即时生效（在线会话被踢下线）；删除会连带清理其文件、设置与磁盘数据。</p>
     </template>
 
     <!-- 应用授权 -->
@@ -310,6 +320,7 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
             <span class="msg">{{ regMsg }}</span>
           </div>
         </div>
+        <p class="hint">dataSource 支持：static（items）/ rest（url、method+body、headers、auth、path 点路径、interval 轮询、topic 总线推送刷新）。相对路径 url 默认携带登录态。详见 README「第三方接入指南 · 方式一」。</p>
       </OsPanel>
 
       <OsPanel title="已注册的第三方应用" style="margin-top: 12px" v-if="registryApps.length">
@@ -397,6 +408,11 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
 .form label { font-size: 12px; color: var(--os-text-secondary); display: flex; gap: 8px; align-items: center; }
 .two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .msg { font-size: 12px; margin-left: 8px; color: var(--os-text-secondary); }
+.ustate {
+  display: inline-block; font-size: 12px; padding: 1px 10px; border-radius: 999px;
+  color: #1d8a3e; background: rgba(48,209,88,.12);
+}
+.ustate.off { color: #b25b00; background: rgba(255,159,10,.14); }
 .panel-actions { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
 .grow { flex: 1; }
 .hint { font-size: 12px; color: var(--os-text-secondary); margin-top: 10px; }
