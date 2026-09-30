@@ -76,7 +76,7 @@ deploy:
     - ssh-keyscan -H ${DEPLOY_HOSTS// / } >> ~/.ssh/known_hosts 2>/dev/null
   script:
     # 逐台部署：拷贝 docker-compose.yml，从内网仓库拉取镜像并按仓库内配置更新容器
-    # 数据卷 openos-data 持续复用，SQLite/用户沙箱在升级间保留
+    # 运行数据持久化在宿主机 /app/docker/openos（bind mount → /data），跨升级保留
     - |
       for HOST in ${DEPLOY_HOSTS}; do
         echo "===== 部署到 ${HOST} ====="

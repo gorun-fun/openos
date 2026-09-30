@@ -38,7 +38,7 @@ cd web && npm install && npm run dev     # 前端
 make build && cd server && ./openos-server   # → http://127.0.0.1:8081
 
 # Docker
-docker compose up -d --build   # → http://localhost:8081（数据持久化在卷 openos-data）
+docker compose up -d --build   # → http://localhost:8081（数据默认持久化在宿主机 /app/docker/openos，本地开发可设 OPENOS_DATA_DIR=./data）
 
 # 多平台发布包（darwin/linux × amd64/arm64）
 make release
@@ -235,14 +235,14 @@ git tag v0.0.1 && git push origin v0.0.1   # 推送 tag 即触发发布
 2. **push**：推送镜像到内网 Registry（无认证）
 3. **deploy**：SSH 到 `DEPLOY_HOSTS`（10.8.0.5），拷贝 docker-compose.yml 后 `pull` + `up -d --force-recreate`，并清理本应用旧版本镜像
 
-部署机上的 compose 通过 `OPENOS_REGISTRY`/`OPENOS_TAG` 变量从仓库拉取对应版本；数据卷 `openos-data` 跨升级保留。发布机需要一次性配置 CI/CD 变量：`DEPLOY_SSH_PRIVATE_KEY`（文件类型，SSH 私钥）；`DEPLOY_USER` 默认 root。
+部署机上的 compose 通过 `OPENOS_REGISTRY`/`OPENOS_TAG` 变量从仓库拉取对应版本；运行数据持久化在宿主机 `/app/docker/openos`（bind mount → 容器 `/data`），跨升级保留。发布机需要一次性配置 CI/CD 变量：`DEPLOY_SSH_PRIVATE_KEY`（文件类型，SSH 私钥）；`DEPLOY_USER` 默认 root。
 
 ## 生产部署清单
 
 - [ ] **修改默认密码**：admin/user/guest 三个默认账号，或删除不需要的账号
 - [ ] **配置 AI 服务**：系统设置 → AI 服务（或环境变量回填）
 - [ ] **HTTPS**：置于 Nginx/Caddy 反向代理之后（WebSocket 需配置 Upgrade 头）
-- [ ] **备份**：定期备份 `OPENOS_DATA` 目录（SQLite WAL，停机拷贝或 `sqlite3 .backup`）
+- [ ] **备份**：定期备份宿主机 `/app/docker/openos`（即 `OPENOS_DATA`，SQLite WAL，停机拷贝或 `sqlite3 .backup`）
 - [ ] **可选**：设置 `OPENOS_JWT_SECRET` 固定密钥（多实例共享时必需）
 - 数据保留在单文件 SQLite（WAL），单机场景即开即用；事件总线与终端均为虚拟实现，不暴露宿主 shell
 
