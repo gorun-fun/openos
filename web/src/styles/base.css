@@ -21,12 +21,23 @@
   --os-active: rgba(0, 0, 0, 0.1);
   --os-sidebar: rgba(240, 240, 243, 0.9);
   --os-input-bg: #ffffff;
-  --os-shadow: 0 18px 60px rgba(0, 0, 0, 0.22), 0 2px 8px rgba(0, 0, 0, 0.1);
-  --os-shadow-sm: 0 2px 10px rgba(0, 0, 0, 0.12);
+  --os-shadow: 0 24px 70px rgba(0, 0, 0, 0.26), 0 4px 14px rgba(0, 0, 0, 0.1);
+  --os-shadow-sm: 0 3px 14px rgba(0, 0, 0, 0.14);
   --os-menubar: rgba(255, 255, 255, 0.55);
   --os-dock: rgba(255, 255, 255, 0.45);
   --os-selected: rgba(10, 132, 255, 0.14);
+  /* 强调色体系与质感令牌 */
+  --os-accent-hover: #2f95ff;
+  --os-accent-grad: linear-gradient(180deg, #42a5ff 0%, #0a84ff 100%);
+  --os-accent-soft: rgba(10, 132, 255, 0.28);
+  --os-focus-ring: 0 0 0 3.5px rgba(10, 132, 255, 0.25);
+  --os-highlight-edge: rgba(255, 255, 255, 0.55); /* 玻璃上缘高光 */
+  --os-ease-spring: cubic-bezier(0.34, 1.4, 0.44, 1);
+  --os-ease-out: cubic-bezier(0.22, 0.8, 0.32, 1);
 }
+
+/* 全局选中文字颜色：跟随强调色 */
+::selection { background: rgba(10, 132, 255, 0.28); }
 
 html.dark {
   --os-bg: #1c1c1e;
@@ -42,11 +53,16 @@ html.dark {
   --os-active: rgba(255, 255, 255, 0.14);
   --os-sidebar: rgba(44, 44, 48, 0.9);
   --os-input-bg: rgba(255, 255, 255, 0.08);
-  --os-shadow: 0 18px 60px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.4);
-  --os-shadow-sm: 0 2px 10px rgba(0, 0, 0, 0.4);
+  --os-shadow: 0 24px 70px rgba(0, 0, 0, 0.6), 0 4px 14px rgba(0, 0, 0, 0.42);
+  --os-shadow-sm: 0 3px 14px rgba(0, 0, 0, 0.44);
   --os-menubar: rgba(28, 28, 30, 0.55);
   --os-dock: rgba(40, 40, 44, 0.45);
   --os-selected: rgba(10, 132, 255, 0.3);
+  --os-accent-hover: #3d9dff;
+  --os-accent-grad: linear-gradient(180deg, #42a5ff 0%, #0a84ff 100%);
+  --os-accent-soft: rgba(10, 132, 255, 0.35);
+  --os-focus-ring: 0 0 0 3.5px rgba(10, 132, 255, 0.35);
+  --os-highlight-edge: rgba(255, 255, 255, 0.14);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -58,32 +74,48 @@ body {
   color: var(--os-text);
   background: var(--os-bg);
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
   user-select: none;
   font-size: 14px;
 }
+
+/* 键盘可达性：统一的强调色焦点环（鼠标点击不触发） */
+:focus-visible { outline: none; box-shadow: var(--os-focus-ring); border-radius: 8px; }
 
 input, textarea, [contenteditable] { user-select: text; font-family: inherit; }
 input:focus, textarea:focus, [contenteditable]:focus { outline: none; }
 
 button { font-family: inherit; }
 
+/* 滚动条：悬浮式圆角胶囊，悬停时加深 */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-thumb { background: var(--os-border-strong); border-radius: 4px; }
+::-webkit-scrollbar-thumb {
+  background: var(--os-border-strong); border-radius: 99px;
+  border: 2px solid transparent; background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--os-text-secondary); border: 1px solid transparent; background-clip: content-box; }
 ::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-corner { background: transparent; }
 
 /* 通用工具类 */
 .os-glass {
   background: var(--os-panel);
-  backdrop-filter: blur(28px) saturate(1.6);
-  -webkit-backdrop-filter: blur(28px) saturate(1.6);
+  backdrop-filter: blur(30px) saturate(1.8);
+  -webkit-backdrop-filter: blur(30px) saturate(1.8);
 }
 .os-no-select { user-select: none; }
 .os-mono { font-family: var(--os-mono); }
 
 /* 动画 */
 @keyframes os-window-open {
-  from { opacity: 0; transform: scale(0.92) translateY(12px); }
+  from { opacity: 0; transform: scale(0.94) translateY(14px); }
   to { opacity: 1; transform: scale(1) translateY(0); }
 }
 @keyframes os-fade-in { from { opacity: 0; } to { opacity: 1; } }
+/* 菜单/弹层：轻微上浮 + 缩放弹入 */
+@keyframes os-pop-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
 @keyframes os-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }

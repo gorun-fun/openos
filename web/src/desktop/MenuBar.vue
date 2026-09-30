@@ -188,30 +188,45 @@ defineExpose({ closeMenu })
   height: 28px; display: flex; align-items: center; justify-content: space-between;
   padding: 0 12px; position: relative; z-index: 9999;
   border-bottom: 1px solid var(--os-border);
+  box-shadow: inset 0 -1px 0 rgba(255,255,255,.04), inset 0 1px 0 var(--os-highlight-edge);
   font-size: 13px;
 }
 nav { display: flex; align-items: center; gap: 4px; position: relative; }
-.mb { padding: 2px 8px; border-radius: 6px; border: none; background: transparent; color: var(--os-text); font-size: 13px; }
+.mb {
+  padding: 2px 9px; border-radius: 6px; border: none; background: transparent;
+  color: var(--os-text); font-size: 13px; transition: background .12s ease; cursor: default;
+}
+button.mb { cursor: pointer; }
 .mb:hover { background: var(--os-hover); }
 .mb:disabled { opacity: .4; }
 .logo { font-weight: 700; font-size: 14px; }
 .app-name { font-weight: 700; color: var(--os-text); max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chip { font-size: 12px; color: var(--os-text-secondary); }
+.chip {
+  font-size: 12px; color: var(--os-text-secondary);
+  padding: 1px 10px; border-radius: 999px;
+  background: var(--os-hover); border: 1px solid var(--os-border);
+}
+.chip.icon { background: transparent; border-color: transparent; padding: 1px 8px; }
 .user { color: var(--os-text-secondary); }
 .time { font-variant-numeric: tabular-nums; }
 
 .menu-anchor { position: relative; display: flex; }
 .dropdown {
-  position: absolute; top: 26px; left: 0; min-width: 220px; z-index: 10000;
-  background: var(--os-panel-solid); border: 1px solid var(--os-border);
-  border-radius: 10px; box-shadow: var(--os-shadow-sm); padding: 5px;
-  animation: os-fade-in .12s ease;
+  position: absolute; top: 28px; left: 0; min-width: 230px; z-index: 10000;
+  background: var(--os-panel); backdrop-filter: blur(30px) saturate(1.8);
+  -webkit-backdrop-filter: blur(30px) saturate(1.8);
+  border: 1px solid var(--os-border);
+  border-radius: 12px; padding: 6px;
+  box-shadow: var(--os-shadow-sm), inset 0 1px 0 var(--os-highlight-edge);
+  animation: os-pop-in .14s var(--os-ease-out);
+  transform-origin: top left;
 }
 .dropdown button {
-  display: block; width: 100%; text-align: left; padding: 7px 12px; border: none;
-  background: transparent; border-radius: 6px; color: var(--os-text); font-size: 13px; cursor: pointer;
+  display: block; width: 100%; text-align: left; padding: 6px 12px; border: none;
+  background: transparent; border-radius: 7px; color: var(--os-text); font-size: 13px; cursor: pointer;
+  transition: background .1s ease;
 }
 .dropdown button:hover:not(:disabled) { background: var(--os-accent); color: #fff; }
 .dropdown button:disabled { opacity: .35; cursor: default; }
-.sep { height: 1px; background: var(--os-border); margin: 5px 8px; }
+.sep { height: 1px; background: var(--os-border); margin: 5px 10px; }
 </style>

@@ -229,18 +229,21 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
   background: var(--os-window);
   border: 1px solid var(--os-border-strong);
   box-shadow: var(--os-shadow);
-  animation: os-window-open .18s cubic-bezier(.2,.9,.3,1.2);
-  transition: opacity .26s ease, transform .26s cubic-bezier(.4,.1,.6,1);
+  animation: os-window-open .22s var(--os-ease-spring);
+  transition: opacity .26s ease, transform .26s cubic-bezier(.4,.1,.6,1), box-shadow .2s ease;
   will-change: transform;
 }
 .window.dragging { transition: none; }
 .window.minimized { opacity: 0; transform: scale(.06) translateY(70vh); pointer-events: none; }
-.window:not(.focused) { box-shadow: 0 8px 30px rgba(0,0,0,.18); }
+.window:not(.focused) { box-shadow: 0 10px 34px rgba(0,0,0,.2); }
+/* 聚焦窗口：轻微提亮边框，强化前后层次 */
+.window.focused { border-color: var(--os-border-strong); }
 
 .titlebar {
   height: 38px; flex: none; display: flex; align-items: center; gap: 10px;
   background: var(--os-window-head);
   border-bottom: 1px solid var(--os-border);
+  box-shadow: inset 0 1px 0 var(--os-highlight-edge);
   backdrop-filter: blur(16px); cursor: default; padding: 0 12px;
   user-select: none; touch-action: none;
 }
@@ -256,15 +259,22 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
   width: 12px; height: 12px; border-radius: 50%; border: none; cursor: pointer;
   display: flex; align-items: center; justify-content: center; padding: 0;
   font-size: 8px; color: rgba(0,0,0,.55); line-height: 1;
+  /* 内阴影 + 1px 深色描边：贴近 macOS 红绿灯的立体质感 */
+  box-shadow: inset 0 0 0 0.5px rgba(0,0,0,.18), inset 0 1px 1px rgba(255,255,255,.25);
+  transition: filter .12s ease;
 }
 .t span { opacity: 0; }
 .window:hover .t span, .t:focus span { opacity: .9; }
 .t.close { background: #ff5f57; }
 .t.min { background: #febc2e; }
 .t.max { background: #28c840; }
-.t.close:hover { background: #e0443e; }
-.t.min:hover { background: #d5a018; }
-.t.max:hover { background: #1fa833; }
+.t.close:hover { filter: brightness(.92); }
+.t.min:hover { filter: brightness(.92); }
+.t.max:hover { filter: brightness(.92); }
+.t:active { filter: brightness(.82); }
+/* 失焦且未悬停窗口的红绿灯退为灰色（macOS 行为） */
+.window:not(.focused):not(:hover) .t { background: #cfcfd4; }
+html.dark .window:not(.focused):not(:hover) .t { background: #55555c; }
 
 .body { flex: 1; min-height: 0; position: relative; overflow: hidden; display: flex; }
 

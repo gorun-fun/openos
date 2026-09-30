@@ -36,8 +36,9 @@ function onDragStart(e: DragEvent, appId: string) {
     </div>
     <div class="grid">
       <button
-        v-for="a in filtered" :key="a.id"
+        v-for="(a, i) in filtered" :key="a.id"
         class="lp-item" draggable="true"
+        :style="{ '--i': i }"
         :title="`点击打开 · 拖拽到桌面创建快捷方式`"
         @click="open(a.id)"
         @dragstart="onDragStart($event, a.id)"
@@ -54,30 +55,40 @@ function onDragStart(e: DragEvent, appId: string) {
 <style scoped>
 .launchpad {
   position: fixed; inset: 0; z-index: 9600;
-  background: rgba(0, 0, 0, 0.28);
-  backdrop-filter: blur(40px) saturate(1.4) brightness(1.06);
-  -webkit-backdrop-filter: blur(40px) saturate(1.4) brightness(1.06);
+  background: rgba(0, 0, 0, 0.3);
+  backdrop-filter: blur(46px) saturate(1.5) brightness(1.08);
+  -webkit-backdrop-filter: blur(46px) saturate(1.5) brightness(1.08);
   display: flex; flex-direction: column; align-items: center;
-  padding-top: 8vh; animation: os-fade-in .16s ease;
+  padding-top: 8vh; animation: os-fade-in .18s ease;
 }
-.search-wrap { margin-bottom: 4vh; }
+.search-wrap { margin-bottom: 4vh; animation: lp-item-in .3s var(--os-ease-out) both; }
 input {
-  width: 280px; padding: 8px 16px; border-radius: 20px; border: none;
-  background: rgba(255,255,255,.25); color: #fff; font-size: 14px; text-align: center;
-  backdrop-filter: blur(10px);
+  width: 280px; padding: 8px 16px; border-radius: 999px;
+  border: 1px solid rgba(255,255,255,.28);
+  background: rgba(255,255,255,.2); color: #fff; font-size: 14px; text-align: center;
+  backdrop-filter: blur(10px); transition: background .15s, border-color .15s;
 }
+input:focus { background: rgba(255,255,255,.3); border-color: rgba(255,255,255,.5); }
 input::placeholder { color: rgba(255,255,255,.6); }
 .grid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
   gap: 22px 12px; width: min(880px, 88vw); overflow-y: auto; padding-bottom: 20px;
 }
 .lp-item {
-  display: flex; flex-direction: column; align-items: center; gap: 8px;
-  background: transparent; border: none; cursor: pointer; padding: 8px 4px; border-radius: 14px;
-  transition: transform .12s;
+  display: flex; flex-direction: column; align-items: center; gap: 9px;
+  background: transparent; border: none; cursor: pointer; padding: 10px 4px; border-radius: 16px;
+  transition: transform .16s var(--os-ease-spring), background .15s;
+  /* 图标依次弹入（基于网格内序号的级联延迟） */
+  animation: lp-item-in .34s var(--os-ease-out) both;
+  animation-delay: calc(var(--i, 0) * 22ms);
 }
-.lp-item:hover { transform: scale(1.06); }
-.name { color: #fff; font-size: 12.5px; text-shadow: 0 1px 3px rgba(0,0,0,.4); }
+@keyframes lp-item-in {
+  from { opacity: 0; transform: translateY(14px) scale(.92); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.lp-item:hover { transform: scale(1.08); background: rgba(255,255,255,.08); }
+.lp-item:active { transform: scale(1.02); }
+.name { color: #fff; font-size: 12.5px; text-shadow: 0 1px 4px rgba(0,0,0,.45); }
 .empty { color: rgba(255,255,255,.7); grid-column: 1 / -1; text-align: center; padding: 40px; }
 .hint { position: absolute; bottom: 100px; color: rgba(255,255,255,.55); font-size: 12px; }
 </style>

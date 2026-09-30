@@ -328,32 +328,38 @@ function ctxCycleNoteColor() {
 .windows-layer { position: absolute; inset: 0; pointer-events: none; }
 
 .snap-preview {
-  position: fixed; z-index: 20000; border-radius: 12px; pointer-events: none;
-  background: rgba(10, 132, 255, .18); border: 2px solid rgba(10, 132, 255, .55);
-  transition: all .12s ease;
+  position: fixed; z-index: 20000; border-radius: 14px; pointer-events: none;
+  background: rgba(10, 132, 255, .16); border: 1.5px solid rgba(10, 132, 255, .5);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.12), 0 8px 30px rgba(10,132,255,.18);
+  backdrop-filter: blur(6px);
+  transition: all .16s var(--os-ease-out);
 }
 
 .ctxmenu {
-  position: fixed; z-index: 9500; min-width: 180px; padding: 5px;
-  background: var(--os-panel-solid); border: 1px solid var(--os-border);
-  border-radius: 10px; box-shadow: var(--os-shadow-sm);
-  animation: os-fade-in .1s ease;
+  position: fixed; z-index: 9500; min-width: 190px; padding: 6px;
+  background: var(--os-panel); backdrop-filter: blur(30px) saturate(1.8);
+  -webkit-backdrop-filter: blur(30px) saturate(1.8);
+  border: 1px solid var(--os-border);
+  border-radius: 12px; box-shadow: var(--os-shadow-sm), inset 0 1px 0 var(--os-highlight-edge);
+  animation: os-pop-in .14s var(--os-ease-out);
+  transform-origin: top left;
 }
 .ctxmenu button {
-  display: block; width: 100%; text-align: left; padding: 7px 12px; border: none;
-  background: transparent; border-radius: 6px; color: var(--os-text); font-size: 13px; cursor: pointer;
+  display: block; width: 100%; text-align: left; padding: 6px 12px; border: none;
+  background: transparent; border-radius: 7px; color: var(--os-text); font-size: 13px; cursor: pointer;
+  transition: background .1s ease;
 }
 .ctxmenu button:hover { background: var(--os-accent); color: #fff; }
-.ctx-group { padding: 5px 12px 3px; font-size: 11px; color: var(--os-text-secondary); }
-.sep { height: 1px; background: var(--os-border); margin: 5px 8px; }
+.ctx-group { padding: 5px 12px 3px; font-size: 11px; font-weight: 600; color: var(--os-text-secondary); }
+.sep { height: 1px; background: var(--os-border); margin: 5px 10px; }
 
 .toasts {
   position: fixed; top: 44px; left: 50%; transform: translateX(-50%);
   display: flex; flex-direction: column; gap: 8px; z-index: 9800; align-items: center;
 }
 .toast {
-  padding: 9px 18px; border-radius: 10px; border: 1px solid var(--os-border);
-  font-size: 13px; box-shadow: var(--os-shadow-sm);
+  padding: 9px 20px; border-radius: 999px; border: 1px solid var(--os-border);
+  font-size: 13px; box-shadow: var(--os-shadow-sm), inset 0 1px 0 var(--os-highlight-edge);
 }
 .toast-enter-active, .toast-leave-active { transition: all .25s ease; }
 .toast-enter-from, .toast-leave-to { opacity: 0; transform: translateY(-10px); }
