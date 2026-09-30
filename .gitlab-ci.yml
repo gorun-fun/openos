@@ -20,7 +20,7 @@ variables:
   # 此处显式声明，防将来基础镜像版本回退
   DOCKER_BUILDKIT: "1"
   # 发布目标主机（内网，通过 SSH 登录），多台以空格分隔
-  DEPLOY_HOSTS: 10.8.0.5 10.8.0.6
+  DEPLOY_HOSTS: 10.8.0.5
   # 发布机拉取镜像的仓库地址（与构建/推送为同一仓库）
   DEPLOY_REGISTRY: ${REGISTRY}
   # 发布机上的应用工作目录

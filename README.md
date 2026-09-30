@@ -229,7 +229,7 @@ git tag v1.0.0 && git push origin v1.0.0   # 推送 tag 即触发发布
 
 1. **build**：多阶段 Dockerfile 构建（Vite 前端 → Go 静态编译 → alpine 运行镜像），打 tag 为 `10.8.0.6:5000/openos:<tag>`
 2. **push**：推送镜像到内网 Registry（无认证）
-3. **deploy**：SSH 到 `DEPLOY_HOSTS`（10.8.0.5/6），拷贝 docker-compose.yml 后 `pull` + `up -d --force-recreate`，并清理本应用旧版本镜像
+3. **deploy**：SSH 到 `DEPLOY_HOSTS`（10.8.0.5），拷贝 docker-compose.yml 后 `pull` + `up -d --force-recreate`，并清理本应用旧版本镜像
 
 部署机上的 compose 通过 `OPENOS_REGISTRY`/`OPENOS_TAG` 变量从仓库拉取对应版本；数据卷 `openos-data` 跨升级保留。发布机需要一次性配置 CI/CD 变量：`DEPLOY_SSH_PRIVATE_KEY`（文件类型，SSH 私钥）；`DEPLOY_USER` 默认 root。
 
