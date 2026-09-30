@@ -1,11 +1,22 @@
 .PHONY: dev server web build release docker test goder clean
 
-# 准备 goder 组件：构建 goder-serve 网关 + 拷贝嵌入式 goder.js（GODER_SRC 可覆盖源码路径）
-GODER_SRC ?= $(HOME)/AiProjects/goder
+# 准备 goder 组件：源码自动拉取自远端仓库，构建 goder-serve 网关 + 嵌入式 goder.js。
+#   GODER_REPO 源码仓库地址；GODER_SRC 本地克隆目录（可改指已有克隆，免拉取）
+#   依赖：go、node/npm（goder.js 由上游 ./build.sh embed 构建）、git
+GODER_REPO ?= https://git.gorun.fun/share/goder.git
+GODER_SRC ?= .goder-src
 goder:
-	@cd $(GODER_SRC) && go build -o $(CURDIR)/server/data/bin/goder-serve ./cmd/goder-serve
+	@if [ -d "$(GODER_SRC)/.git" ]; then \
+		echo "→ 更新 goder 源码（$(GODER_SRC)）..."; \
+		git -C "$(GODER_SRC)" pull --ff-only || echo "⚠ 拉取失败，沿用已有本地源码"; \
+	else \
+		echo "→ 克隆 $(GODER_REPO) → $(GODER_SRC)"; \
+		git clone --depth 1 "$(GODER_REPO)" "$(GODER_SRC)"; \
+	fi
+	@cd "$(GODER_SRC)" && ./build.sh embed
+	@cd "$(GODER_SRC)" && go build -o "$(CURDIR)/server/data/bin/goder-serve" ./cmd/goder-serve
 	@mkdir -p server/data/goder
-	@cp $(GODER_SRC)/frontend/dist-embed/goder.js server/data/goder/goder.js
+	@cp "$(GODER_SRC)/frontend/dist-embed/goder.js" server/data/goder/goder.js
 	@echo "goder 组件就绪（server/data/bin/goder-serve + server/data/goder/goder.js）"
 
 # 同时启动后端与前端（开发模式）

@@ -25,7 +25,7 @@
 
 ```bash
 # 一键准备（含 goder 组件：构建 goder-serve 网关 + 拷贝嵌入库）
-make goder        # 需本机存在 ~/AiProjects/goder 与 PATH 上的 gh
+make goder        # 源码自动克隆自 https://git.gorun.fun/share/goder.git（需 go/npm/git）
 
 # 开发模式（后端 8420 + 前端 5173 热更新）
 make dev
@@ -110,16 +110,18 @@ bus.remote('term:admin', 'ls')                     // 仅发服务端处理器
 
 ## goder 工作台（内置 AI 编程 IDE）
 
-OpenOS 按官方嵌入约定（`goder/docs/embedding.md`，与 grf-play 同款方式）把 [goder](../goder) 作为内置应用：
+OpenOS 按官方嵌入约定（`goder/docs/embedding.md`，与 grf-play 同款方式）把 [goder](https://git.gorun.fun/share/goder.git) 作为内置应用：
 
 - **后端**托管 `goder-serve` 子进程（header 身份模式）：`/goder-api/*` 反代并注入 `X-GRF-UID/X-GRF-Name`（先剥离外部伪造头），SSE 透传；`/vendor/goder.js` 提供自包含嵌入库
 - **每个 OpenOS 用户对应一个独立 gh server 进程**（独立端口/数据目录/令牌，令牌不下发浏览器）；新用户自动种子宿主 `~/.grf` 模型配置（`GODER_SETTINGS_SEED=1`）
 - **鉴权**：OpenOS 登录后签发 `openos_token` Cookie（httpOnly），goder 嵌入组件的同源请求自动携带，经反代完成身份注入
 - **前端**：goder 应用窗口动态 `import('/vendor/goder.js')` → `configure('openos', { baseUrl: '/goder-api', user, sideTop })` → 渲染 `<goder-app-shell panels="sessions,chat,sidebar,console">`（左会话/中聊天/右栏 tab/底事件台）
 
-部署（`make goder` 自动完成）：
+部署（`make goder` 自动完成，源码拉取自 `https://git.gorun.fun/share/goder.git`，克隆到仓库内 `.goder-src/`，可用 `GODER_REPO`/`GODER_SRC` 覆盖）：
 
 ```bash
+# make goder 等价于：
+cd <goder 源码> && ./build.sh embed        # 构建嵌入库 frontend/dist-embed/goder.js（需 npm）
 cd <goder 源码> && go build -o <openos>/server/data/bin/goder-serve ./cmd/goder-serve
 cp <goder 源码>/frontend/dist-embed/goder.js <openos>/server/data/goder/
 # 前置：gh 可执行文件在 PATH（GODER_BIN 可覆盖）；组件缺失时 goder 应用内显示部署引导
@@ -222,8 +224,10 @@ openos/
 与 grf-gateway 同套设施（`docker` Runner + 私有仓库 + 发布机），见 `.gitlab-ci.yml`。
 
 ```bash
-git tag v1.0.0 && git push origin v1.0.0   # 推送 tag 即触发发布
+git tag v0.0.1 && git push origin v0.0.1   # 推送 tag 即触发发布
 ```
+
+版本号规则：从 `v0.0.1` 起，每次发布仅递增**末位**（v0.0.1 → v0.0.2 → …），不修改主/次版本号。
 
 流程（仅 tag 触发，三个 stage）：
 

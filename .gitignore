@@ -5,3 +5,4 @@ server/openos-server
 .DS_Store
 *.log
 *.pid
+.goder-src/

@@ -11,7 +11,7 @@ make web          # 仅前端
 make test         # Go 单元测试（auth/bus/vfs 各有 *_test.go）
 make build        # 生产构建：npm run build + go build -o openos-server
 make release      # 多平台发布包（darwin/linux × amd64/arm64，CGO_ENABLED=0）
-make goder        # 构建 goder 组件（需 ~/AiProjects/goder 存在且 PATH 上有 gh）
+make goder        # 构建 goder 组件（源码自动克隆自 git.gorun.fun/share/goder.git，需 go/npm/git；运行期另需 PATH 上有 gh）
 docker compose up -d --build   # 容器部署 → http://localhost:8420
 
 cd web && npm run typecheck    # vue-tsc --noEmit（仓库无 ESLint/Prettier，类型检查是唯一的静态校验）
@@ -39,5 +39,6 @@ cd web && npm run typecheck    # vue-tsc --noEmit（仓库无 ESLint/Prettier，
 - 默认账号：admin/admin123、user/user123、guest/guest123（auth 包 `SeedDefaults` 种子）。
 - 关键环境变量：`OPENOS_ADDR`（默认 127.0.0.1:8420）、`OPENOS_DATA`、`OPENOS_DIST`、`OPENOS_JWT_SECRET`、`OPENOS_AI_BASE_URL/API_KEY/MODEL`、`OPENOS_REAL_SHELL`（off/full）、`OPENOS_GODER_*`。
 - WebSocket 鉴权走查询参数 `?token=<jwt>`（浏览器 WS 无法带 header）。
-- `make goder` 依赖同级目录 `~/AiProjects/goder`（可用 `GODER_SRC` 覆盖）与 PATH 上的 `gh`。
+- `make goder` 从 `https://git.gorun.fun/share/goder.git` 克隆源码到仓库内 `.goder-src/`（已 gitignore；`GODER_REPO`/`GODER_SRC` 可覆盖，`GODER_SRC` 指向已有克隆即免拉取），需 go/npm/git；gh 是运行期依赖（PATH 上）。
 - 权威文档是 `README.md`（含完整架构图、总线协议、goder 部署步骤、第三方接入指南）；修改敏感区域（auth/bus/vfs/goder）前先读对应章节。
+- **版本发布规则**：从 `v0.0.1` 起，每次发布**只递增版本号最后一位**（v0.0.1 → v0.0.2 → v0.0.3 …），不得修改主/次版本号。发布方式 = 提交后打 tag 并推送（触发 GitLab CI 自动构建镜像并部署）。
