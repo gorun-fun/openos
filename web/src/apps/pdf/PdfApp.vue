@@ -2,8 +2,9 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import type { WinState } from '../../stores/windows'
 import { useWindows } from '../../stores/windows'
-import { fetchRawBlob } from '../../api/client'
-import { OsToolbar, OsButton } from '../../ui'
+import { useSession } from '../../stores/session'
+import { fsApi, fetchRawBlob } from '../../api/client'
+import { OsFilePicker } from '../../ui'
 import * as pdfjs from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 
@@ -11,6 +12,8 @@ pdfjs.GlobalWorkerOptions.workerSrc = workerUrl
 
 const props = defineProps<{ win: WinState }>()
 const windows = useWindows()
+const session = useSession()
+const pickerOpen = ref(false)
 
 const pageNum = ref(1)
 const pageCount = ref(0)
@@ -62,6 +65,18 @@ function onDrop(e: DragEvent) {
   if (f && f.name.toLowerCase().endsWith('.pdf')) openFile(f)
 }
 
+async function openVfs(path: string) {
+  pickerOpen.value = false
+  loading.value = true
+  try {
+    const blob = await fetchRawBlob(path)
+    await openBytes(await blob.arrayBuffer(), path.split('/').pop() || 'PDF')
+  } catch (e: any) {
+    error.value = '读取文件失败：' + e.message
+    loading.value = false
+  }
+}
+
 async function nav(d: number) {
   const next = pageNum.value + d
   if (next < 1 || next > pageCount.value) return
@@ -92,43 +107,48 @@ onBeforeUnmount(() => doc?.destroy())
 
 <template>
   <div class="pdf" @dragover.prevent @drop="onDrop">
-    <OsToolbar>
-      <label class="open-btn">
-        打开 PDF
+    <div class="os-tb">
+      <button class="os-tb-btn" title="从文件空间打开…" @click="pickerOpen = true">打开…</button>
+      <label class="os-tb-btn local-open" title="从本机打开">
+        本机…
         <input type="file" accept="application/pdf" hidden @change="onPicker" />
       </label>
-      <span class="sep" />
-      <button :disabled="pageNum <= 1" @click="nav(-1)">‹ 上一页</button>
+      <span class="os-tb-sep" />
+      <button class="os-tb-btn" :disabled="pageNum <= 1" title="上一页" @click="nav(-1)">‹</button>
       <span class="pg">{{ pageCount ? `${pageNum} / ${pageCount}` : '—' }}</span>
-      <button :disabled="pageNum >= pageCount" @click="nav(1)">下一页 ›</button>
-      <span class="sep" />
-      <button @click="zoom(-0.2)">－</button>
+      <button class="os-tb-btn" :disabled="pageNum >= pageCount" title="下一页" @click="nav(1)">›</button>
+      <span class="os-tb-sep" />
+      <button class="os-tb-btn" title="缩小" @click="zoom(-0.2)">－</button>
       <span class="pg">{{ Math.round(scale * 100) }}%</span>
-      <button @click="zoom(0.2)">＋</button>
+      <button class="os-tb-btn" title="放大" @click="zoom(0.2)">＋</button>
       <span class="grow" />
       <span class="fname">{{ fileName }}</span>
-    </OsToolbar>
+    </div>
 
     <div class="viewer">
       <label v-if="!pageCount && !loading" class="drop-hint">
         <div class="ic">📕</div>
         <p>拖入 PDF 文件到这里，或点击选择</p>
-        <p class="sub">也可以用左上角「打开 PDF」按钮</p>
+        <p class="sub">也可以用工具栏「打开…」从文件空间打开</p>
         <input type="file" accept="application/pdf" hidden @change="onPicker" />
       </label>
       <div v-else-if="loading" class="drop-hint">加载中…</div>
       <div v-else-if="error" class="drop-hint err">{{ error }}</div>
       <div v-else class="canvas-wrap"><canvas ref="canvasEl" /></div>
     </div>
+
+    <OsFilePicker
+      v-if="pickerOpen" mode="open" title="打开 PDF 文稿"
+      :default-dir="`/home/${session.user!.username}/文档`" :exts="['pdf']"
+      @confirm="openVfs" @cancel="pickerOpen = false"
+    />
   </div>
 </template>
 
 <style scoped>
 .pdf { width: 100%; display: flex; flex-direction: column; background: var(--os-bg); }
-.open-btn {
-  padding: 4px 12px; border-radius: 7px; background: var(--os-accent); color: #fff;
-  font-size: 12.5px; cursor: pointer; font-weight: 600;
-}
+.grow { flex: 1; }
+.local-open { cursor: pointer; }
 .pg { font-size: 12px; color: var(--os-text-secondary); padding: 0 4px; font-variant-numeric: tabular-nums; }
 .fname { font-size: 12px; color: var(--os-text-secondary); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .viewer { flex: 1; overflow: auto; display: flex; }

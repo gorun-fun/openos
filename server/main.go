@@ -206,12 +206,14 @@ func main() {
 	authed.HandleFunc("GET /api/fs/read", fs.Guard(fs.Read))
 	authed.HandleFunc("GET /api/fs/raw", fs.Guard(fs.Raw))
 	authed.HandleFunc("GET /api/fs/usage", fs.Guard(fs.Usage))
+	authed.HandleFunc("GET /api/fs/search", fs.Guard(fs.Search))
 	authed.HandleFunc("POST /api/fs/upload", fs.Guard(fs.Upload))
 	authed.HandleFunc("PUT /api/fs/write", fs.Guard(fs.Write))
 	authed.HandleFunc("POST /api/fs/mkdir", fs.Guard(fs.Mkdir))
 	authed.HandleFunc("POST /api/fs/touch", fs.Guard(fs.Touch))
 	authed.HandleFunc("DELETE /api/fs/remove", fs.Guard(fs.Remove))
 	authed.HandleFunc("POST /api/fs/rename", fs.Guard(fs.Rename))
+	authed.HandleFunc("POST /api/fs/copy", fs.Guard(fs.Copy))
 
 	// 用户个性化设置
 	authed.HandleFunc("GET /api/settings", func(w http.ResponseWriter, r *http.Request) {

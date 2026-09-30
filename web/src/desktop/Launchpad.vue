@@ -33,7 +33,8 @@ function onDragStart(e: DragEvent, appId: string) {
 <template>
   <div class="launchpad" @pointerdown.self="emit('close')">
     <div class="search-wrap">
-      <input v-model="q" placeholder="搜索应用" autofocus @keydown.esc="emit('close')" />
+      <svg viewBox="0 0 16 16" class="mg"><circle cx="6.8" cy="6.8" r="4.6" fill="none" stroke="currentColor" stroke-width="1.5" /><line x1="10.4" y1="10.4" x2="14.2" y2="14.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg>
+      <input v-model="q" placeholder="搜索" autofocus @keydown.esc="emit('close')" />
     </div>
     <div class="grid">
       <button
@@ -62,11 +63,12 @@ function onDragStart(e: DragEvent, appId: string) {
   display: flex; flex-direction: column; align-items: center;
   padding-top: 8vh; animation: os-fade-in .18s ease;
 }
-.search-wrap { margin-bottom: 4vh; animation: lp-item-in .3s var(--os-ease-out) both; }
+.search-wrap { margin-bottom: 4vh; animation: lp-item-in .3s var(--os-ease-out) both; position: relative; }
+.mg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); width: 14px; height: 14px; color: rgba(255,255,255,.6); pointer-events: none; }
 input {
-  width: 280px; padding: 8px 16px; border-radius: 999px;
+  width: 280px; padding: 8px 16px 8px 34px; border-radius: 999px;
   border: 1px solid rgba(255,255,255,.28);
-  background: rgba(255,255,255,.2); color: #fff; font-size: 14px; text-align: center;
+  background: rgba(255,255,255,.2); color: #fff; font-size: 14px;
   backdrop-filter: blur(10px); transition: background .15s, border-color .15s;
 }
 input:focus { background: rgba(255,255,255,.3); border-color: rgba(255,255,255,.5); }

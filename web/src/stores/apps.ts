@@ -24,6 +24,12 @@ export const runtimeComponents: Record<string, any> = {}
 // 红绿灯按钮悬浮其上，仿 macOS Finder/邮件等一体式窗口）；缺省 'default' 为标准标题栏。
 export const appChrome: Record<string, 'default' | 'merged'> = {
   files: 'merged',
+  docs: 'merged',
+  sheets: 'merged',
+  slides: 'merged',
+  pdf: 'merged',
+  terminal: 'merged',
+  notes: 'merged',
 }
 
 interface State {

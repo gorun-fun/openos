@@ -7,7 +7,7 @@ import type { WinState } from '../../stores/windows'
 import { useWindows } from '../../stores/windows'
 import { useNotes, NOTE_COLORS } from '../../stores/notes'
 import { bus } from '../../bus/bus'
-import { OsButton, OsEmpty } from '../../ui'
+import { OsEmpty } from '../../ui'
 
 const props = defineProps<{ win: WinState }>()
 const windows = useWindows()
@@ -58,12 +58,12 @@ function fmt(ts: number) {
 
 <template>
   <div class="notes-app">
-    <header class="bar">
-      <b>🗒️ 便签</b>
+    <div class="os-tb notes-bar">
+      <div class="tb-title">便签</div>
       <span class="count">{{ notes.notes.length }} 张 · 自动保存 · 钉选后桌面同步显示</span>
-      <span class="grow" />
-      <OsButton variant="primary" size="sm" @click="addNote">＋ 新建便签</OsButton>
-    </header>
+      <span class="grow" data-os-drag />
+      <button class="os-tb-btn primary" @click="addNote">＋ 新建便签</button>
+    </div>
 
     <div v-if="!notes.notes.length" class="empty-wrap">
       <OsEmpty icon="🗒️" text="还没有便签，点「新建便签」随手记一条" />
@@ -102,12 +102,10 @@ function fmt(ts: number) {
 
 <style scoped>
 .notes-app { width: 100%; height: 100%; display: flex; flex-direction: column; background: var(--os-window); overflow: hidden; }
-.bar {
-  display: flex; align-items: center; gap: 10px; padding: 10px 16px;
-  border-bottom: 1px solid var(--os-border); flex: none;
-}
-.bar b { font-size: 14px; }
-.count { font-size: 12px; color: var(--os-text-secondary); }
+.notes-bar .tb-title { font-size: 13.5px; font-weight: 700; }
+.notes-bar .count { font-size: 12px; color: var(--os-text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.notes-bar .primary { background: var(--os-accent); border-color: var(--os-accent); color: #fff; font-weight: 600; }
+.notes-bar .primary:hover { background: var(--os-accent-hover); }
 .grow { flex: 1; }
 .empty-wrap { flex: 1; display: flex; align-items: center; justify-content: center; }
 

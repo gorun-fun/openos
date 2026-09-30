@@ -1,6 +1,9 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+// 计算器（macOS 拟合）：圆形按键 / 亮暗双主题 / 显示字号随位数自适应 / ⌫ 删末位。
+import { computed, ref } from 'vue'
+import { useDesktop } from '../../stores/desktop'
 
+const desktop = useDesktop()
 const display = ref('0')
 const acc = ref<number | null>(null)
 const op = ref<string | null>(null)
@@ -39,6 +42,10 @@ function press(k: string) {
     else if (!display.value.includes('.')) display.value += '.'
   } else if (k === 'AC') {
     display.value = '0'; acc.value = null; op.value = null; fresh.value = true
+  } else if (k === '⌫') {
+    if (fresh.value) return
+    display.value = display.value.length > 1 ? display.value.slice(0, -1) : '0'
+    if (display.value === '-') display.value = '0'
   } else if (k === '±') {
     display.value = fmt(-parseFloat(display.value))
   } else if (k === '%') {
@@ -62,15 +69,27 @@ function press(k: string) {
 }
 
 function onKey(e: KeyboardEvent) {
-  const map: Record<string, string> = { '/': '÷', '*': '×', '-': '−', '+': '+', '=': '=', Enter: '=', Escape: 'AC', Backspace: 'AC' }
+  const map: Record<string, string> = {
+    '/': '÷', '*': '×', '-': '−', '+': '+', '=': '=', Enter: '=', Escape: 'AC',
+    Backspace: '⌫', Delete: 'AC', '%': '%',
+  }
   const k = map[e.key] ?? (/[0-9.]/.test(e.key) ? e.key : null)
   if (k) { press(k); e.preventDefault() }
 }
+
+// 显示字号随位数收缩（macOS：超长数字自动变小）
+const fontSize = computed(() => {
+  const n = display.value.length
+  if (n <= 8) return '44px'
+  if (n <= 10) return '38px'
+  if (n <= 12) return '32px'
+  return '24px'
+})
 </script>
 
 <template>
-  <div class="calc" tabindex="0" @keydown="onKey">
-    <div class="display">{{ display }}</div>
+  <div class="calc" :class="{ dark: desktop.dark }" tabindex="0" @keydown="onKey">
+    <div class="display" :style="{ fontSize }">{{ display }}</div>
     <div class="pad">
       <template v-for="(row, ri) in keys" :key="ri">
         <button
@@ -85,22 +104,30 @@ function onKey(e: KeyboardEvent) {
 
 <style scoped>
 .calc {
-  width: 100%; background: #1c1c1e; display: flex; flex-direction: column;
+  width: 100%; background: #f2f2f4; display: flex; flex-direction: column;
   outline: none; user-select: none;
 }
+/* 亮色：macOS 计算器浅色外观；暗色沿用经典深灰 */
+.calc.dark { background: #1c1c1e; }
 .display {
   flex: 1; display: flex; align-items: flex-end; justify-content: flex-end;
-  padding: 8px 18px 6px; color: #fff; font-size: 44px; font-weight: 300;
-  font-variant-numeric: tabular-nums; min-height: 70px; overflow: hidden;
+  padding: 10px 20px 8px; color: #1d1d1f; font-weight: 300;
+  font-variant-numeric: tabular-nums; min-height: 72px; overflow: hidden; line-height: 1;
 }
-.pad { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: #333; padding: 1px; }
+.calc.dark .display { color: #fff; }
+.pad {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; padding: 12px;
+}
 .pad button {
-  height: 52px; border: none; background: #505054; color: #fff; font-size: 19px;
-  cursor: pointer; transition: filter .08s;
+  height: 46px; border: none; border-radius: 999px; font-size: 18px;
+  cursor: pointer; transition: filter .08s, transform .05s;
+  background: #e3e3e8; color: #1d1d1f; font-family: inherit;
 }
-.pad button:hover { filter: brightness(1.15); }
-.pad button:active { filter: brightness(.8); }
+.calc.dark .pad button { background: #505054; color: #fff; }
+.pad button:hover { filter: brightness(1.06); }
+.pad button:active { filter: brightness(.82); transform: scale(.97); }
 .pad .zero { grid-column: span 2; }
-.pad .fn { background: #656569; color: #fff; }
-.pad .op { background: #ff9f0a; font-size: 22px; }
+.pad .fn { background: #d4d4da; color: #1d1d1f; }
+.calc.dark .pad .fn { background: #656569; color: #fff; }
+.pad .op { background: #ff9f0a; color: #fff; font-size: 21px; }
 </style>

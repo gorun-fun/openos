@@ -258,6 +258,8 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
 .window.dragging { transition: none; }
 .window.minimized { opacity: 0; transform: scale(.06) translateY(70vh); pointer-events: none; }
 .window:not(.focused) { box-shadow: 0 10px 34px rgba(0,0,0,.2); }
+/* 最大化 = macOS 全屏形态：直角、无边框 */
+.window.maximized { border-radius: 0; border: none; }
 /* 聚焦窗口：轻微提亮边框，强化前后层次 */
 .window.focused { border-color: var(--os-border-strong); }
 

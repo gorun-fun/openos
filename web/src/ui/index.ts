@@ -17,6 +17,7 @@ import OsForm from './OsForm.vue'
 import OsField from './OsField.vue'
 import OsUpload from './OsUpload.vue'
 import OsToasts from './OsToasts.vue'
+import OsFilePicker from './OsFilePicker.vue'
 import AppIcon from './AppIcon.vue'
 
 export { toast, toastState } from './toast'
@@ -24,5 +25,5 @@ export type { ToastType, ToastItem } from './toast'
 
 export {
   OsButton, OsInput, OsSelect, OsToggle, OsCheckbox, OsTextarea, OsPanel, OsModal,
-  OsTabs, OsTable, OsLayout, OsToolbar, OsEmpty, OsForm, OsField, OsUpload, OsToasts, AppIcon,
+  OsTabs, OsTable, OsLayout, OsToolbar, OsEmpty, OsForm, OsField, OsUpload, OsToasts, OsFilePicker, AppIcon,
 }

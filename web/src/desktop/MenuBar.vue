@@ -9,7 +9,7 @@ import { bus } from '../bus/bus'
 import { shell } from '../shell'
 import { OsModal, OsButton } from '../ui'
 
-const emit = defineEmits<{ launchpad: [] }>()
+const emit = defineEmits<{ launchpad: []; spotlight: [] }>()
 const session = useSession()
 const windows = useWindows()
 const desktop = useDesktop()
@@ -20,8 +20,9 @@ let timer = 0
 onMounted(() => { timer = window.setInterval(() => (now.value = new Date()), 1000) })
 onBeforeUnmount(() => clearInterval(timer))
 
+// macOS 菜单栏时间格式：周三 10月1日 09:41（星期在前）
 const timeText = computed(() =>
-  `${now.value.getMonth() + 1}月${now.value.getDate()}日 周${'日一二三四五六'[now.value.getDay()]} ${String(now.value.getHours()).padStart(2, '0')}:${String(now.value.getMinutes()).padStart(2, '0')}`,
+  `周${'日一二三四五六'[now.value.getDay()]} ${now.value.getMonth() + 1}月${now.value.getDate()}日 ${String(now.value.getHours()).padStart(2, '0')}:${String(now.value.getMinutes()).padStart(2, '0')}`,
 )
 
 const activeWin = computed(() => (windows.active?.minimized ? undefined : windows.active))
@@ -136,10 +137,10 @@ defineExpose({ closeMenu })
               @click="item.run(); closeMenu()"
             >{{ item.label }}</button>
             <div v-if="appMenuOf(activeApp.id).length" class="sep" />
-            <button :disabled="!activeWin" @click="activeWin && windows.minimize(activeWin.id); closeMenu()">隐藏（Alt+M）</button>
-            <button :disabled="!activeWin" @click="activeWin && windows.toggleMaximize(activeWin.id); closeMenu()">缩放（Alt+↩）</button>
+            <button :disabled="!activeWin" @click="activeWin && windows.minimize(activeWin.id); closeMenu()">隐藏<span class="hint">⌥M</span></button>
+            <button :disabled="!activeWin" @click="activeWin && windows.toggleMaximize(activeWin.id); closeMenu()">缩放<span class="hint">⌥↩</span></button>
             <div class="sep" />
-            <button :disabled="!activeWin" @click="activeWin && windows.close(activeWin.id); closeMenu()">退出 {{ activeApp.name }}（Alt+W）</button>
+            <button :disabled="!activeWin" @click="activeWin && windows.close(activeWin.id); closeMenu()">退出 {{ activeApp.name }}<span class="hint">⌥W</span></button>
           </div>
         </div>
 
@@ -147,13 +148,13 @@ defineExpose({ closeMenu })
         <div class="menu-anchor">
           <button class="mb" @click="toggle('win')">窗口</button>
           <div class="dropdown" v-if="menuOpen === 'win'">
-            <button :disabled="!windows.active" @click="windows.active && windows.minimize(windows.active.id); closeMenu()">最小化（Alt+M）</button>
-            <button :disabled="!windows.active" @click="windows.active && windows.toggleMaximize(windows.active.id); closeMenu()">缩放（Alt+↩）</button>
+            <button :disabled="!windows.active" @click="windows.active && windows.minimize(windows.active.id); closeMenu()">最小化<span class="hint">⌥M</span></button>
+            <button :disabled="!windows.active" @click="windows.active && windows.toggleMaximize(windows.active.id); closeMenu()">缩放<span class="hint">⌥↩</span></button>
             <button :disabled="!windows.active" @click="windows.active && windows.snap(windows.active.id, 'left'); closeMenu()">左半屏</button>
             <button :disabled="!windows.active" @click="windows.active && windows.snap(windows.active.id, 'right'); closeMenu()">右半屏</button>
             <div class="sep" />
-            <button :disabled="windows.list.length < 2" @click="windows.cycle(); closeMenu()">循环切换（Alt+`）</button>
-            <button :disabled="!windows.active" @click="windows.active && windows.close(windows.active.id); closeMenu()">关闭窗口（Alt+W）</button>
+            <button :disabled="windows.list.length < 2" @click="windows.cycle(); closeMenu()">循环切换<span class="hint">⌥`</span></button>
+            <button :disabled="!windows.active" @click="windows.active && windows.close(windows.active.id); closeMenu()">关闭窗口<span class="hint">⌥W</span></button>
             <button :disabled="!windows.list.length" @click="windows.list.forEach(w => windows.close(w.id)); closeMenu()">关闭全部窗口</button>
           </div>
         </div>
@@ -171,6 +172,10 @@ defineExpose({ closeMenu })
     <nav class="right">
       <!-- 宿主应用注入的菜单栏扩展（门店切换器/业务状态角标等），见 createOpenOS({menubarExtras})；支持数组多槽 -->
       <component :is="x" v-for="(x, i) in extras" :key="i" />
+      <!-- 聚焦搜索（⌘/Alt+Space） -->
+      <button class="mb icon-btn" title="聚焦搜索（⌘/Alt+Space）" @click="emit('spotlight')">
+        <svg viewBox="0 0 16 16" class="mb-svg"><circle cx="6.8" cy="6.8" r="4.6" fill="none" stroke="currentColor" stroke-width="1.5" /><line x1="10.4" y1="10.4" x2="14.2" y2="14.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg>
+      </button>
       <span class="mb chip" :title="online.join('、')">👥 {{ online.length }} 在线</span>
       <span class="mb chip" :title="aiOn ? 'AI 已接入' : 'AI 演示模式（设置 → AI 服务 可配置）'">{{ aiOn ? '✦ AI' : '✦ AI·demo' }}</span>
       <button class="mb chip icon" title="切换深浅色" @click="desktop.setDark(!desktop.dark)">
@@ -185,7 +190,7 @@ defineExpose({ closeMenu })
         <b>{{ shell.brand.name }}</b>（OpenOS v{{ version || '1.1' }}）<br />
         Go + Vite (Vue 3) · 事件总线通信 · SQLite 存储<br />
         已运行：{{ uptimeText }} · 在线：{{ online.length }} 人<br />
-        快捷键：Alt+W 关闭 · Alt+M 最小化 · Alt+↩ 缩放 · Alt+` 切换 · Alt+Space 启动台
+        快捷键：⌘/Alt+Space 聚焦搜索 · F4 启动台 · Alt+W 关闭 · Alt+M 最小化 · Alt+↩ 缩放 · Alt+` 切换窗口
       </p>
     </OsModal>
   </header>
@@ -230,10 +235,14 @@ button.mb { cursor: pointer; }
   transform-origin: top left;
 }
 .dropdown button {
-  display: block; width: 100%; text-align: left; padding: 6px 12px; border: none;
+  display: flex; align-items: center; width: 100%; text-align: left; padding: 6px 12px; border: none;
   background: transparent; border-radius: 7px; color: var(--os-text); font-size: 13px; cursor: pointer;
   transition: background .1s ease;
 }
+.dropdown button .hint { margin-left: auto; padding-left: 18px; font-size: 12px; color: var(--os-text-secondary); }
+.dropdown button:hover:not(:disabled) .hint { color: rgba(255, 255, 255, .78); }
+.icon-btn { display: inline-flex; align-items: center; justify-content: center; }
+.mb-svg { width: 15px; height: 15px; }
 .dropdown button:hover:not(:disabled) { background: var(--os-accent); color: #fff; }
 .dropdown button:disabled { opacity: .35; cursor: default; }
 .sep { height: 1px; background: var(--os-border); margin: 5px 10px; }

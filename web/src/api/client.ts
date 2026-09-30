@@ -87,6 +87,8 @@ export const fsApi = {
   remove: (path: string) => api.del<{ ok: string }>(`/api/fs/remove?path=${encodeURIComponent(path)}`),
   rename: (from: string, to: string) => api.post<{ ok: string }>(`/api/fs/rename`, { from, to }),
   usage: () => api.get<{ used: number; quota: number }>(`/api/fs/usage`),
+  search: (q: string, limit = 50) => api.get<VFile[]>(`/api/fs/search?q=${encodeURIComponent(q)}&limit=${limit}`),
+  copy: (from: string, to: string) => api.post<{ ok: string }>(`/api/fs/copy`, { from, to }),
   upload: async (dir: string, files: File[]): Promise<{ saved: string[] }> => {
     const fd = new FormData()
     fd.append('dir', dir)

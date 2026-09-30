@@ -6,7 +6,7 @@ import { onMounted, ref, watch } from 'vue'
 import { useWindows } from '../stores/windows'
 import { useApps } from '../stores/apps'
 import { useSession } from '../stores/session'
-import { fsApi } from '../api/client'
+import { openPath, fileEmoji } from '../apps/openWith'
 import AppIcon from '../ui/AppIcon.vue'
 import { GRID, cellUnder, findFree, isFree, posOf, registerItem, unregisterItem } from './grid'
 
@@ -69,15 +69,6 @@ const stopSeed = watch(() => apps.apps.length, (n) => {
 
 function save() { localStorage.setItem(KEY(), JSON.stringify(list.value)) }
 
-function extOf(p: string) { return (p.match(/\.([a-z0-9]+)$/i)?.[1] || '').toLowerCase() }
-const APP_FOR_EXT: Record<string, string> = {
-  txt: 'docs', md: 'docs', html: 'docs', json: 'docs',
-  csv: 'sheets', tsv: 'sheets', pdf: 'pdf',
-}
-const FILE_EMOJI: Record<string, string> = {
-  md: '📄', txt: '📄', pdf: '📕', csv: '📊', html: '🌐', png: '🖼️', jpg: '🖼️', jpeg: '🖼️', gif: '🖼️',
-}
-
 function place(s: Shortcut, c: number, r: number) {
   const rect = findFree(c, r, 1, 1, 'shortcut', keyOf(s))
   s.col = rect.c
@@ -104,11 +95,8 @@ function style(s: Shortcut) {
 }
 
 function open(s: Shortcut) {
-  if (s.kind === 'app') {
-    windows.open(s.id)
-  } else {
-    windows.open(APP_FOR_EXT[extOf(s.id)] || 'docs', { path: s.id }, s.name)
-  }
+  if (s.kind === 'app') windows.open(s.id)
+  else openPath(s.id) // 统一关联表：md→文档、csv→表格、html→幻灯片、图片→预览
 }
 
 /** 桌面右键菜单调用：按唯一键（kind:id，见 data-id）打开 / 移除。 */
@@ -194,7 +182,7 @@ async function dropShortcut(e: DragEvent) {
         <AppIcon :app="s.id" :size="48" />
       </template>
       <template v-else>
-        <span class="file-icon">{{ FILE_EMOJI[extOf(s.id)] || '📄' }}</span>
+        <span class="file-icon">{{ fileEmoji(s.id) }}</span>
       </template>
       <span class="name">{{ s.name }}</span>
     </div>

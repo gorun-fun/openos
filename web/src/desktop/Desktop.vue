@@ -8,6 +8,7 @@ import { bus } from '../bus/bus'
 import MenuBar from './MenuBar.vue'
 import Dock from './Dock.vue'
 import Launchpad from './Launchpad.vue'
+import Spotlight from './Spotlight.vue'
 import WindowFrame from './WindowFrame.vue'
 import Shortcuts from './Shortcuts.vue'
 import Widgets from './Widgets.vue'
@@ -15,6 +16,7 @@ import { snapPreview } from './snapState'
 import { fsApi } from '../api/client'
 import { toast } from '../ui/toast'
 import { widgetDefs, widgetDef } from './widgetRegistry'
+import { appForPath } from '../apps/openWith'
 
 const session = useSession()
 const desktop = useDesktop()
@@ -23,16 +25,6 @@ const windows = useWindows()
 
 // ---- 全局事件总线路由：任何入口（终端 / goder / 其他窗口）都可操控桌面 ----
 const offs: (() => void)[] = []
-
-// 按扩展名选择打开应用
-function appForPath(path: string): string {
-  const ext = (path.match(/\.([a-z0-9]+)$/i)?.[1] || '').toLowerCase()
-  const map: Record<string, string> = {
-    txt: 'docs', md: 'docs', html: 'docs', json: 'docs',
-    csv: 'sheets', tsv: 'sheets', pdf: 'pdf',
-  }
-  return map[ext] || 'docs'
-}
 
 onMounted(async () => {
   desktop.load()
@@ -136,14 +128,23 @@ function runCmd(p: any) {
 
 // ---- 键盘快捷键 ----
 const launchpadOpen = ref(false)
+const spotOpen = ref(false)
 function onShortcut(e: KeyboardEvent) {
   const inField = !!(e.target as HTMLElement)?.closest?.('input, textarea, [contenteditable="true"]')
   if (e.key === 'Escape') {
     launchpadOpen.value = false
+    spotOpen.value = false
     ctx.value = null
     return
   }
-  if (e.key === 'F4') { launchpadOpen.value = !launchpadOpen.value; e.preventDefault(); return } // 启动台（Alt+Space 的备用键）
+  // 聚焦搜索：⌘/Ctrl/Alt + Space（macOS 为 ⌘Space；浏览器内 Alt 最稳）。
+  // 放在输入框判定之前——任何场景下都应可唤起。
+  if (e.code === 'Space' && (e.metaKey || e.ctrlKey || e.altKey)) {
+    spotOpen.value = !spotOpen.value
+    e.preventDefault()
+    return
+  }
+  if (e.key === 'F4') { launchpadOpen.value = !launchpadOpen.value; e.preventDefault(); return } // 启动台
   if (!e.altKey || inField) return
   const w = windows.active
   switch (e.key) {
@@ -151,7 +152,6 @@ function onShortcut(e: KeyboardEvent) {
     case 'm': case 'M': if (w) { windows.minimize(w.id); e.preventDefault(); } break
     case 'Enter': if (w) { windows.toggleMaximize(w.id); e.preventDefault(); } break
     case '`': windows.cycle(); e.preventDefault(); break
-    case ' ': launchpadOpen.value = !launchpadOpen.value; e.preventDefault(); break
   }
 }
 
@@ -251,7 +251,7 @@ function ctxCycleNoteColor() {
 
 <template>
   <div class="desktop" :style="{ background: desktop.wallpapers[desktop.wallpaper] }" @pointerdown="ctx = null" @contextmenu="onContext" @dragover.prevent @drop="onDrop">
-    <MenuBar @launchpad="launchpadOpen = true" />
+    <MenuBar @launchpad="launchpadOpen = true" @spotlight="spotOpen = true" />
 
     <Widgets ref="widgetsRef" />
     <Shortcuts ref="shortcutsRef" />
@@ -263,6 +263,7 @@ function ctxCycleNoteColor() {
     <Dock @launchpad="launchpadOpen = true" />
 
     <Launchpad v-if="launchpadOpen" @close="launchpadOpen = false" />
+    <Spotlight v-if="spotOpen" @close="spotOpen = false" />
 
     <!-- 窗口吸附预览（桌面层渲染，避免被窗口裁剪） -->
     <div v-if="snapPreview" class="snap-preview" :style="{

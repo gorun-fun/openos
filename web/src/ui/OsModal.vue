@@ -35,8 +35,8 @@ const emit = defineEmits<{ ok: []; cancel: [] }>()
   from { opacity: 0; transform: scale(.92) translateY(8px); }
   to { opacity: 1; transform: scale(1) translateY(0); }
 }
-h3 { font-size: 14.5px; margin-bottom: 10px; }
-.content { font-size: 13px; color: var(--os-text-secondary); margin-bottom: 16px; }
+h3 { font-size: 14px; margin-bottom: 8px; text-align: center; }
+.content { font-size: 13px; color: var(--os-text-secondary); margin-bottom: 16px; text-align: center; }
 footer { display: flex; justify-content: flex-end; gap: 8px; }
 .btn {
   padding: 5px 16px; border-radius: 8px; font-size: 13px; cursor: pointer; border: none;

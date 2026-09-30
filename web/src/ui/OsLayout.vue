@@ -17,6 +17,7 @@ const emit = defineEmits<{ select: [key: string] }>()
       <div class="win-badge">{{ win.title }}</div>
       <button
         v-for="it in items" :key="it.key"
+        :data-key="it.key"
         :class="{ active: active === it.key }"
         @click="emit('select', it.key)"
       >
@@ -47,8 +48,12 @@ const emit = defineEmits<{ select: [key: string] }>()
   color: var(--os-text); font-size: 13px; cursor: pointer;
 }
 .os-sidebar button:hover { background: var(--os-hover); }
-.os-sidebar button.active { background: var(--os-selected); font-weight: 600; }
-.ic { width: 18px; text-align: center; }
+/* 选中项：accent 实心底白字（macOS 系统设置边栏样式） */
+.os-sidebar button.active { background: var(--os-accent); color: #fff; font-weight: 600; }
+.ic {
+  width: 22px; height: 22px; flex: none; border-radius: 6px; display: inline-flex;
+  align-items: center; justify-content: center; font-size: 12px; margin-right: 2px;
+}
 .os-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .os-content { flex: 1; min-height: 0; overflow: auto; padding: 16px; display: flex; flex-direction: column; }
 .os-statusbar {

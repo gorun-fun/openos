@@ -1,161 +1,226 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+// 文档应用（Markdown 优先）：编辑 / 分栏 / 预览三态，读写 VFS 文件（默认 .md）。
+// 打开…/存储/另存为走 OsFilePicker；已有文件 1.5s 防抖自动保存。
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { WinState } from '../../stores/windows'
 import { useWindows } from '../../stores/windows'
 import { useSession } from '../../stores/session'
 import { fsApi } from '../../api/client'
 import { bus } from '../../bus/bus'
-import { OsToolbar, OsButton } from '../../ui'
+import { OsFilePicker, toast } from '../../ui'
+import { renderMarkdown } from '../../lib/md'
 
 const props = defineProps<{ win: WinState }>()
 const windows = useWindows()
 const session = useSession()
-const editorEl = ref<HTMLElement>()
-const fileName = ref((props.win.props?.path || '').split('/').pop() || '未命名文档.html')
-const filePath = ref<string>(props.win.props?.path || '')
-const saved = ref(true)
-const saveHint = ref('') // "自动保存于 12:03" / "已保存"
 
-onMounted(async () => {
-  if (filePath.value) {
-    try {
-      const data = await fsApi.read(filePath.value)
-      editorEl.value!.innerHTML = data.content || '<p><br></p>'
-      saved.value = true
-    } catch { editorEl.value!.innerHTML = '<p><br></p>' }
-  } else {
-    editorEl.value!.innerHTML = '<h1>新文档</h1><p>开始输入…</p>'
-  }
-  windows.setTitle(props.win.id, fileName.value + ' — 文档')
+const initialPath: string = props.win.props?.path || ''
+const filePath = ref('')
+const text = ref('')
+const dirty = ref(false)
+const saveHint = ref('')
+const mode = ref<'edit' | 'split' | 'preview'>('split')
+const picker = ref<null | 'open' | 'save'>(null)
+const editorEl = ref<HTMLTextAreaElement>()
+
+const ext = computed(() => filePath.value.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase() || '')
+const isMd = computed(() => !ext.value || ['md', 'markdown'].includes(ext.value))
+const fileName = computed(() => filePath.value ? filePath.value.split('/').pop()! : '未命名文稿.md')
+
+const html = computed(() => renderMarkdown(text.value))
+const wordCount = computed(() => {
+  const cjk = (text.value.match(/[\u4e00-\u9fa5]/g) || []).length
+  const words = (text.value.replace(/[\u4e00-\u9fa5]/g, ' ').match(/[A-Za-z0-9_'-]+/g) || []).length
+  return cjk + words
 })
 
-function markDirty() { saved.value = false }
+function syncTitle() {
+  windows.setTitle(props.win.id, (dirty.value ? '● ' : '') + fileName.value + ' — 文档')
+}
+watch([fileName, dirty], syncTitle)
 
-// ---- 自动保存（命名后启用，防抖 1.2s） ----
+onMounted(async () => {
+  if (initialPath) {
+    try {
+      const d = await fsApi.read(initialPath)
+      if (d.isBinary) { toast('二进制文件，请在文件应用中预览', { type: 'error' }); return }
+      filePath.value = initialPath
+      text.value = d.content
+      if (!isMd.value) mode.value = 'edit'
+    } catch (e: any) { toast('打开失败：' + e.message, { type: 'error' }) }
+  } else {
+    text.value = '# 未命名文稿\n\n'
+  }
+  syncTitle()
+})
+
+// ---- 保存（⌘S）/ 另存为（⇧⌘S）/ 自动保存 ----
+async function writeOut() {
+  if (!filePath.value) return
+  try {
+    await fsApi.write(filePath.value, text.value)
+    dirty.value = false
+    const t = new Date()
+    saveHint.value = `已存储 ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`
+    bus.emit('fs:changed', { path: filePath.value, kind: 'write' }, { remote: false })
+  } catch (e: any) {
+    saveHint.value = ''
+    toast('保存失败：' + e.message, { type: 'error' })
+  }
+}
+
+function save() {
+  if (filePath.value) { writeOut(); return }
+  picker.value = 'save'
+}
+function saveAs() { picker.value = 'save' }
+
+async function onPickerConfirm(p: string) {
+  const m = picker.value
+  picker.value = null
+  if (m === 'open') {
+    try {
+      const d = await fsApi.read(p)
+      if (d.isBinary) { toast('二进制文件，请在文件应用中预览', { type: 'error' }); return }
+      filePath.value = p
+      text.value = d.content
+      dirty.value = false
+      if (!isMd.value) mode.value = 'edit'
+    } catch (e: any) { toast('打开失败：' + e.message, { type: 'error' }) }
+  } else {
+    filePath.value = p
+    await writeOut()
+  }
+}
+
 let autoTimer = 0
 function scheduleAutosave() {
   if (!filePath.value) return
   clearTimeout(autoTimer)
-  autoTimer = window.setTimeout(doSave, 1200)
+  autoTimer = window.setTimeout(writeOut, 1500)
 }
-onBeforeUnmount(() => { clearTimeout(autoTimer) })
-
-async function doSave() {
-  if (!editorEl.value) return
-  await fsApi.write(filePath.value, editorEl.value.innerHTML)
-  saved.value = true
-  const t = new Date()
-  saveHint.value = `自动保存于 ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`
-  bus.emit('fs:changed', { path: filePath.value, kind: 'write' }, { remote: false })
-}
-
-async function save() {
-  if (!filePath.value) {
-    const name = prompt('保存为（输入文件名）', fileName.value)
-    if (!name) return
-    fileName.value = name.endsWith('.html') || name.endsWith('.md') ? name : name + '.html'
-    filePath.value = `/home/${session.user!.username}/文档/${fileName.value}`
-  }
-  await doSave()
-  windows.setTitle(props.win.id, fileName.value + ' — 文档')
-}
+onBeforeUnmount(() => clearTimeout(autoTimer))
 
 function onInput() {
-  markDirty()
+  dirty.value = true
   scheduleAutosave()
 }
 
-// 字数统计
-const wordCount = computed(() => {
-  const text = editorEl.value?.innerText || ''
-  const cjk = (text.match(/[\u4e00-\u9fa5]/g) || []).length
-  const words = (text.replace(/[\u4e00-\u9fa5]/g, ' ').match(/[A-Za-z0-9_'-]+/g) || []).length
-  return `${cjk + words} 字`
-})
+function onKey(e: KeyboardEvent) {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
+    e.preventDefault()
+    if (e.shiftKey) saveAs()
+    else save()
+  } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'o') {
+    e.preventDefault()
+    picker.value = 'open'
+  }
+}
 
-function cmd(name: string, val?: string) {
-  document.execCommand(name, false, val)
-  editorEl.value?.focus()
-  markDirty()
-  scheduleAutosave()
+// Tab 插入两个空格（编辑器习惯）
+function onTab(e: KeyboardEvent) {
+  if (e.key !== 'Tab' || !editorEl.value) return
+  e.preventDefault()
+  const el = editorEl.value
+  const s = el.selectionStart, ed = el.selectionEnd
+  text.value = text.value.slice(0, s) + '  ' + text.value.slice(ed)
+  requestAnimationFrame(() => { el.selectionStart = el.selectionEnd = s + 2 })
 }
 
 function exportFile() {
-  const blob = new Blob([`<!doctype html><meta charset="utf-8"><title>${fileName.value}</title>` + editorEl.value!.innerHTML], { type: 'text/html' })
+  const blob = new Blob([text.value], { type: 'text/plain' })
   const a = document.createElement('a')
   a.href = URL.createObjectURL(blob)
-  a.download = fileName.value.endsWith('.html') ? fileName.value : fileName.value + '.html'
+  a.download = fileName.value
   a.click()
   URL.revokeObjectURL(a.href)
 }
-
-const groups: { cmd: string; val?: string; label: string; title: string }[][] = [
-  [
-    { cmd: 'bold', label: 'B', title: '加粗' },
-    { cmd: 'italic', label: 'I', title: '斜体' },
-    { cmd: 'underline', label: 'U', title: '下划线' },
-    { cmd: 'strikeThrough', label: 'S', title: '删除线' },
-  ],
-  [
-    { cmd: 'formatBlock', val: 'h1', label: 'H1', title: '标题 1' },
-    { cmd: 'formatBlock', val: 'h2', label: 'H2', title: '标题 2' },
-    { cmd: 'formatBlock', val: 'h3', label: 'H3', title: '标题 3' },
-    { cmd: 'formatBlock', val: 'p', label: '正文', title: '正文' },
-  ],
-  [
-    { cmd: 'insertUnorderedList', label: '• 列表', title: '无序列表' },
-    { cmd: 'insertOrderedList', label: '1. 列表', title: '有序列表' },
-    { cmd: 'formatBlock', val: 'blockquote', label: '❝ 引用', title: '引用' },
-    { cmd: 'formatBlock', val: 'pre', label: '</> 代码', title: '代码块' },
-  ],
-  [
-    { cmd: 'justifyLeft', label: '⬅', title: '左对齐' },
-    { cmd: 'justifyCenter', label: '⬌', title: '居中' },
-    { cmd: 'justifyRight', label: '➡', title: '右对齐' },
-    { cmd: 'removeFormat', label: '⌫ 格式', title: '清除格式' },
-  ],
-]
 </script>
 
 <template>
-  <div class="docs">
-    <OsToolbar>
-      <template v-for="(g, gi) in groups" :key="gi">
-        <button v-for="b in g" :key="b.cmd + b.val" :title="b.title"
-          :class="{ on: false }"
-          :style="b.cmd === 'bold' ? 'font-weight:700' : b.cmd === 'italic' ? 'font-style:italic' : b.cmd === 'underline' ? 'text-decoration:underline' : b.cmd === 'strikeThrough' ? 'text-decoration:line-through' : ''"
-          @mousedown.prevent @click="cmd(b.cmd, b.val)">{{ b.label }}</button>
-        <span class="sep" />
-      </template>
-      <span class="grow" />
-      <span class="save-state">{{ saved ? (saveHint || '已保存') : '未保存' }} · {{ wordCount }}</span>
-      <OsButton size="sm" @click="exportFile">导出 HTML</OsButton>
-      <OsButton size="sm" variant="primary" @click="save">{{ filePath ? '保存' : '保存到文件' }}</OsButton>
-    </OsToolbar>
-
-    <div class="paper-wrap">
-      <div
-        ref="editorEl"
-        class="paper"
-        contenteditable="true"
-        spellcheck="false"
-        @input="onInput"
-      />
+  <div class="docs" tabindex="0" @keydown="onKey">
+    <div class="os-tb">
+      <button class="os-tb-btn" title="打开…（⌘O）" @click="picker = 'open'">打开…</button>
+      <button class="os-tb-btn" title="存储（⌘S）" @click="save">存储</button>
+      <button class="os-tb-btn" title="另存为…（⇧⌘S）" @click="saveAs">另存为…</button>
+      <span class="os-tb-sep" />
+      <div class="tb-title" :title="filePath || '尚未存储'" data-os-drag>
+        <span v-if="dirty" class="dot" />{{ fileName }}
+      </div>
+      <span class="grow" data-os-drag />
+      <div v-if="isMd" class="os-seg">
+        <button class="os-seg-btn" :class="{ on: mode === 'edit' }" title="编辑" @click="mode = 'edit'">编辑</button>
+        <button class="os-seg-btn" :class="{ on: mode === 'split' }" title="分栏" @click="mode = 'split'">分栏</button>
+        <button class="os-seg-btn" :class="{ on: mode === 'preview' }" title="预览" @click="mode = 'preview'">预览</button>
+      </div>
+      <span class="os-tb-sep" />
+      <span class="meta">{{ saveHint || (dirty ? '未存储' : '') }}</span>
+      <span class="meta dim">{{ wordCount }} 字</span>
+      <button class="os-tb-btn" title="导出到本机" @click="exportFile">导出</button>
     </div>
+
+    <div class="main" :class="'mode-' + mode">
+      <textarea
+        v-show="mode !== 'preview'"
+        ref="editorEl" v-model="text" class="editor" spellcheck="false"
+        placeholder="# 开始输入 Markdown…"
+        @input="onInput" @keydown="onTab"
+      />
+      <div v-show="mode !== 'edit'" class="preview md-body" v-html="html" />
+    </div>
+
+    <OsFilePicker
+      v-if="picker" :mode="picker" :title="picker === 'open' ? '打开文稿' : '存储文稿为'"
+      :default-dir="`/home/${session.user!.username}/文档`" :default-name="fileName"
+      @confirm="onPickerConfirm" @cancel="picker = null"
+    />
   </div>
 </template>
 
 <style scoped>
-.docs { width: 100%; display: flex; flex-direction: column; background: var(--os-window); }
-.save-state { font-size: 11.5px; color: var(--os-text-secondary); }
-.paper-wrap { flex: 1; overflow: auto; padding: 24px; background: var(--os-bg); }
-.paper {
-  max-width: 760px; margin: 0 auto; min-height: 900px; background: #fff; color: #1d1d1f;
-  border-radius: 4px; box-shadow: 0 2px 18px rgba(0,0,0,.14); padding: 60px 64px;
-  line-height: 1.8; font-size: 15px; outline: none; user-select: text;
+.docs { width: 100%; display: flex; flex-direction: column; background: var(--os-window); outline: none; }
+.tb-title { max-width: 40%; display: flex; align-items: center; gap: 6px; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--os-text-secondary); flex: none; }
+.grow { flex: 1; }
+.meta { font-size: 11.5px; color: var(--os-text-secondary); white-space: nowrap; }
+.meta.dim { opacity: .8; }
+
+.main { flex: 1; min-height: 0; display: flex; }
+.main.mode-preview { background: var(--os-bg); }
+.editor {
+  flex: 1; min-width: 0; border: none; outline: none; resize: none;
+  background: var(--os-window); color: var(--os-text);
+  font-family: var(--os-mono); font-size: 13.5px; line-height: 1.8;
+  padding: 22px 26px; user-select: text;
 }
-.paper:empty::before { content: '开始输入…'; color: #bbb; }
-.paper h1, .paper h2, .paper h3 { margin: 0.6em 0 0.35em; }
-.paper blockquote { border-left: 3px solid #0a84ff; padding-left: 14px; color: #555; margin: 0.6em 0; }
-.paper pre { background: #f5f5f7; padding: 12px 14px; border-radius: 8px; font-family: var(--os-mono); font-size: 13px; overflow-x: auto; }
+.main.mode-split .editor { border-right: 1px solid var(--os-border); }
+.preview { flex: 1; min-width: 0; overflow-y: auto; padding: 26px 34px; user-select: text; }
+
+/* Markdown 渲染样式（编辑器内预览与快速查看保持一致观感） */
+.md-body { font-size: 14.5px; line-height: 1.8; color: var(--os-text); }
+.md-body :deep(h1) { font-size: 1.75em; margin: .65em 0 .4em; line-height: 1.3; }
+.md-body :deep(h2) { font-size: 1.42em; margin: .65em 0 .35em; }
+.md-body :deep(h3) { font-size: 1.2em; margin: .6em 0 .3em; }
+.md-body :deep(h4), .md-body :deep(h5), .md-body :deep(h6) { font-size: 1.05em; margin: .6em 0 .3em; }
+.md-body :deep(p) { margin: .5em 0; }
+.md-body :deep(a) { color: var(--os-accent); }
+.md-body :deep(pre) {
+  background: var(--os-active); padding: 12px 14px; border-radius: 8px; overflow-x: auto;
+  font-family: var(--os-mono); font-size: 12.5px; line-height: 1.6; margin: .6em 0;
+}
+.md-body :deep(code) {
+  font-family: var(--os-mono); background: var(--os-active); border-radius: 4px;
+  padding: 1px 5px; font-size: .9em;
+}
+.md-body :deep(pre code) { background: none; padding: 0; }
+.md-body :deep(blockquote) {
+  border-left: 3px solid var(--os-accent); padding-left: 14px; color: var(--os-text-secondary); margin: .6em 0;
+}
+.md-body :deep(ul), .md-body :deep(ol) { padding-left: 1.6em; margin: .5em 0; }
+.md-body :deep(li) { margin: .2em 0; }
+.md-body :deep(table) { border-collapse: collapse; margin: .6em 0; }
+.md-body :deep(th), .md-body :deep(td) { border: 1px solid var(--os-border-strong); padding: 5px 12px; font-size: .92em; }
+.md-body :deep(th) { background: var(--os-sidebar); }
+.md-body :deep(img) { max-width: 100%; border-radius: 8px; }
+.md-body :deep(hr) { border: none; border-top: 1px solid var(--os-border-strong); margin: 1.2em 0; }
 </style>

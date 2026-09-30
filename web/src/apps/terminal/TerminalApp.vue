@@ -157,8 +157,9 @@ function onKey(e: KeyboardEvent) {
 
 <template>
   <div class="term" @pointerup="inputEl?.focus()">
-    <div class="term-head">
-      <div class="mode-switch">
+    <!-- 融合窗体工具栏：虚拟/真实切换 + 标题（用户 — 模式）+ 清屏 -->
+    <div class="os-tb term-tb">
+      <div class="os-seg dark-seg">
         <button :class="{ on: mode === 'virtual' }" @click="switchMode('virtual')">虚拟</button>
         <button
           :class="{ on: mode === 'real' }"
@@ -167,7 +168,11 @@ function onKey(e: KeyboardEvent) {
           @click="switchMode('real')"
         >真实</button>
       </div>
-      <span class="mode-hint">{{ mode === 'real' ? '⣿ 服务端 sh 受控执行' : '⣿ 虚拟文件系统' }}</span>
+      <span class="os-tb-sep dark-sep" />
+      <div class="tb-title">{{ user }} — {{ mode === 'real' ? '真实终端' : '虚拟终端' }}</div>
+      <span class="grow" data-os-drag />
+      <span class="mode-hint">{{ mode === 'real' ? 'sh 受控执行 · 沙箱内' : '虚拟文件系统' }}</span>
+      <button class="os-tb-btn dark-btn" title="清屏（Ctrl+L）" @click="lines = []">清屏</button>
     </div>
     <div ref="bodyEl" class="body">
       <div v-for="(l, i) in lines" :key="i" class="line" :class="l.cls" v-html="l.html"></div>
@@ -193,18 +198,25 @@ function onKey(e: KeyboardEvent) {
   cursor: text;
 }
 html.dark .term { background: rgba(12, 12, 15, .98); }
-.term-head {
-  flex: none; display: flex; align-items: center; gap: 10px; padding: 5px 12px;
-  border-bottom: 1px solid rgba(255,255,255,.08); background: rgba(255,255,255,.03);
+/* 融合工具栏沿用终端深色（Terminal Pro 外观），避免亮色工具条压在黑底上 */
+.term-tb {
+  background: rgba(32, 32, 38, .92); border-bottom: 1px solid rgba(255, 255, 255, .08);
 }
-.mode-switch { display: flex; gap: 2px; background: rgba(255,255,255,.08); border-radius: 7px; padding: 2px; }
-.mode-switch button {
-  border: none; background: transparent; color: #9a9aa2; font-size: 11.5px; padding: 2px 12px;
-  border-radius: 5px; cursor: pointer; font-family: inherit;
+.dark-seg { background: rgba(255, 255, 255, .1); }
+.dark-seg button {
+  border: none; background: transparent; color: #9a9aa2; font-size: 12px; padding: 2px 12px;
+  border-radius: 5px; cursor: pointer; font-family: inherit; height: 22px;
 }
-.mode-switch button.on { background: #4a4a52; color: #fff; }
-.mode-switch button:disabled { opacity: .35; cursor: not-allowed; }
-.mode-hint { font-size: 11px; color: #8a8a92; }
+.dark-seg button.on { background: #5a5a64; color: #fff; }
+.dark-seg button:disabled { opacity: .35; cursor: not-allowed; }
+.dark-sep { background: rgba(255, 255, 255, .12); }
+.term-tb .tb-title { color: #c8c8ce; font-size: 13px; font-weight: 600; }
+.dark-btn {
+  background: rgba(255, 255, 255, .1); border-color: rgba(255, 255, 255, .16); color: #d4d4da; font-size: 12px;
+}
+.dark-btn:hover { background: rgba(255, 255, 255, .16); }
+.mode-hint { font-size: 11px; color: #8a8a92; white-space: nowrap; }
+.grow { flex: 1; }
 .body { flex: 1; overflow-y: auto; padding: 10px 14px 12px; }
 .line { white-space: pre-wrap; word-break: break-all; line-height: 1.55; }
 .echo { color: #7ecbff; }

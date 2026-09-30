@@ -209,44 +209,57 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
 </script>
 
 <template>
-  <OsLayout :win="props.win" :items="items" :active="tab" status="OpenOS · 系统设置" @select="tab = $event">
+  <OsLayout :win="props.win" :items="items" :active="tab" @select="tab = $event">
     <!-- 外观 -->
     <template v-if="tab === 'appearance'">
-      <OsPanel title="壁纸">
-        <div class="wallpapers">
-          <button
-            v-for="(w, i) in desktop.wallpapers" :key="i"
-            class="wall" :class="{ active: desktop.wallpaper === i }"
-            :style="{ background: w }" @click="desktop.setWallpaper(i)"
-          >{{ i + 1 }}</button>
+      <h2 class="sec">外观</h2>
+      <div class="card">
+        <div class="group">
+          <div class="g-text">
+            <div class="g-title">深色模式</div>
+            <div class="g-sub">菜单栏、窗口与控件使用深色外观</div>
+          </div>
+          <OsToggle :model-value="desktop.dark" @update:model-value="(v: any) => desktop.setDark(!!v)" />
         </div>
-      </OsPanel>
-      <OsPanel title="主题" style="margin-top: 12px">
-        <div class="row">
-          <OsToggle :model-value="desktop.dark" label="深色模式" @update:model-value="(v: any) => desktop.setDark(!!v)" />
+        <div class="group">
+          <div class="g-text">
+            <div class="g-title">最大化时自动隐藏 Dock</div>
+            <div class="g-sub">窗口铺满全屏，鼠标移到屏幕底部时 Dock 滑出</div>
+          </div>
+          <OsToggle :model-value="desktop.dockAutoHide" @update:model-value="(v: any) => desktop.setDockAutoHide(!!v)" />
         </div>
-        <div class="row" style="margin-top: 10px">
-          <OsToggle
-            :model-value="desktop.dockAutoHide"
-            label="最大化时自动隐藏 Dock（鼠标移到屏幕底部滑出）"
-            @update:model-value="(v: any) => desktop.setDockAutoHide(!!v)"
-          />
-        </div>
-      </OsPanel>
+      </div>
+      <h2 class="sec">壁纸</h2>
+      <div class="wallpapers">
+        <button
+          v-for="(w, i) in desktop.wallpapers" :key="i"
+          class="wall" :class="{ active: desktop.wallpaper === i }"
+          :style="{ background: w }" :title="`壁纸 ${i + 1}`" @click="desktop.setWallpaper(i)"
+        ><span v-if="desktop.wallpaper === i" class="wall-check">✓</span></button>
+      </div>
     </template>
 
     <!-- 账户 -->
     <template v-else-if="tab === 'account'">
-      <OsPanel :title="`账户 · ${session.user?.username}（${session.user?.role}）`">
-        <div class="form">
-          <label>原密码</label>
-          <OsInput v-model="oldPwd" type="password" placeholder="原密码" />
-          <label>新密码</label>
-          <OsInput v-model="newPwd" type="password" placeholder="至少 6 位" />
-          <div><OsButton variant="primary" @click="changePwd">修改密码</OsButton>
-            <span v-if="pwdMsg" class="msg">{{ pwdMsg }}</span></div>
+      <h2 class="sec">登录与安全</h2>
+      <div class="card">
+        <div class="group">
+          <div class="g-text"><div class="g-title">账户</div><div class="g-sub">{{ session.user?.username }} · {{ session.user?.displayName }} · 角色 {{ session.user?.role }}</div></div>
         </div>
-      </OsPanel>
+        <div class="group">
+          <div class="g-text"><div class="g-title">原密码</div></div>
+          <OsInput v-model="oldPwd" type="password" placeholder="原密码" />
+        </div>
+        <div class="group">
+          <div class="g-text"><div class="g-title">新密码</div></div>
+          <OsInput v-model="newPwd" type="password" placeholder="至少 6 位" />
+        </div>
+        <div class="group">
+          <div class="g-text" />
+          <OsButton variant="primary" @click="changePwd">修改密码</OsButton>
+          <span v-if="pwdMsg" class="msg">{{ pwdMsg }}</span>
+        </div>
+      </div>
     </template>
 
     <!-- 用户管理 -->
@@ -305,7 +318,8 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
 
     <!-- 第三方应用注册 -->
     <template v-else-if="tab === 'registry'">
-      <OsPanel title="注册声明式应用（JSON Schema）">
+      <h2 class="sec">注册声明式应用（JSON Schema）</h2>
+      <OsPanel>
         <div class="form">
           <div class="two">
             <div><label>应用 ID（英文）</label><OsInput v-model="regId" placeholder="notice-board" mono /></div>
@@ -323,7 +337,8 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
         <p class="hint">dataSource 支持：static（items）/ rest（url、method+body、headers、auth、path 点路径、interval 轮询、topic 总线推送刷新）。相对路径 url 默认携带登录态。详见 README「第三方接入指南 · 方式一」。</p>
       </OsPanel>
 
-      <OsPanel title="已注册的第三方应用" style="margin-top: 12px" v-if="registryApps.length">
+      <h2 class="sec">已注册的第三方应用</h2>
+      <OsPanel v-if="registryApps.length">
         <div v-for="a in registryApps" :key="a.id" class="reg-item">
           <span class="an">{{ a.name }}</span><span class="aid">{{ a.id }}</span>
           <span class="grow" />
@@ -334,7 +349,8 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
     </template>
     <!-- AI 服务（goder） -->
     <template v-else-if="tab === 'ai'">
-      <OsPanel title="接入真实大模型（任意 OpenAI 兼容接口）">
+      <h2 class="sec">接入真实大模型（任意 OpenAI 兼容接口）</h2>
+      <OsPanel>
         <div class="form">
           <div class="ai-status" :class="{ on: aiConfigured }">
             {{ aiConfigured ? '✓ AI 服务已接入（goder 使用真实模型）' : '● 未配置——goder 运行在演示模式' }}
@@ -369,7 +385,8 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
 
     <!-- 系统信息 -->
     <template v-else-if="tab === 'system'">
-      <OsPanel title="系统状态">
+      <h2 class="sec">系统状态</h2>
+      <OsPanel>
         <div class="stats-grid" v-if="stats">
           <div class="stat"><b>{{ stats.version }}</b><span>版本</span></div>
           <div class="stat"><b>{{ stats.userCount }}</b><span>用户</span></div>
@@ -380,7 +397,8 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
         </div>
         <p class="hint">启动时间：{{ stats?.startedAt }}</p>
       </OsPanel>
-      <OsPanel title="审计日志（最近 200 条）" style="margin-top: 12px">
+      <h2 class="sec">审计日志（最近 200 条）</h2>
+      <OsPanel>
         <div class="audit-list">
           <div v-for="a in audit" :key="a.id" class="audit-row">
             <span class="au-time">{{ a.createdAt }}</span>
@@ -396,13 +414,41 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
 </template>
 
 <style scoped>
+/* macOS 系统设置式分组：卡片外的组标题 + 卡片内的“左说明右控件”行 */
+.sec { font-size: 13px; font-weight: 700; color: var(--os-text); margin: 4px 0 7px; }
+.sec:not(:first-child) { margin-top: 18px; }
+.card {
+  background: var(--os-panel-solid); border: 1px solid var(--os-border);
+  border-radius: 10px; overflow: hidden;
+}
+.card .group { display: flex; align-items: center; gap: 14px; padding: 11px 14px; min-height: 44px; }
+.card .group + .group { border-top: 1px solid var(--os-border); }
+.g-text { flex: 1; min-width: 0; }
+.g-title { font-size: 13px; }
+.g-sub { font-size: 11.5px; color: var(--os-text-secondary); margin-top: 1px; }
+.card .group .msg { font-size: 12px; color: var(--os-text-secondary); }
+
+/* 侧栏彩色图标块（SF Symbols 彩色方块语言） */
+:deep(.os-sidebar button .ic) { color: #fff; }
+:deep(.os-sidebar button[data-key='appearance'] .ic) { background: linear-gradient(180deg, #64d2ff, #0a84ff); }
+:deep(.os-sidebar button[data-key='account'] .ic) { background: linear-gradient(180deg, #68d391, #30a14e); }
+:deep(.os-sidebar button[data-key='users'] .ic) { background: linear-gradient(180deg, #8e8e93, #636366); }
+:deep(.os-sidebar button[data-key='access'] .ic) { background: linear-gradient(180deg, #bf5af2, #8944ab); }
+:deep(.os-sidebar button[data-key='registry'] .ic) { background: linear-gradient(180deg, #5ac8fa, #0a84ff); }
+:deep(.os-sidebar button[data-key='ai'] .ic) { background: linear-gradient(180deg, #ff375f, #d70015); }
+:deep(.os-sidebar button[data-key='system'] .ic) { background: linear-gradient(180deg, #a2a2a7, #77777c); }
+
 .wallpapers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .wall {
-  height: 64px; border-radius: 10px; border: 2px solid transparent; cursor: pointer;
-  color: rgba(255,255,255,.85); font-size: 12px; transition: transform .12s;
+  height: 72px; border-radius: 10px; border: 2px solid transparent; cursor: pointer;
+  position: relative; transition: transform .12s; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .06);
 }
-.wall:hover { transform: scale(1.03); }
+.wall:hover { transform: scale(1.02); }
 .wall.active { border-color: var(--os-accent); box-shadow: 0 0 0 3px rgba(10,132,255,.25); }
+.wall-check {
+  position: absolute; right: 6px; bottom: 5px; width: 20px; height: 20px; border-radius: 50%;
+  background: var(--os-accent); color: #fff; font-size: 12px; line-height: 20px; text-align: center;
+}
 .row { display: flex; gap: 20px; align-items: center; }
 .form { display: flex; flex-direction: column; gap: 8px; }
 .form label { font-size: 12px; color: var(--os-text-secondary); display: flex; gap: 8px; align-items: center; }

@@ -14,6 +14,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -136,8 +137,11 @@ func (f *FS) EnsureHome(user string) {
 		return
 	}
 	home := homeOf(user)
+	// 废纸篓目录（点前缀：列表/搜索默认隐藏，仅侧栏与 Dock 以专用入口呈现）；
+	// 幂等建在存量检查之前，保证老用户每次登录也补齐（计数需排除自身，否则首次插入会误判已有文件）
+	f.db.Exec(`INSERT OR IGNORE INTO files(owner,path,is_dir) VALUES(?,?,1)`, user, home+"/.Trash")
 	var n int
-	f.db.QueryRow(`SELECT COUNT(*) FROM files WHERE owner=?`, user).Scan(&n)
+	f.db.QueryRow(`SELECT COUNT(*) FROM files WHERE owner=? AND path<>?`, user, home+"/.Trash").Scan(&n)
 	if n > 0 {
 		return
 	}
@@ -422,6 +426,145 @@ func (f *FS) Rename(w http.ResponseWriter, r *http.Request) {
 		f.db.Exec(`UPDATE files SET path=?, updated_at=datetime('now') WHERE owner=? AND path=?`, np, user, e.p)
 	}
 	f.hub.PublishTo(user, "fs:changed", map[string]any{"path": to, "kind": "rename"})
+	writeJSON(w, ok())
+}
+
+// Search GET /api/fs/search?q=&limit= 按名称子串递归搜索用户全部文件（聚焦搜索用）。
+// 排序：精确匹配 > 前缀匹配 > 包含；同级目录在前、路径短者在前；隐藏文件（. 开头）不参与。
+func (f *FS) Search(w http.ResponseWriter, r *http.Request) {
+	user := auth.FromContext(r).Username
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 200 {
+			limit = n
+		}
+	}
+	if q == "" {
+		writeJSON(w, []store.File{})
+		return
+	}
+	lq := strings.ToLower(q)
+	rows, err := f.db.Query(`SELECT path,is_dir,is_binary,content,updated_at FROM files WHERE owner=? AND path LIKE ?`,
+		user, "%"+strings.ReplaceAll(lq, "%", "")+"%")
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	defer rows.Close()
+	type hit struct {
+		f    store.File
+		rank int
+	}
+	hits := []hit{}
+	for rows.Next() {
+		var e store.File
+		var isDir, isBin int
+		if err := rows.Scan(&e.Path, &isDir, &isBin, &e.Content, &e.UpdatedAt); err != nil {
+			continue
+		}
+		e.IsDir = isDir == 1
+		e.IsBinary = isBin == 1
+		name := strings.ToLower(path.Base(e.Path))
+		if name != lq && !strings.Contains(name, lq) {
+			continue // LIKE 命中的是路径中段而非文件名
+		}
+		if strings.HasPrefix(path.Base(e.Path), ".") {
+			continue // 隐藏文件（含 .Trash）不参与搜索
+		}
+		e.Size = len(e.Content)
+		if e.IsBinary && e.Size > 0 {
+			e.Size = e.Size * 3 / 4
+		}
+		e.Content = ""
+		rank := 2
+		if strings.HasPrefix(name, lq) {
+			rank = 1
+		}
+		if name == lq {
+			rank = 0
+		}
+		hits = append(hits, hit{e, rank})
+	}
+	sort.SliceStable(hits, func(i, j int) bool {
+		if hits[i].rank != hits[j].rank {
+			return hits[i].rank < hits[j].rank
+		}
+		if hits[i].f.IsDir != hits[j].f.IsDir {
+			return hits[i].f.IsDir
+		}
+		if len(hits[i].f.Path) != len(hits[j].f.Path) {
+			return len(hits[i].f.Path) < len(hits[j].f.Path)
+		}
+		return hits[i].f.Path < hits[j].f.Path
+	})
+	out := []store.File{}
+	for _, h := range hits {
+		out = append(out, h.f)
+		if len(out) >= limit {
+			break
+		}
+	}
+	writeJSON(w, out)
+}
+
+// Copy POST /api/fs/copy {from,to} 复制文件或目录（含子树）；目标已存在时返回 409。
+func (f *FS) Copy(w http.ResponseWriter, r *http.Request) {
+	user := auth.FromContext(r).Username
+	var req struct{ From, To string }
+	jsonDecode(r, &req)
+	from, err1 := clean(user, req.From)
+	to, err2 := clean(user, req.To)
+	if err1 != nil || err2 != nil || from == to {
+		http.Error(w, "非法路径", 403)
+		return
+	}
+	// 源不存在
+	var srcCount int
+	f.db.QueryRow(`SELECT COUNT(*) FROM files WHERE owner=? AND (path=? OR path LIKE ?)`, user, from, from+"/%").Scan(&srcCount)
+	if srcCount == 0 {
+		http.Error(w, "源文件不存在", 404)
+		return
+	}
+	// 目标已存在
+	var dstCount int
+	f.db.QueryRow(`SELECT COUNT(*) FROM files WHERE owner=? AND path=?`, user, to).Scan(&dstCount)
+	if dstCount > 0 {
+		http.Error(w, "目标已存在", 409)
+		return
+	}
+	// 配额：复制会增加全量子树内容
+	var total int64
+	f.db.QueryRow(`SELECT COALESCE(SUM(LENGTH(content)),0) FROM files WHERE owner=? AND (path=? OR path LIKE ?)`,
+		user, from, from+"/%").Scan(&total)
+	if f.quotaUsed(user)+total > store.StorageQuota {
+		http.Error(w, "个人空间不足（配额 100MB）", 400)
+		return
+	}
+	rows, _ := f.db.Query(`SELECT path,is_dir,is_binary,content FROM files WHERE owner=? AND (path=? OR path LIKE ?)`, user, from, from+"/%")
+	type entry struct {
+		p, body string
+		dir     bool
+	}
+	var entries []entry
+	for rows.Next() {
+		var e entry
+		var d, b int
+		rows.Scan(&e.p, &d, &b, &e.body)
+		e.dir = d == 1
+		_ = b
+		entries = append(entries, e)
+	}
+	rows.Close()
+	for _, e := range entries {
+		np := to + strings.TrimPrefix(e.p, from)
+		if e.dir {
+			f.db.Exec(`INSERT OR IGNORE INTO files(owner,path,is_dir) VALUES(?,?,1)`, user, np)
+		} else {
+			f.db.Exec(`INSERT OR IGNORE INTO files(owner,path,content,updated_at) VALUES(?,?,?,datetime('now'))`, user, np, e.body)
+		}
+	}
+	f.hub.PublishTo(user, "fs:changed", map[string]any{"path": to, "kind": "copy"})
 	writeJSON(w, ok())
 }
 

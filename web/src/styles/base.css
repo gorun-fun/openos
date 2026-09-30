@@ -119,3 +119,57 @@ button { font-family: inherit; }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 @keyframes os-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+
+/* —— macOS 一体式窗口共用件（appChrome 'merged' 的应用工具栏，红绿灯悬浮左侧 84px） —— */
+.os-tb {
+  flex: none; height: 46px; display: flex; align-items: center; gap: 8px;
+  padding: 0 12px 0 84px; overflow: hidden; white-space: nowrap;
+  background: var(--os-sidebar); border-bottom: 1px solid var(--os-border);
+}
+.os-tb-btn {
+  border: 1px solid var(--os-border-strong); background: var(--os-panel-solid); color: var(--os-text);
+  border-radius: 7px; height: 27px; min-width: 27px; padding: 0 7px; cursor: pointer; font-size: 13px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px; font-family: inherit;
+  transition: background .12s ease;
+}
+.os-tb-btn:disabled { opacity: .35; cursor: default; }
+.os-tb-btn:not(:disabled):hover { background: var(--os-hover); }
+.os-tb-btn svg { width: 14px; height: 14px; }
+.os-tb-btn.danger:not(:disabled):hover { border-color: #e5484d; color: #e5484d; }
+.os-tb-title {
+  font-size: 13.5px; font-weight: 600; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; user-select: none;
+}
+.os-tb-sep { width: 1px; height: 20px; background: var(--os-border); flex: none; }
+/* 分段控件（视图切换等） */
+.os-seg { display: flex; gap: 1px; padding: 2px; border-radius: 8px; background: var(--os-active); flex: none; }
+.os-seg-btn {
+  border: none; background: transparent; height: 24px; min-width: 30px; padding: 0 6px; border-radius: 6px;
+  cursor: pointer; color: var(--os-text-secondary); display: inline-flex; align-items: center; justify-content: center;
+}
+.os-seg-btn svg { width: 13px; height: 13px; }
+.os-seg-btn:hover { color: var(--os-text); }
+.os-seg-btn.on { background: var(--os-panel-solid); color: var(--os-text); box-shadow: 0 1px 3px rgba(0, 0, 0, .18); }
+
+/* —— 右键/下拉菜单（macOS 菜单：hover 蓝底白字，分组小标题，分隔线） —— */
+.os-menu {
+  position: fixed; z-index: 9500; min-width: 190px; padding: 5px;
+  background: var(--os-panel); backdrop-filter: blur(30px) saturate(1.8);
+  -webkit-backdrop-filter: blur(30px) saturate(1.8);
+  border: 1px solid var(--os-border); border-radius: 10px;
+  box-shadow: var(--os-shadow-sm), inset 0 1px 0 var(--os-highlight-edge);
+  animation: os-pop-in .12s var(--os-ease-out); transform-origin: top left;
+  display: flex; flex-direction: column;
+}
+.os-menu button {
+  border: none; background: none; width: 100%; text-align: left; padding: 5px 10px;
+  border-radius: 6px; font-size: 13px; color: var(--os-text); cursor: pointer; font-family: inherit;
+  display: flex; align-items: center; gap: 8px; white-space: nowrap;
+}
+.os-menu button:hover:not(:disabled) { background: var(--os-accent); color: #fff; }
+.os-menu button:disabled { opacity: .4; cursor: default; }
+.os-menu button.danger:hover:not(:disabled) { background: #e5484d; }
+.os-menu .sep { height: 1px; margin: 4px 8px; background: var(--os-border); }
+.os-menu .grp { padding: 5px 10px 3px; font-size: 11px; font-weight: 600; color: var(--os-text-secondary); }
+.os-menu .hint { margin-left: auto; font-size: 11px; color: var(--os-text-secondary); }
+.os-menu button:hover:not(:disabled) .hint { color: rgba(255, 255, 255, .75); }
