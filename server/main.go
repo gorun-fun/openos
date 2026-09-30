@@ -261,7 +261,7 @@ func main() {
 	// ---- 中间件链：恢复 → 安全头 → 访问日志 → 限流 ----
 	handler := withRecovery(withSecurityHeaders(withLogging(rateLimit(authSvc, mux))))
 
-	addr := envOr("OPENOS_ADDR", "127.0.0.1:8420")
+	addr := envOr("OPENOS_ADDR", "127.0.0.1:8081")
 	srv := &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 
 	go func() {

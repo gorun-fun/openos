@@ -13,10 +13,10 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/api': 'http://127.0.0.1:8420',
-      '/goder-api': { target: 'http://127.0.0.1:8420', ws: true },
-      '/vendor': 'http://127.0.0.1:8420',
-      '/ws': { target: 'ws://127.0.0.1:8420', ws: true },
+      '/api': 'http://127.0.0.1:8081',
+      '/goder-api': { target: 'http://127.0.0.1:8081', ws: true },
+      '/vendor': 'http://127.0.0.1:8081',
+      '/ws': { target: 'ws://127.0.0.1:8081', ws: true },
     },
   },
   build: { chunkSizeWarningLimit: 1500 },

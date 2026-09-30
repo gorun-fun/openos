@@ -40,7 +40,7 @@ test:
 build:
 	cd web && npm install && npm run build
 	cd server && go build -o openos-server .
-	@echo "完成：cd server && ./openos-server  →  http://127.0.0.1:8420"
+	@echo "完成：cd server && ./openos-server  →  http://127.0.0.1:8081"
 
 # 发布多平台二进制（darwin/linux × amd64/arm64），含前端产物
 release: build

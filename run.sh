@@ -23,8 +23,8 @@ BIN="${SERVER_DIR}/openos-server"
 PID_FILE="${SERVER_DIR}/openos-server.pid"
 LOG_FILE="${SERVER_DIR}/openos-server.log"
 
-ADDR="${OPENOS_ADDR:-127.0.0.1:8420}"
-# 健康检查地址：监听 ":8420" 这类省略主机的写法时补上 127.0.0.1
+ADDR="${OPENOS_ADDR:-127.0.0.1:8081}"
+# 健康检查地址：监听 ":8081" 这类省略主机的写法时补上 127.0.0.1
 case "${ADDR}" in
   :*) HEALTH_ADDR="127.0.0.1${ADDR}" ;;
   *)  HEALTH_ADDR="${ADDR}" ;;

@@ -27,7 +27,7 @@
 # 一键准备（含 goder 组件：构建 goder-serve 网关 + 拷贝嵌入库）
 make goder        # 源码自动克隆自 https://git.gorun.fun/share/goder.git（需 go/npm/git）
 
-# 开发模式（后端 8420 + 前端 5173 热更新）
+# 开发模式（后端 8081 + 前端 5173 热更新）
 make dev
 
 # 或分步：
@@ -35,10 +35,10 @@ cd server && go run .                    # 后端
 cd web && npm install && npm run dev     # 前端
 
 # 生产部署（单二进制 + 静态目录）
-make build && cd server && ./openos-server   # → http://127.0.0.1:8420
+make build && cd server && ./openos-server   # → http://127.0.0.1:8081
 
 # Docker
-docker compose up -d --build   # → http://localhost:8420（数据持久化在卷 openos-data）
+docker compose up -d --build   # → http://localhost:8081（数据持久化在卷 openos-data）
 
 # 多平台发布包（darwin/linux × amd64/arm64）
 make release
@@ -64,7 +64,7 @@ export OPENOS_AI_MODEL=glm-4-flash
 
 未配置时相关 AI 能力（终端 `ai` 指令、`/api/ai/chat` 开放接口）运行于本地演示模式。
 
-其他环境变量：`OPENOS_ADDR`（默认 127.0.0.1:8420，容器内为 0.0.0.0）、`OPENOS_DATA`（数据目录）、`OPENOS_DIST`（前端目录）、`OPENOS_JWT_SECRET`（默认自动生成并持久化）。
+其他环境变量：`OPENOS_ADDR`（默认 127.0.0.1:8081，容器内为 0.0.0.0:8081）、`OPENOS_DATA`（数据目录）、`OPENOS_DIST`（前端目录）、`OPENOS_JWT_SECRET`（默认自动生成并持久化）。
 
 ## 架构
 

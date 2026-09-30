@@ -7,7 +7,7 @@ services:
     image: ${OPENOS_REGISTRY:-10.8.0.6:5000}/openos:${OPENOS_TAG:-latest}
     container_name: openos
     ports:
-      - "8420:8420"
+      - "8081:8081"
     volumes:
       # 运行时数据（openos.db、homes/ 用户沙箱）持久化到命名卷
       - openos-data:/data
