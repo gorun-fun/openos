@@ -2,15 +2,21 @@
 import { onMounted } from 'vue'
 import { setUnauthorizedHandler } from './api/client'
 import { useSession } from './stores/session'
+import { shell } from './shell'
 import LoginScreen from './desktop/LoginScreen.vue'
 import DesktopShell from './desktop/Desktop.vue'
 
 const session = useSession()
 
 onMounted(() => {
-  // 任何接口返回 401（过期 / 管理员改角色 / 改密 / 删除用户）→ 全局回登录页
+  // 任何接口返回 401（过期 / 管理员改角色 / 改密 / 删除用户）→ 回登录：
+  // SSO 模式跳宿主登录入口（宿主会话仍有效时无感返回），本地模式刷新回登录页
   setUnauthorizedHandler(() => {
     session.logout()
+    if (shell.login.mode === 'sso') {
+      location.href = shell.login.url
+      return
+    }
     location.reload()
   })
   session.restore()
@@ -19,7 +25,7 @@ onMounted(() => {
 
 <template>
   <div v-if="!session.ready" class="splash">
-    <div class="logo">🖥️</div>
+    <div class="logo">{{ shell.brand.logo }}</div>
     <div class="bar"><span /></div>
   </div>
   <LoginScreen v-else-if="!session.user" />

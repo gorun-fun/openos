@@ -172,3 +172,8 @@ export const APP_ICONS: Record<string, IconDef> = {
 export function iconOf(id: string): IconDef {
   return APP_ICONS[id] || APP_ICONS.default
 }
+
+/** 注册（或覆盖）应用图标：宿主应用经 createOpenOS({icons}) 注入业务图标，可反复调用。 */
+export function registerIcons(defs: Record<string, IconDef>) {
+  Object.assign(APP_ICONS, defs)
+}

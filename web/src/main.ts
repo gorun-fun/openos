@@ -1,9 +1,5 @@
-import { createApp } from 'vue'
-import { createPinia } from 'pinia'
-import App from './App.vue'
-import './sdk' // 注入 window.OpenOS 第三方应用 SDK
-import './styles/base.css'
+// OpenOS 独立部署入口：以默认配置组装桌面壳。
+// 宿主应用集成请改为引用 framework.ts 的 createOpenOS()（见其文件头示例）。
+import { createOpenOS } from './framework'
 
-const app = createApp(App)
-app.use(createPinia())
-app.mount('#app')
+createOpenOS()

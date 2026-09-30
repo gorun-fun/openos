@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useSession } from '../stores/session'
 import { WALLPAPERS, useDesktop } from '../stores/desktop'
+import { shell } from '../shell'
 
 const session = useSession()
 const desktop = useDesktop()
@@ -9,6 +10,10 @@ const username = ref('admin')
 const password = ref('')
 const error = ref('')
 const loading = ref(false)
+
+const sso = computed(() => (shell.login.mode === 'sso' ? shell.login : null))
+// 宿主 SSO 回跳失败时带 sso_error 参数，展示错误并保留手动重试（不再自动跳转）
+const ssoError = ref(new URLSearchParams(location.search).get('sso_error') || '')
 
 async function login() {
   if (!username.value || !password.value || loading.value) return
@@ -22,21 +27,42 @@ async function login() {
     loading.value = false
   }
 }
+
+function ssoLogin() {
+  if (sso.value) location.href = sso.value.url
+}
+
+// SSO 模式：无错误时短暂展示后自动跳转（宿主会话仍有效时全程无感回来）
+let ssoTimer = 0
+onMounted(() => {
+  if (sso.value && !ssoError.value) ssoTimer = window.setTimeout(ssoLogin, 600)
+})
+onBeforeUnmount(() => clearTimeout(ssoTimer))
 </script>
 
 <template>
   <div class="login" :style="{ background: WALLPAPERS[desktop.wallpaper] }">
     <div class="login-card">
-      <div class="avatar">🖥️</div>
-      <h1>OpenOS</h1>
-      <p class="sub">仿 macOS 网页桌面 · 多用户 · 事件总线</p>
-      <form @submit.prevent="login">
+      <div class="avatar">{{ shell.brand.logo }}</div>
+      <h1>{{ shell.brand.name }}</h1>
+      <p class="sub">{{ shell.brand.sub }}</p>
+
+      <template v-if="sso">
+        <div v-if="ssoError" class="error">{{ ssoError }}</div>
+        <button :disabled="loading" @click="ssoLogin">
+          {{ loading ? '跳转中…' : (sso.label || '使用统一身份登录') }}
+        </button>
+        <p class="sso-hint">将跳转至统一登录页面，完成后自动返回</p>
+      </template>
+
+      <form v-else @submit.prevent="login">
         <input v-model="username" placeholder="用户名" autocomplete="username" />
         <input v-model="password" type="password" placeholder="密码" autocomplete="current-password" />
         <div v-if="error" class="error">{{ error }}</div>
         <button type="submit" :disabled="loading">{{ loading ? '登录中…' : '登 录' }}</button>
       </form>
-      <div class="hint">
+
+      <div v-if="!sso" class="hint">
         <span @click="username = 'admin'; password = 'admin123'">admin / admin123（管理员）</span>
         <span @click="username = 'user'; password = 'user123'">user / user123（普通）</span>
         <span @click="username = 'guest'; password = 'guest123'">guest / guest123（访客）</span>
@@ -108,4 +134,5 @@ button:disabled { opacity: .6; cursor: default; }
   transition: background .12s;
 }
 .hint span:hover { background: rgba(255,255,255,.16); text-decoration: none; }
+.sso-hint { margin-top: 12px; font-size: 11px; opacity: .7; }
 </style>

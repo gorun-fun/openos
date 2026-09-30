@@ -27,6 +27,7 @@ type AppDef struct {
 	Icon     string          `json:"icon"`
 	Category string          `json:"category"`
 	Builtin  bool            `json:"builtin"`
+	Hidden   bool            `json:"hidden,omitempty"` // 隐藏应用：可编程打开，不出现在启动台/Dock（详情窗口类）
 	Config   json.RawMessage `json:"config,omitempty"`
 	Width    int             `json:"width"`
 	Height   int             `json:"height"`
@@ -92,6 +93,7 @@ CREATE TABLE IF NOT EXISTS apps (
   icon TEXT NOT NULL DEFAULT '',
   category TEXT NOT NULL DEFAULT 'other',
   builtin INTEGER NOT NULL DEFAULT 0,
+  hidden INTEGER NOT NULL DEFAULT 0,
   config TEXT NOT NULL DEFAULT '',
   width INTEGER NOT NULL DEFAULT 800,
   height INTEGER NOT NULL DEFAULT 560
@@ -197,6 +199,7 @@ func (db *DB) migrateColumns() error {
 	for _, c := range []col{
 		{"users", "token_version", "ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0"},
 		{"files", "is_binary", "ALTER TABLE files ADD COLUMN is_binary INTEGER NOT NULL DEFAULT 0"},
+		{"apps", "hidden", "ALTER TABLE apps ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0"},
 	} {
 		var n int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`, c.table, c.name).Scan(&n); err != nil {
@@ -223,9 +226,9 @@ func (db *DB) seed() error {
 		if len(a.Config) > 0 {
 			cfg = string(a.Config)
 		}
-		if _, err := db.Exec(`INSERT INTO apps(id,name,icon,category,builtin,config,width,height) VALUES(?,?,?,?,?,?,?,?)
+		if _, err := db.Exec(`INSERT INTO apps(id,name,icon,category,builtin,hidden,config,width,height) VALUES(?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(id) DO UPDATE SET name=excluded.name, icon=excluded.icon, width=excluded.width, height=excluded.height`,
-			a.ID, a.Name, a.Icon, a.Category, boolInt(a.Builtin), cfg, a.Width, a.Height); err != nil {
+			a.ID, a.Name, a.Icon, a.Category, boolInt(a.Builtin), boolInt(a.Hidden), cfg, a.Width, a.Height); err != nil {
 			return err
 		}
 		if exists == 0 {
@@ -441,18 +444,20 @@ func (db *DB) Stats(startedAt time.Time) SystemStats {
 
 // ListApps 返回全部已注册应用。
 func (db *DB) ListApps() ([]AppDef, error) {
-	rows, err := db.Query(`SELECT id,name,icon,category,builtin,config,width,height FROM apps ORDER BY builtin DESC, category, id`)
+	rows, err := db.Query(`SELECT id,name,icon,category,builtin,hidden,config,width,height FROM apps ORDER BY builtin DESC, category, id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []AppDef
+	out := []AppDef{} // 恒返回数组（空授权角色的前端按数组消费，null 会崩）
 	for rows.Next() {
 		var a AppDef
 		var cfg string
-		if err := rows.Scan(&a.ID, &a.Name, &a.Icon, &a.Category, &a.Builtin, &cfg, &a.Width, &a.Height); err != nil {
+		var hidden int
+		if err := rows.Scan(&a.ID, &a.Name, &a.Icon, &a.Category, &a.Builtin, &hidden, &cfg, &a.Width, &a.Height); err != nil {
 			return nil, err
 		}
+		a.Hidden = hidden != 0
 		if cfg != "" {
 			a.Config = json.RawMessage(cfg)
 		}
@@ -463,19 +468,21 @@ func (db *DB) ListApps() ([]AppDef, error) {
 
 // ListAppsForRole 返回某角色可访问的应用。
 func (db *DB) ListAppsForRole(role string) ([]AppDef, error) {
-	rows, err := db.Query(`SELECT a.id,a.name,a.icon,a.category,a.builtin,a.config,a.width,a.height
+	rows, err := db.Query(`SELECT a.id,a.name,a.icon,a.category,a.builtin,a.hidden,a.config,a.width,a.height
 		FROM apps a JOIN role_apps r ON r.app_id=a.id WHERE r.role=? ORDER BY a.builtin DESC, a.category, a.id`, role)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []AppDef
+	out := []AppDef{}
 	for rows.Next() {
 		var a AppDef
 		var cfg string
-		if err := rows.Scan(&a.ID, &a.Name, &a.Icon, &a.Category, &a.Builtin, &cfg, &a.Width, &a.Height); err != nil {
+		var hidden int
+		if err := rows.Scan(&a.ID, &a.Name, &a.Icon, &a.Category, &a.Builtin, &hidden, &cfg, &a.Width, &a.Height); err != nil {
 			return nil, err
 		}
+		a.Hidden = hidden != 0
 		if cfg != "" {
 			a.Config = json.RawMessage(cfg)
 		}
@@ -496,10 +503,10 @@ func (db *DB) UpsertApp(a AppDef) error {
 	if a.Height <= 0 {
 		a.Height = 560
 	}
-	_, err := db.Exec(`INSERT INTO apps(id,name,icon,category,builtin,config,width,height) VALUES(?,?,?,?,?,?,?,?)
+	_, err := db.Exec(`INSERT INTO apps(id,name,icon,category,builtin,hidden,config,width,height) VALUES(?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET name=excluded.name, icon=excluded.icon, category=excluded.category,
-		config=excluded.config, width=excluded.width, height=excluded.height`,
-		a.ID, a.Name, a.Icon, a.Category, boolInt(a.Builtin), cfg, a.Width, a.Height)
+		hidden=excluded.hidden, config=excluded.config, width=excluded.width, height=excluded.height`,
+		a.ID, a.Name, a.Icon, a.Category, boolInt(a.Builtin), boolInt(a.Hidden), cfg, a.Width, a.Height)
 	return err
 }
 
@@ -546,6 +553,29 @@ func (db *DB) SetRoleApps(role string, ids []string) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// ListRoles 返回系统中出现过的全部角色（用户表与授权矩阵的并集，含宿主应用注入的自定义角色）。
+func (db *DB) ListRoles() ([]string, error) {
+	rows, err := db.Query(`SELECT role FROM users UNION SELECT role FROM role_apps`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	seen := map[string]bool{}
+	out := []string{"admin", "user", "guest"} // 基础三角色恒在（可能尚无用户/授权记录）
+	seen["admin"], seen["user"], seen["guest"] = true, true, true
+	for rows.Next() {
+		var r string
+		if err := rows.Scan(&r); err != nil {
+			return nil, err
+		}
+		if r != "" && !seen[r] {
+			seen[r] = true
+			out = append(out, r)
+		}
+	}
+	return out, rows.Err()
 }
 
 // ---- 用户设置 ----

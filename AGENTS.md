@@ -32,12 +32,14 @@ cd web && npm run typecheck    # vue-tsc --noEmit（仓库无 ESLint/Prettier，
 - **Vite 代理**：`/api`、`/goder-api`、`/vendor`、`/ws` → `http://127.0.0.1:8081`。
 - **SQLite 用 modernc 纯 Go 驱动**（WAL 模式），因此 CGO_ENABLED=0 可交叉编译——不要换成 mattn/go-sqlite3。
 - **goder 集成**遵循官方嵌入约定（`goder/docs/embedding.md`）：每用户独立 gh server 子进程，`/goder-api/*` 反代时先剥离外部伪造的 `X-GRF-*` 头再注入身份；二进制缺失时自动降级（应用内显示部署引导），不要让缺失变成启动错误。
+- **宿主应用框架化**（方式三集成，见 README「宿主应用集成」）：`web/src/framework.ts` 的 `createOpenOS(opts)` 是宿主组壳入口（注入业务 App/图标/品牌/SSO 登录/菜单栏扩展），`web/src/main.ts` 是独立部署薄壳；壳配置单例在 `web/src/shell.ts`，改动 LoginScreen/MenuBar/App 的登录与品牌逻辑时读它。令牌交换端点 `POST /api/auth/exchange` 由 `OPENOS_EXCHANGE_SECRET` 守护（空=禁用），自动开通的用户密码为随机值、只能经宿主登录；角色放开为安全字符集的自定义角色（admin 语义仅 `RequireAdmin` 认定），授权矩阵接口动态返回全部已出现角色。
+- **应用列表 JSON 恒为数组**：`ListApps`/`ListAppsForRole` 空结果返回 `[]` 而非 `null`（前端按数组消费）。`apps.hidden` 标记的应用可编程打开但不出现在启动台/Dock（apps store 的 `visible` getter）。
 - **安全不变量**：VFS 严格限制在 `/home/<用户>`（单文件 ≤8MB、配额 100MB）；JWT 带 token_version，改角色/密码/删用户必须令旧令牌失效；真实终端默认沙箱（10s 超时、64KB 截断）；AI 密钥仅存服务端、接口返回脱敏。改动这些区域前先读 README 的「安全说明」。
 
 ## 已知事项
 
 - 默认账号：admin/admin123、user/user123、guest/guest123（auth 包 `SeedDefaults` 种子）。
-- 关键环境变量：`OPENOS_ADDR`（默认 127.0.0.1:8081）、`OPENOS_DATA`、`OPENOS_DIST`、`OPENOS_JWT_SECRET`、`OPENOS_AI_BASE_URL/API_KEY/MODEL`、`OPENOS_REAL_SHELL`（off/full）、`OPENOS_GODER_*`。
+- 关键环境变量：`OPENOS_ADDR`（默认 127.0.0.1:8081）、`OPENOS_DATA`、`OPENOS_DIST`、`OPENOS_JWT_SECRET`、`OPENOS_EXCHANGE_SECRET`（宿主令牌交换密钥，空=禁用）、`OPENOS_AI_BASE_URL/API_KEY/MODEL`、`OPENOS_REAL_SHELL`（off/full）、`OPENOS_GODER_*`。
 - WebSocket 鉴权走查询参数 `?token=<jwt>`（浏览器 WS 无法带 header）。
 - `make goder` 从 `https://git.gorun.fun/share/goder.git` 克隆源码到仓库内 `.goder-src/`（已 gitignore；`GODER_REPO`/`GODER_SRC` 可覆盖，`GODER_SRC` 指向已有克隆即免拉取），需 go/npm/git；gh 是运行期依赖（PATH 上）。
 - **Docker 镜像自带 goder 全套组件**：Dockerfile 内克隆 goder 仓库编译 goder-serve/goder.js，并从 `download.gorun.fun/grf-harness/{平台}/{最新版}/gh` 下载 gh，经 `OPENOS_GODER_BIN/JS` + `OPENOS_GH_BIN` 指到 `/app/goder/`——容器部署无需跑 `make goder`。

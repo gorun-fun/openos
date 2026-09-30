@@ -13,10 +13,12 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -35,10 +37,12 @@ type Claims struct {
 
 // Service 认证服务。
 type Service struct {
-	db  *store.DB
-	mu  sync.RWMutex
+	db    *store.DB
+	mu    sync.RWMutex
 	secret []byte
 	ttl    time.Duration
+	// exchangeSecret 非空时启用令牌交换（宿主应用集成：SSO 会话换 OpenOS JWT）。
+	exchangeSecret string
 
 	// 用户态缓存（角色/token_version），TTL 10s
 	cacheMu sync.Mutex
@@ -88,6 +92,10 @@ func New(db *store.DB, secret string) *Service {
 	s.secret = []byte(secret)
 	return s
 }
+
+// SetExchangeSecret 配置令牌交换密钥（宿主应用服务端持有，用于换取 OpenOS 身份）；
+// 为空（默认）时交换端点返回 503，保持独立部署的安全面不变。
+func (s *Service) SetExchangeSecret(v string) { s.exchangeSecret = v }
 
 // ---- JWT ----
 
@@ -371,6 +379,104 @@ func (s *Service) Logout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, ok())
 }
 
+// Exchange POST /api/auth/exchange —— 宿主应用服务端以共享密钥换取 OpenOS JWT。
+//
+// 供「宿主应用集成 OpenOS」场景：宿主完成自己的 SSO 认证后，服务端到服务端
+// 调用本端点为该用户换取 OpenOS 身份（浏览器无需再过 OpenOS 登录）。
+//   - 请求头 X-Exchange-Secret 与 OPENOS_EXCHANGE_SECRET 比对；
+//   - 用户不存在时自动开通（随机不可登录密码，登录只能经宿主）；
+//   - 角色变化时同步并 Bump 旧令牌；显示名变化时同步；
+//   - 响应与登录一致：{token, user}，并种同源 Cookie 供嵌入组件使用。
+func (s *Service) Exchange(w http.ResponseWriter, r *http.Request) {
+	ip := s.clientIP(r)
+	if s.exchangeSecret == "" {
+		jsonError(w, http.StatusServiceUnavailable, "令牌交换未启用")
+		return
+	}
+	if r.Header.Get("X-Exchange-Secret") != s.exchangeSecret {
+		s.db.Audit("?", "auth.exchange.deny", "ip="+ip, ip)
+		jsonError(w, http.StatusUnauthorized, "交换密钥错误")
+		return
+	}
+	var req struct {
+		Username    string `json:"username"`
+		Role        string `json:"role"`
+		DisplayName string `json:"displayName"`
+	}
+	if err := jsonDecode(r, &req); err != nil || req.Username == "" {
+		jsonError(w, 400, "参数错误")
+		return
+	}
+	if req.Role == "" {
+		req.Role = "user"
+	}
+	if !validRole(req.Role) {
+		jsonError(w, 400, "非法角色")
+		return
+	}
+
+	info, err := s.db.GetUserAuth(req.Username)
+	if err != nil {
+		jsonError(w, 500, "读取用户失败")
+		return
+	}
+	if !info.Exists {
+		// 自动开通：密码置为随机值（宿主体系外的登录通道不可用）
+		pw := randomHex(24)
+		salt := newSalt()
+		if _, err := s.db.Exec(`INSERT INTO users(username,password_hash,salt,role,display_name) VALUES(?,?,?,?,?)`,
+			req.Username, hashPassword(pw, salt), salt, req.Role, req.DisplayName); err != nil {
+			jsonError(w, 400, "开通用户失败（用户名可能已存在）")
+			return
+		}
+		s.InvalidateCache(req.Username)
+		s.db.Audit(req.Username, "user.exchange-provision", "role="+req.Role, ip)
+	} else {
+		if info.Role != req.Role {
+			if _, err := s.db.Exec(`UPDATE users SET role=? WHERE username=?`, req.Role, req.Username); err != nil {
+				jsonError(w, 500, "同步角色失败")
+				return
+			}
+			s.db.BumpTokenVersion(req.Username) // 角色变化：旧 OpenOS 令牌即时失效
+			s.InvalidateCache(req.Username)
+			s.db.Audit(req.Username, "user.role", "exchange → "+req.Role, ip)
+		}
+		if req.DisplayName != "" && req.DisplayName != info.DisplayName {
+			s.db.Exec(`UPDATE users SET display_name=? WHERE username=?`, req.DisplayName, req.Username)
+		}
+	}
+
+	// 以库中最新状态（开通/改角色后的 role 与 tv）签发
+	info, err = s.db.GetUserAuth(req.Username)
+	if err != nil || !info.Exists {
+		jsonError(w, 500, "读取用户失败")
+		return
+	}
+	token, err := s.Issue(req.Username, info.Role, info.TokenVersion)
+	if err != nil {
+		jsonError(w, 500, "签发令牌失败")
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     TokenCookie,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   int(s.ttl.Seconds()),
+	})
+	s.db.Audit(req.Username, "auth.exchange", "role="+info.Role, ip)
+	writeJSON(w, map[string]any{"token": token, "user": map[string]any{
+		"username": req.Username, "role": info.Role, "displayName": info.DisplayName,
+	}})
+}
+
+func randomHex(n int) string {
+	buf := make([]byte, n)
+	rand.Read(buf)
+	return hex.EncodeToString(buf)
+}
+
 // Refresh GET /api/auth/refresh（Bearer）—— 为嵌入组件（goder 等靠 Cookie 的同源请求）续种 Cookie。
 func (s *Service) Refresh(w http.ResponseWriter, r *http.Request) {
 	id := FromContext(r)
@@ -557,7 +663,13 @@ func (s *Service) SeedDefaults() error {
 	return nil
 }
 
-func validRole(r string) bool { return r == "admin" || r == "user" || r == "guest" }
+func validRole(r string) bool {
+	// 基础三角色之外允许宿主应用注入的自定义角色（如业务角色名），
+	// 仅约束为安全字符集，避免注入/越权字符串；admin 语义仅 RequireAdmin 认定。
+	return len(r) > 0 && len(r) <= 32 && roleRe.MatchString(r)
+}
+
+var roleRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // ---- 工具 ----
 

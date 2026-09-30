@@ -137,7 +137,7 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
       </button>
       <div class="dock-sep" />
       <button
-        v-for="app in apps.apps" :key="app.id"
+        v-for="app in apps.visible" :key="app.id"
         class="dock-item"
         :data-name="app.name"
         :aria-label="app.name"

@@ -28,6 +28,8 @@ export const useApps = defineStore('apps', {
   state: (): State => ({ apps: [] }),
   getters: {
     byId: (s) => (id: string) => s.apps.find((a) => a.id === id),
+    // 启动台 / Dock 展示用的应用列表（隐藏应用只可编程打开，如详情窗口）
+    visible: (s) => s.apps.filter((a) => !a.hidden),
   },
   actions: {
     async refresh() {

@@ -11,8 +11,9 @@ const q = ref('')
 
 const filtered = computed(() => {
   const s = q.value.trim().toLowerCase()
-  if (!s) return apps.apps
-  return apps.apps.filter(
+  const list = apps.visible
+  if (!s) return list
+  return list.filter(
     (a) => a.name.toLowerCase().includes(s) || a.id.toLowerCase().includes(s) || a.category.toLowerCase().includes(s),
   )
 })

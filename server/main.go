@@ -39,6 +39,7 @@ func main() {
 	}
 
 	authSvc := auth.New(db, os.Getenv("OPENOS_JWT_SECRET"))
+	authSvc.SetExchangeSecret(os.Getenv("OPENOS_EXCHANGE_SECRET"))
 	if err := authSvc.SeedDefaults(); err != nil {
 		log.Fatal("初始化默认账号失败:", err)
 	}
@@ -60,6 +61,8 @@ func main() {
 	})
 	mux.HandleFunc("POST /api/auth/login", authSvc.Login)
 	mux.HandleFunc("GET /api/auth/logout", authSvc.Logout)
+	// 宿主应用令牌交换（仅 OPENOS_EXCHANGE_SECRET 配置后可用）
+	mux.HandleFunc("POST /api/auth/exchange", authSvc.Exchange)
 
 	// ---- WebSocket 事件总线（token 走查询参数） ----
 	mux.HandleFunc("GET /ws", func(w http.ResponseWriter, r *http.Request) {
@@ -129,7 +132,11 @@ func main() {
 			return
 		}
 		m, _ := db.RoleAccessMap()
-		writeJSON(w, map[string]any{"roles": []string{"admin", "user", "guest"}, "access": m})
+		roles, _ := db.ListRoles()
+		if roles == nil {
+			roles = []string{"admin", "user", "guest"}
+		}
+		writeJSON(w, map[string]any{"roles": roles, "access": m})
 	})
 	authed.HandleFunc("PUT /api/apps/access", func(w http.ResponseWriter, r *http.Request) {
 		id := auth.FromContext(r)

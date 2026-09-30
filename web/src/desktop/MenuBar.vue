@@ -6,6 +6,7 @@ import { useDesktop } from '../stores/desktop'
 import { useApps } from '../stores/apps'
 import { api } from '../api/client'
 import { bus } from '../bus/bus'
+import { shell } from '../shell'
 import { OsModal, OsButton } from '../ui'
 
 const emit = defineEmits<{ launchpad: [] }>()
@@ -104,9 +105,9 @@ defineExpose({ closeMenu })
     <nav class="left">
       <!-- 平时只保留一个系统图标；左侧其余菜单跟随当前应用（macOS 风格） -->
       <div class="menu-anchor">
-        <button class="mb logo" title="OpenOS" @click="toggle('os')">🖥️</button>
+        <button class="mb logo" :title="shell.brand.name" @click="toggle('os')">{{ shell.brand.logo }}</button>
         <div class="dropdown" v-if="menuOpen === 'os'">
-          <button @click="showAbout = true; closeMenu()">关于 OpenOS…</button>
+          <button @click="showAbout = true; closeMenu()">关于 {{ shell.brand.name }}…</button>
           <button @click="windows.open('settings'); closeMenu()">系统设置…</button>
           <button @click="emit('launchpad'); closeMenu()">启动台</button>
           <button @click="windows.open('welcome'); closeMenu()">使用指南…</button>
@@ -163,6 +164,8 @@ defineExpose({ closeMenu })
     </nav>
 
     <nav class="right">
+      <!-- 宿主应用注入的菜单栏扩展（门店切换器/业务状态角标等），见 createOpenOS({menubarExtras}) -->
+      <component :is="shell.menubarExtras" v-if="shell.menubarExtras" />
       <span class="mb chip" :title="online.join('、')">👥 {{ online.length }} 在线</span>
       <span class="mb chip" :title="aiOn ? 'AI 已接入' : 'AI 演示模式（设置 → AI 服务 可配置）'">{{ aiOn ? '✦ AI' : '✦ AI·demo' }}</span>
       <button class="mb chip icon" title="切换深浅色" @click="desktop.setDark(!desktop.dark)">
@@ -174,8 +177,8 @@ defineExpose({ closeMenu })
 
     <OsModal v-if="showAbout" title="关于 OpenOS" okText="好" :cancelText="''" @ok="showAbout = false" @cancel="showAbout = false">
       <p style="line-height:1.9">
-        <b>OpenOS</b> v{{ version || '1.1' }} · 仿 macOS 网页桌面<br />
-        前后端分离：Go + Vite (Vue 3) · 事件总线通信 · SQLite 存储<br />
+        <b>{{ shell.brand.name }}</b>（OpenOS v{{ version || '1.1' }}）<br />
+        Go + Vite (Vue 3) · 事件总线通信 · SQLite 存储<br />
         已运行：{{ uptimeText }} · 在线：{{ online.length }} 人<br />
         快捷键：Alt+W 关闭 · Alt+M 最小化 · Alt+↩ 缩放 · Alt+` 切换 · Alt+Space 启动台
       </p>

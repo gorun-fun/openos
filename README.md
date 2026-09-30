@@ -184,6 +184,41 @@ OpenOS.registerApp('todo', {
 OpenOS.open('todo')
 ```
 
+### 方式三：宿主应用集成（编译期组壳，面向完整业务系统）
+
+业务系统可以**不 fork 壳代码**，把 OpenOS 当作桌面基础框架消费：宿主前端以
+`createOpenOS()` 组装桌面，注入自己的业务应用、图标、品牌与单点登录：
+
+```ts
+// 宿主应用入口（vite alias: @openos → openos 快照的 web/src）
+import { createOpenOS } from '@openos/framework'
+createOpenOS({
+  apps: { rooms: () => import('./apps/Rooms.vue') },   // 编译期注册业务 App（懒加载）
+  icons: { rooms: { svg: '<svg …>' } },                // 业务图标（可选）
+  login: { mode: 'sso', url: '/api/auth/sso/login' },  // 登录跳宿主 SSO
+  brand: { name: '业务系统', logo: '🏨' },
+  menubarExtras: MyMenuBarExtras,                      // 菜单栏右侧扩展组件
+})
+```
+
+服务端配套 **令牌交换**：宿主完成自身认证后，服务端到服务端换取 OpenOS 身份
+（首次出现的用户自动开通，登录只能经宿主）：
+
+```bash
+# OpenOS 侧启用（仅在宿主同机/可信网络内开放）：
+OPENOS_EXCHANGE_SECRET=<共享密钥> ./openos-server
+
+# 宿主侧调用（回跳后把 token 经 URL 片段 #os-token=<jwt> 交给前端）：
+curl -X POST http://127.0.0.1:8081/api/auth/exchange \
+  -H 'X-Exchange-Secret: <共享密钥>' -H 'Content-Type: application/json' \
+  -d '{"username":"zhang","role":"front","displayName":"张前台"}'
+# → { "token": "<openos JWT>", "user": {...} }
+```
+
+配套能力：应用可标记 `hidden`（可编程打开、不出现在启动台/Dock，适合详情窗口）；
+角色不限于内置三角色——宿主可注入业务角色并按 `role_apps` 矩阵授权（授权矩阵接口
+会动态返回全部已出现角色）。401 时 SSO 模式自动跳回宿主登录入口。
+
 ### goder 界面操控指令
 
 任何来源（AI 回复、终端、事件总线）发送 `sys:cmd` 即可操控桌面：
