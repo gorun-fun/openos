@@ -16,7 +16,7 @@
 import { bus } from '../bus/bus'
 import * as ui from '../ui'
 import { toast } from '../ui/toast'
-import { runtimeComponents } from '../stores/apps'
+import { runtimeComponents, appChrome } from '../stores/apps'
 import { useWindows } from '../stores/windows'
 import { useApps } from '../stores/apps'
 import { api, fsApi } from '../api/client'
@@ -31,6 +31,8 @@ export interface RegisterOptions {
   category?: string
   /** 隐藏应用：可编程打开、不出现在启动台/Dock（详情窗口类） */
   hidden?: boolean
+  /** 窗体外观：'merged' = 融合工具栏窗体（无独立标题栏，应用自绘标题行，仿 Finder） */
+  chrome?: 'default' | 'merged'
   component: any // Vue 组件（defineComponent 产物或含 render 的对象）
 }
 
@@ -39,6 +41,7 @@ export const OpenOS = {
   /** 注册组件型第三方应用（即时生效，刷新后消失；持久化请用声明式注册）。 */
   registerApp(id: string, opts: RegisterOptions) {
     runtimeComponents[id] = opts.component
+    if (opts.chrome) appChrome[id] = opts.chrome
     const apps = useApps()
     if (!apps.byId(id)) {
       apps.apps.push({
@@ -51,6 +54,7 @@ export const OpenOS = {
   /** 卸载运行时注册的应用（关闭其全部窗口；不影响声明式注册的应用）。 */
   unregisterApp(id: string) {
     delete runtimeComponents[id]
+    delete appChrome[id]
     const apps = useApps()
     const i = apps.apps.findIndex((a) => a.id === id)
     if (i >= 0 && !apps.apps[i].builtin) {

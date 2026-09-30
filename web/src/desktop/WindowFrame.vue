@@ -2,7 +2,7 @@
 import { computed, defineAsyncComponent, h, onErrorCaptured, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import type { WinState } from '../stores/windows'
 import { MENUBAR_H, useWindows, viewport, type SnapZone } from '../stores/windows'
-import { builtinComponents, runtimeComponents, useApps } from '../stores/apps'
+import { builtinComponents, runtimeComponents, appChrome, useApps } from '../stores/apps'
 import SchemaApp from '../sdk/SchemaApp.vue'
 import { snapPreview } from './snapState'
 
@@ -61,6 +61,8 @@ resolveComp()
 watch(() => props.win.appId, resolveComp)
 
 const focused = computed(() => store.activeId === props.win.id)
+// 融合工具栏窗体：应用自绘标题行（红绿灯悬浮其上，可拖拽/双击最大化），窗口内容占满整高
+const merged = computed(() => appChrome[props.win.appId] === 'merged')
 
 // ---- 拖动（含边缘吸附）与缩放 ----
 const MIN_W = 300, MIN_H = 200
@@ -199,14 +201,19 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
     }"
     @pointerdown="store.focus(win.id)"
   >
-    <header class="titlebar" @pointerdown="onTitlePointerDown" @dblclick="store.toggleMaximize(win.id)">
+    <header
+      class="titlebar" :class="{ merged }"
+      @pointerdown="onTitlePointerDown" @dblclick="store.toggleMaximize(win.id)"
+    >
       <div class="traffic">
         <button class="t close" title="关闭" @click="store.close(win.id)"><span>✕</span></button>
         <button class="t min" title="最小化" @click="onMinimizeClick"><span>−</span></button>
         <button class="t max" title="最大化" @click="store.toggleMaximize(win.id)"><span>⤢</span></button>
       </div>
-      <div class="title">{{ win.title }}</div>
-      <div class="titlebar-space" />
+      <template v-if="!merged">
+        <div class="title">{{ win.title }}</div>
+        <div class="titlebar-space" />
+      </template>
     </header>
     <div class="body">
       <ErrorPanel v-if="crashed" />
@@ -231,7 +238,8 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
   box-shadow: var(--os-shadow);
   animation: os-window-open .22s var(--os-ease-spring);
   transition: opacity .26s ease, transform .26s cubic-bezier(.4,.1,.6,1), box-shadow .2s ease;
-  will-change: transform;
+  /* 勿加 will-change: transform：它会常驻创建 fixed 包含块，令嵌入应用
+     （goder 的模型/思考强度/策略等弹窗按视口坐标做 fixed 定位）整体漂移 */
 }
 .window.dragging { transition: none; }
 .window.minimized { opacity: 0; transform: scale(.06) translateY(70vh); pointer-events: none; }
@@ -253,6 +261,13 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
 }
 .focused .title { color: var(--os-text); }
 .titlebar-space { width: 66px; flex: none; }
+
+/* 融合工具栏窗体：标题栏退化为悬浮的红绿灯拖拽区（应用工具栏自绘标题行，内容占满整窗） */
+.titlebar.merged {
+  position: absolute; top: 0; left: 0; width: 84px; height: 46px; z-index: 30;
+  background: transparent; border-bottom: none; box-shadow: none; backdrop-filter: none;
+  padding: 0 0 0 13px;
+}
 
 .traffic { display: flex; gap: 8px; flex: none; }
 .t {

@@ -20,6 +20,12 @@ export const builtinComponents: Record<string, () => Promise<any>> = {
 // 第三方在页面运行时通过 window.OpenOS.registerApp() 动态注册的组件
 export const runtimeComponents: Record<string, any> = {}
 
+// 应用窗体外观：'merged' = 融合工具栏窗体（无独立标题栏，应用自绘工具栏承担标题行，
+// 红绿灯按钮悬浮其上，仿 macOS Finder/邮件等一体式窗口）；缺省 'default' 为标准标题栏。
+export const appChrome: Record<string, 'default' | 'merged'> = {
+  files: 'merged',
+}
+
 interface State {
   apps: AppDef[]
 }
