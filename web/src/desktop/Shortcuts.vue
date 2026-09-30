@@ -2,7 +2,7 @@
 // 桌面快捷方式：应用/文件图标，双击打开，右键菜单移除；可从启动台拖入创建，
 // 也可拖入操作系统文件（自动上传到个人空间并生成快捷方式）。
 // 位置为全桌面网格（左上角锚定），释放后吸附格子并与其他快捷方式/小组件互不覆盖。
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { useWindows } from '../stores/windows'
 import { useApps } from '../stores/apps'
 import { useSession } from '../stores/session'
@@ -47,6 +47,25 @@ onMounted(() => {
   for (const s of list.value) registerItem(keyOf(s), { c: s.col, r: s.row, sc: 1, sr: 1, kind: 'shortcut' })
   save()
 })
+
+// 默认桌面：应用列表就绪后，为每个用户一次性种入 goder 快捷方式（首个空位）。
+// 子组件挂载早于 Desktop 的 apps.refresh 完成，故 watch 等列表就绪再种；
+// 未授权角色（如 guest）的 /api/apps 不含 goder，byId 为空自动跳过；
+// 以 localStorage 标记保证只种一次——用户主动移除后不会自动恢复。
+const SEEDED_KEY = () => `openos_desktop_goder_seeded_${session.user!.username}`
+const stopSeed = watch(() => apps.apps.length, (n) => {
+  if (!n) return
+  stopSeed()
+  if (localStorage.getItem(SEEDED_KEY())) return
+  localStorage.setItem(SEEDED_KEY(), '1')
+  const app = apps.byId('goder')
+  if (app && !list.value.some((s) => s.kind === 'app' && s.id === 'goder')) {
+    const s: Shortcut = { kind: 'app', id: 'goder', name: app.name, col: 0, row: 0 }
+    list.value.push(s)
+    place(s, 0, 0)
+    save()
+  }
+}, { immediate: true })
 
 function save() { localStorage.setItem(KEY(), JSON.stringify(list.value)) }
 
