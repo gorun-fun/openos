@@ -1,3 +1,6 @@
+# 版本号：优先当前提交的精确 tag，其次最近 tag+提交数，均无则 dev（注入系统信息/健康检查）
+VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null || git describe --tags 2>/dev/null || echo dev)
+
 .PHONY: dev server web build release docker test goder clean
 
 # 准备 goder 组件：源码自动拉取自远端仓库，构建 goder-serve 网关 + 嵌入式 goder.js。
@@ -39,8 +42,8 @@ test:
 # 生产构建：前端产物由 Go 托管
 build:
 	cd web && npm install && npm run build
-	cd server && go build -o openos-server .
-	@echo "完成：cd server && ./openos-server  →  http://127.0.0.1:8081"
+	cd server && go build -ldflags "-X openos/server/internal/store.Version=$(VERSION)" -o openos-server .
+	@echo "完成（版本 $(VERSION)）：cd server && ./openos-server  →  http://127.0.0.1:8081"
 
 # 发布多平台二进制（darwin/linux × amd64/arm64），含前端产物
 release: build
@@ -50,7 +53,7 @@ release: build
 		set -- $$os_arch; \
 		echo "→ 构建 openos-$$1-$$2"; \
 		mkdir -p ../release/pkg/openos-$$1-$$2; \
-		CGO_ENABLED=0 GOOS=$$1 GOARCH=$$2 go build -trimpath -ldflags="-s -w" -o ../release/pkg/openos-$$1-$$2/openos .; \
+		CGO_ENABLED=0 GOOS=$$1 GOARCH=$$2 go build -trimpath -ldflags="-s -w -X openos/server/internal/store.Version=$(VERSION)" -o ../release/pkg/openos-$$1-$$2/openos .; \
 	done
 	@cd release && for d in pkg/openos-*; do \
 		tar -czf "$$d.tar.gz" -C pkg "$$(basename $$d)" && echo "✓ $$d.tar.gz"; \

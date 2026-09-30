@@ -12,8 +12,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// Version 服务端版本号（关于对话框 / 健康检查使用）。
-const Version = "1.1.0"
+// Version 服务端版本号（系统信息 / 健康检查使用）。
+// 构建期注入 git tag：go build -ldflags "-X openos/server/internal/store.Version=v0.0.7"；
+// CI（.gitlab-ci.yml）以 CI_COMMIT_TAG 注入，Makefile release 用 git describe，未注入时显示 dev。
+var Version = "dev"
 
 // DB 包裹 sql.DB，提供统一的访问入口。
 type DB struct {

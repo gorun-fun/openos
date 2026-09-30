@@ -48,13 +48,16 @@ RUN npm run build
 
 # ---- OpenOS 服务端 ----
 FROM golang:1.26-alpine AS server
+# 版本号（CI 传入 git tag，如 v0.0.7；缺省 dev），系统信息/健康检查展示用
+ARG APP_VERSION=dev
 # 国内 Go 模块代理（Runner 网络无法直连 proxy.golang.org，go mod 报错的根因）
 ENV GOPROXY=https://goproxy.cn,direct
 WORKDIR /build/server
 COPY server/go.mod server/go.sum ./
 RUN go mod download
 COPY server/ ./
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /openos .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
+    -ldflags="-s -w -X openos/server/internal/store.Version=${APP_VERSION}" -o /openos .
 
 # ---- 运行镜像 ----
 FROM alpine:3.20

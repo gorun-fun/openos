@@ -40,7 +40,8 @@ build-image:
     - docker
   script:
     - docker info
-    - docker build -t ${IMAGE_BASE}:${CI_COMMIT_TAG} .
+    # APP_VERSION 注入服务端版本号（系统信息/健康检查显示 git tag）
+    - docker build --build-arg APP_VERSION=${CI_COMMIT_TAG} -t ${IMAGE_BASE}:${CI_COMMIT_TAG} .
     - docker history ${IMAGE_BASE}:${CI_COMMIT_TAG}
   rules:
     - if: '$CI_COMMIT_TAG'      # 仅打 tag 触发
