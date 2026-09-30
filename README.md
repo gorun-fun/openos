@@ -117,7 +117,11 @@ OpenOS 按官方嵌入约定（`goder/docs/embedding.md`，与 grf-play 同款�
 - **鉴权**：OpenOS 登录后签发 `openos_token` Cookie（httpOnly），goder 嵌入组件的同源请求自动携带，经反代完成身份注入
 - **前端**：goder 应用窗口动态 `import('/vendor/goder.js')` → `configure('openos', { baseUrl: '/goder-api', user, sideTop })` → 渲染 `<goder-app-shell panels="sessions,chat,sidebar,console">`（左会话/中聊天/右栏 tab/底事件台）
 
-部署（`make goder` 自动完成，源码拉取自 `https://git.gorun.fun/share/goder.git`，克隆到仓库内 `.goder-src/`，可用 `GODER_REPO`/`GODER_SRC` 覆盖）：
+部署（两种方式）：
+
+**Docker（推荐）**：goder 组件已全部内置在镜像中（构建时自动克隆 `https://git.gorun.fun/share/goder.git` 编译 goder-serve 与 goder.js，并从 `download.gorun.fun/grf-harness` 下载对应架构的最新 gh），部署即用，无需额外操作。
+
+**本地/裸机**：`make goder` 自动完成（源码拉取自 `https://git.gorun.fun/share/goder.git`，克隆到仓库内 `.goder-src/`，可用 `GODER_REPO`/`GODER_SRC` 覆盖）：
 
 ```bash
 # make goder 等价于：

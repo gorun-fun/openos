@@ -40,5 +40,6 @@ cd web && npm run typecheck    # vue-tsc --noEmit（仓库无 ESLint/Prettier，
 - 关键环境变量：`OPENOS_ADDR`（默认 127.0.0.1:8081）、`OPENOS_DATA`、`OPENOS_DIST`、`OPENOS_JWT_SECRET`、`OPENOS_AI_BASE_URL/API_KEY/MODEL`、`OPENOS_REAL_SHELL`（off/full）、`OPENOS_GODER_*`。
 - WebSocket 鉴权走查询参数 `?token=<jwt>`（浏览器 WS 无法带 header）。
 - `make goder` 从 `https://git.gorun.fun/share/goder.git` 克隆源码到仓库内 `.goder-src/`（已 gitignore；`GODER_REPO`/`GODER_SRC` 可覆盖，`GODER_SRC` 指向已有克隆即免拉取），需 go/npm/git；gh 是运行期依赖（PATH 上）。
+- **Docker 镜像自带 goder 全套组件**：Dockerfile 内克隆 goder 仓库编译 goder-serve/goder.js，并从 `download.gorun.fun/grf-harness/{平台}/{最新版}/gh` 下载 gh，经 `OPENOS_GODER_BIN/JS` + `OPENOS_GH_BIN` 指到 `/app/goder/`——容器部署无需跑 `make goder`。
 - 权威文档是 `README.md`（含完整架构图、总线协议、goder 部署步骤、第三方接入指南）；修改敏感区域（auth/bus/vfs/goder）前先读对应章节。
 - **版本发布规则**：从 `v0.0.1` 起，每次发布**只递增版本号最后一位**（v0.0.1 → v0.0.2 → v0.0.3 …），不得修改主/次版本号。发布方式 = 提交后打 tag 并推送（触发 GitLab CI 自动构建镜像并部署）。
