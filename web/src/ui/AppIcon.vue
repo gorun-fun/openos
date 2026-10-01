@@ -1,9 +1,15 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { iconOf } from '../desktop/icons'
+import { computed, ref, watch } from 'vue'
+import { iconOf, APP_ICONS } from '../desktop/icons'
 
-const props = withDefaults(defineProps<{ app: string; size?: number }>(), { size: 44 })
-const def = computed(() => iconOf(props.app))
+const props = withDefaults(defineProps<{ app: string; icon?: string; size?: number }>(), { size: 44 })
+// 图片图标（如网页应用的 favicon 直连）加载失败时回落到 default，避免破图
+const srcError = ref(false)
+watch(() => [props.app, props.icon], () => { srcError.value = false })
+const def = computed(() => {
+  const d = iconOf(props.app, props.icon)
+  return srcError.value && d.src ? APP_ICONS.default : d
+})
 </script>
 
 <template>
@@ -15,6 +21,7 @@ const def = computed(() => iconOf(props.app))
     :alt="def.label || ''"
     :style="{ width: size + 'px', height: size + 'px' }"
     draggable="false"
+    @error="srcError = true"
   >
   <!-- SVG 图标：容器统一负责圆角裁切与投影，SVG 本体铺满缩放 -->
   <span

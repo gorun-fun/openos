@@ -19,23 +19,14 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
+
+	"openos/server/internal/goder"
 )
 
 // pluginName gh 侧的插件名（工具归属展示 mcp__openos__*）。
 const pluginName = "openos"
-
-// uidSan 用户名 → 目录名清洗规则，与 goder ghserver 的 manager.go uidSan
-// 严格一致（grf-home 路径由 goder-serve 按 UID 生成，两边必须同步改）。
-var uidSan = regexp.MustCompile(`[^a-zA-Z0-9_.-]`)
-
-// userGrfHome 某用户的 GRF_HOME（goder-serve PerUserHome 布局）。
-func userGrfHome(dataDir, uid string) string {
-	san := uidSan.ReplaceAllString(uid, "_")
-	return filepath.Join(dataDir, "goder", "serve-data", "users", san, "grf-home")
-}
 
 func wrapperFileName() string {
 	if runtime.GOOS == "windows" {
@@ -117,7 +108,12 @@ func upsertSettings(settingsPath, exe, endpoint, token, uid string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(settingsPath, append(out, '\n'), 0o600)
+	out = append(out, '\n')
+	// 内容未变不写盘：避免无谓的 mtime 变化惊动本包与 goder aisync 的安装指纹
+	if string(out) == string(raw) {
+		return nil
+	}
+	return os.WriteFile(settingsPath, out, 0o600)
 }
 
 // readWrapperUID 从既有 wrapper 内容里抠出烙写的用户名（存量自愈用：目录名是
@@ -182,7 +178,7 @@ func (m *Manager) EnsureUser(uid string) {
 	if m.disabled || uid == "" || m.exe == "" {
 		return
 	}
-	grfHome := userGrfHome(m.deps.DataDir, uid)
+	grfHome := goder.GrfHomePath(m.deps.DataDir, uid)
 	wm, ws := statMark(filepath.Join(grfHome, "plugins", wrapperFileName()))
 	sm, ss := statMark(filepath.Join(grfHome, "settings.json"))
 	m.installMu.Lock()
@@ -199,7 +195,7 @@ func (m *Manager) installUser(uid string) {
 	if m.exe == "" {
 		return
 	}
-	grfHome := userGrfHome(m.deps.DataDir, uid)
+	grfHome := goder.GrfHomePath(m.deps.DataDir, uid)
 	if err := installPlugin(m.exe, grfHome, m.Endpoint(), m.cfg.Token, uid); err != nil {
 		log.Printf("osmcp: 安装插件失败(%s): %v", uid, err)
 		return

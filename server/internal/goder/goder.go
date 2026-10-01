@@ -15,7 +15,10 @@
 package goder
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httputil"
@@ -23,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +50,12 @@ type Manager struct {
 	lastErr string
 
 	proxy *httputil.ReverseProxy
+
+	// AI 联动（见 aisync.go）：配置来源回调 + 逐用户写盘指纹 + 最近同步计数
+	aiSource      func() (ProviderConfig, bool)
+	aiMu          sync.Mutex
+	aiMarks       map[string]aiMark
+	aiSyncedUsers int
 }
 
 // New 创建管理器；二进制不存在时 available=false（前端显示引导）。
@@ -57,6 +67,7 @@ func New(dataDir string) *Manager {
 		ghBin:    envOr("OPENOS_GH_BIN", "gh"),
 		dataDir:  dataDir,
 		disabled: os.Getenv("OPENOS_GODER") == "off",
+		aiMarks:  map[string]aiMark{},
 	}
 	if m.disabled {
 		m.lastErr = "goder 已通过 OPENOS_GODER=off 停用"
@@ -169,11 +180,13 @@ func (m *Manager) Ready() bool {
 // Status 状态汇总（前端引导用）。
 func (m *Manager) Status() map[string]any {
 	return map[string]any{
-		"available": !m.disabled && m.Available() && m.JSAvailable(),
-		"running":   m.Ready(),
-		"disabled":  m.disabled,
-		"addr":      m.addr,
-		"error":     m.lastErr,
+		"available":     !m.disabled && m.Available() && m.JSAvailable(),
+		"running":       m.Ready(),
+		"disabled":      m.disabled,
+		"addr":          m.addr,
+		"error":         m.lastErr,
+		"aiProvider":    AIProviderName,
+		"aiSyncedUsers": m.LastSyncUsers(),
 	}
 }
 
@@ -194,6 +207,7 @@ func (m *Manager) ProxyHandler(identity func(r *http.Request) (uid, name string,
 	target, _ := url.Parse("http://" + m.addr)
 	rp := httputil.NewSingleHostReverseProxy(target)
 	rp.FlushInterval = -1 // SSE 流式透传
+	rp.ModifyResponse = m.markManagedProvider
 	orig := rp.Director
 	rp.Director = func(req *http.Request) {
 		orig(req)
@@ -231,6 +245,69 @@ func (m *Manager) ProxyHandler(identity func(r *http.Request) (uid, name string,
 		_ = name
 		rp.ServeHTTP(w, r)
 	})
+}
+
+// markManagedProvider GET /goder-api/v1/agent/models（goder 设置页模型表的
+// 数据源）响应里，为平台托管供应商注入 managed:true —— goder 嵌入约定的
+// 只读展示语义（见 goder docs/embedding.md 与 agent-dto.ts ProviderDTO.managed），
+// 用户在 goder 设置页看到的 OpenOS 条目不可改，来源即「系统设置 → AI 服务」。
+// 用 map[string]json.RawMessage 改写，default/path/maxSteps 等其余键原样保真
+// （goder 前端 PUT 时整表回传，丢键会破坏用户配置）。
+func (m *Manager) markManagedProvider(resp *http.Response) error {
+	if resp.Request == nil || resp.Request.Method != http.MethodGet ||
+		resp.Request.URL.Path != "/goder-api/v1/agent/models" ||
+		resp.Header.Get("Content-Encoding") != "" {
+		return nil
+	}
+	ct := resp.Header.Get("Content-Type")
+	if ct != "" && !strings.Contains(ct, "json") {
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	resp.Body.Close()
+	if err != nil {
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+		return nil // 读到多少放回多少，不因改写失败断掉响应
+	}
+	var all map[string]json.RawMessage
+	if json.Unmarshal(body, &all) != nil {
+		return restoreBody(resp, body)
+	}
+	var provs []map[string]json.RawMessage
+	if json.Unmarshal(all["providers"], &provs) != nil || len(provs) == 0 {
+		return restoreBody(resp, body)
+	}
+	managed, _ := json.Marshal(true)
+	touched := false
+	for _, p := range provs {
+		var name string
+		_ = json.Unmarshal(p["name"], &name)
+		if name == AIProviderName {
+			p["managed"] = managed
+			touched = true
+		}
+	}
+	if !touched {
+		return restoreBody(resp, body)
+	}
+	nb, err := json.Marshal(provs)
+	if err != nil {
+		return restoreBody(resp, body)
+	}
+	all["providers"] = nb
+	out, err := json.Marshal(all)
+	if err != nil {
+		return restoreBody(resp, body)
+	}
+	return restoreBody(resp, out)
+}
+
+// restoreBody 把（可能改写过的）响应体放回并校准 Content-Length。
+func restoreBody(resp *http.Response, body []byte) error {
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	resp.ContentLength = int64(len(body))
+	resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	return nil
 }
 
 // ServeJS GET /vendor/goder.js —— 自包含 ESM 嵌入库。

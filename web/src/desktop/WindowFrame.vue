@@ -18,7 +18,7 @@ onErrorCaptured((err) => {
   return false
 })
 
-// 解析窗口内容组件：内置 → 运行时注册 → 声明式 Schema → 占位
+// 解析窗口内容组件：内置 → 运行时注册 → 声明式 Schema / 网页应用 → 占位
 const Placeholder = {
   render: () => h('div', { style: 'padding:24px;color:var(--os-text-secondary)' }, '未知应用：' + props.win.appId),
 }
@@ -39,6 +39,8 @@ const ErrorPanel = {
   ]),
 }
 
+const WebAppComp = defineAsyncComponent(() => import('../apps/web/WebApp.vue'))
+
 const comp = shallowRef<any>(null)
 const apps = useApps()
 async function resolveComp() {
@@ -50,8 +52,18 @@ async function resolveComp() {
   } else {
     const def = apps.byId(appId)
     if (def?.config) {
-      try { comp.value = { render: () => h(SchemaApp, { schema: JSON.parse(def.config!), win: props.win }) } }
-      catch { comp.value = Placeholder }
+      try {
+        const raw: any = def.config
+        const cfg = typeof raw === 'string' ? JSON.parse(raw) : raw
+        if (cfg.kind === 'web' || cfg.kind === 'proxy') {
+          // 网页应用（iframe 容器，地址存 config.url；proxy 形态经服务端反代）：
+          // 统一融合工具栏窗体
+          appChrome[appId] = 'merged'
+          comp.value = WebAppComp
+        } else {
+          comp.value = { render: () => h(SchemaApp, { schema: cfg, win: props.win }) }
+        }
+      } catch { comp.value = Placeholder }
     } else {
       comp.value = Placeholder
     }

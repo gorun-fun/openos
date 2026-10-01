@@ -21,7 +21,7 @@ nextTick(() => inputEl.value?.focus())
 // ---- 结果模型：分组固定顺序渲染，每组内保持相关性顺序 ----
 type Item =
   | { type: 'calc'; expr: string; value: string }
-  | { type: 'app'; id: string; name: string }
+  | { type: 'app'; id: string; name: string; icon?: string }
   | { type: 'file'; file: VFile }
   | { type: 'action'; label: string; icon: string; run: () => void }
 
@@ -88,7 +88,7 @@ watch(q, (s) => {
     const cv = tryCalc(kw)
     if (cv !== null) out.push({ type: 'calc', expr: kw, value: cv })
     for (const a of apps.visible) {
-      if (a.name.toLowerCase().includes(kw) || a.id.includes(kw)) out.push({ type: 'app', id: a.id, name: a.name })
+      if (a.name.toLowerCase().includes(kw) || a.id.includes(kw)) out.push({ type: 'app', id: a.id, name: a.name, icon: a.icon })
       if (out.length > 40) break
     }
     for (const act of ACTIONS) {
@@ -171,7 +171,7 @@ function onKey(e: KeyboardEvent) {
               @mousemove="active = i"
             >
               <span class="row-ic">
-                <AppIcon v-if="it.type === 'app'" :app="it.id" :size="24" />
+                <AppIcon v-if="it.type === 'app'" :app="it.id" :icon="it.icon" :size="24" />
                 <template v-else-if="it.type === 'calc'"><span class="calc-ic">🟠</span></template>
                 <template v-else-if="it.type === 'action'"><span class="act-ic">{{ it.icon }}</span></template>
                 <img v-else-if="it.type === 'file' && isImage(it.file) && i === active && thumb" class="thumb" :src="thumb" alt="">

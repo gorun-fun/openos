@@ -22,7 +22,7 @@
 //
 // 本文件同时是公共 API 面：宿主可从 '@openos/framework' 直接导入总线 / API 客户端 /
 // 组件库 / 状态仓库，无需深入内部路径。
-import { createApp, type Component } from 'vue'
+import { createApp, type App as VueApp, type Component } from 'vue'
 import { createPinia } from 'pinia'
 import App from './App.vue'
 import './sdk' // 注入 window.OpenOS 第三方应用 SDK（副作用）
@@ -33,6 +33,8 @@ import { shell, type ShellBrand } from './shell'
 import { setToken } from './api/client'
 import { registerWidget, type WidgetDef } from './desktop/widgetRegistry'
 import { installMenuGuard } from './ui/menu'
+import { installTooltip } from './ui/tooltip'
+import { registerDialog, type DialogDef } from './ui/dialogService'
 
 export interface CreateOpenOSOptions {
   /** 编译期注册的宿主应用组件（key = appId，值为懒加载 loader），与内置应用合并 */
@@ -68,6 +70,14 @@ export interface CreateOpenOSOptions {
    * 与 OpenOS.registerApp 的 chrome 参数同义，供编译期 apps 注册的应用声明。
    */
   chrome?: Record<string, 'default' | 'merged'>
+  /**
+   * 注册跨应用业务弹窗（键 = 完整弹窗 id，建议 `appId:业务名`）：
+   * 应用 A 经 OpenOS.openDialog('roommgmt:checkin', { roomId }) 直接拉起房态管理的
+   * 入住弹窗，无需打开其主窗口；弹窗组件认 params/close/cancel 三个 props，
+   * close(result) 的结果成为 openDialog 的 Promise 值。与 OpenOS.registerApp 的
+   * dialogs 选项同义，供编译期注册。
+   */
+  dialogs?: Record<string, DialogDef>
 }
 
 /** 应用主题强调色：设置 --os-accent 及其派生令牌（选中/焦点/渐变），立即生效。 */
@@ -83,14 +93,19 @@ function applyTheme(accent: string) {
   s.setProperty('--os-focus-ring', `0 0 0 3.5px color-mix(in srgb, ${accent} 25%, transparent)`)
 }
 
-export function createOpenOS(opts: CreateOpenOSOptions = {}) {
+export function createOpenOS(opts: CreateOpenOSOptions = {}): VueApp | null {
   // 0. 全局右键守卫：默认屏蔽浏览器原生菜单（登录页与桌面全阶段生效），
   //    应用自定义菜单在组件内 stopPropagation 接管，详见 ui/menu.ts
   installMenuGuard()
+  // 全局快速 tooltip：接管原生 title 的悬停提示（约 400ms 弹出，见 ui/tooltip.ts）
+  installTooltip()
 
   // 1. 宿主应用组件与图标注册
   Object.assign(builtinComponents, opts.apps || {})
   if (opts.chrome) Object.assign(appChrome, opts.chrome)
+  if (opts.dialogs) {
+    for (const [id, def] of Object.entries(opts.dialogs)) registerDialog(id, def)
+  }
   if (opts.icons) registerIcons(opts.icons)
 
   // 2. 壳配置
@@ -121,6 +136,15 @@ export function createOpenOS(opts: CreateOpenOSOptions = {}) {
     history.replaceState(null, '', location.pathname + location.search)
   }
 
+  // 桌面壳不允许在 iframe 内启动：应用代理的越界跳转（location.href='/x' 这类
+  // 无法被 hook 包装的赋值）会让 SPA 回落把整个桌面塞进代理 iframe，形成套娃
+  // 桌面（还会连上总线、恢复同一份窗口状态）。服务端按 Referer 已把此类跳转
+  // 307 回代理路径，这里是纵深防御（如目标站设 no-referrer 时的兜底）
+  if (window.self !== window.top) {
+    document.documentElement.innerHTML = '<head><meta charset="utf-8"></head><body style="margin:0;display:grid;place-items:center;height:100vh;font:14px/1.7 system-ui,sans-serif;color:#666;background:#f5f5f7;text-align:center">OpenOS 桌面不能在 iframe 内打开<br/>此页面来自代理应用的越界跳转，请回到窗口内重新操作</body>'
+    return null
+  }
+
   // 4. 挂载桌面壳
   document.title = shell.brand.name
   const app = createApp(App)
@@ -143,6 +167,10 @@ export { useApps } from './stores/apps'
 export { useWindows } from './stores/windows'
 export { useDesktop, DEFAULT_WALLPAPERS } from './stores/desktop'
 export { useNotes, NOTE_COLORS } from './stores/notes'
+export { useNotifications, notify } from './stores/notifications'
+export type { OsNotification, NotifyInput } from './stores/notifications'
+export { useCalendar, todayStr, REMIND_OPTIONS } from './stores/calendar'
+export type { CalEvent, RemindOffset, HolidayInfo, CalMark } from './stores/calendar'
 export { shell } from './shell'
 export type { ShellBrand, ShellLogin, AppMenuItem } from './shell'
 export { registerWidget, widgetDefs, widgetDef } from './desktop/widgetRegistry'

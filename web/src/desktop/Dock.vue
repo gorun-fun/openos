@@ -1,31 +1,39 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useApps } from '../stores/apps'
 import { useWindows } from '../stores/windows'
 import { useDesktop } from '../stores/desktop'
+import { useDock } from '../stores/dock'
 import { useSession } from '../stores/session'
-import { fsApi } from '../api/client'
+import { fsApi, type AppDef } from '../api/client'
 import { bus } from '../bus/bus'
 import { toast } from '../ui/toast'
-import { useMenu } from '../ui/menu'
-import { shell } from '../shell'
+import { useMenu, menuPos } from '../ui/menu'
 import AppIcon from '../ui/AppIcon.vue'
 
 const emit = defineEmits<{ launchpad: [] }>()
 const apps = useApps()
 const windows = useWindows()
 const desktop = useDesktop()
+const dockStore = useDock()
 const session = useSession()
 
-/** Dock 应用：宿主经 createOpenOS({ dockOrder }) 指定排序，未列出的排在其后按服务器顺序。 */
-const dockApps = computed(() => {
-  const order = shell.dockOrder
-  if (!order.length) return apps.visible
-  const rank = (id: string) => {
-    const i = order.indexOf(id)
-    return i === -1 ? order.length : i
+onMounted(() => dockStore.load())
+
+/** Dock 应用：固定应用按用户顺序 + 未固定的运行中应用临时驻留末尾（macOS 行为）。 */
+const dockApps = computed<AppDef[]>(() => {
+  const map = new Map(apps.visible.map((a) => [a.id, a]))
+  const list: AppDef[] = []
+  for (const id of dockStore.effective) {
+    const a = map.get(id)
+    if (a) list.push(a)
   }
-  return [...apps.visible].sort((a, b) => rank(a.id) - rank(b.id) || a.id.localeCompare(b.id))
+  if (dockStore.pinned != null) {
+    for (const a of apps.visible) {
+      if (windows.runningAppIds.includes(a.id) && !dockStore.effectiveSet.has(a.id)) list.push(a)
+    }
+  }
+  return list
 })
 
 function dockClick(appId: string) {
@@ -33,15 +41,184 @@ function dockClick(appId: string) {
   if (wins.length === 0) {
     windows.open(appId)
   } else {
-    const anyVisible = wins.some((w) => !w.minimized)
-    const top = wins.sort((a, b) => b.z - a.z)[0]
-    if (anyVisible && windows.activeId === top.id) {
-      windows.minimize(top.id) // 再次点击最小化最前窗口
-    } else {
-      windows.focus(top.id)
-    }
+    // 始终聚焦最前窗口（最小化的同时还原）；已在前台则保持不动，不再触发最小化
+    windows.focus(wins.sort((a, b) => b.z - a.z)[0].id)
   }
 }
+
+// ---- 拖拽定制：拖动排序 / 拖出取消固定 / 从启动台或桌面快捷方式拖入 ----
+// 内部拖动：dragover 实时重排 preview（macOS 跟手），松手提交；拖出 Dock 一段
+// 距离释放 = 取消固定（Esc 取消时 dropEffect 为 none，不会误删）。外部拖入：
+// dragover 阶段读不到数据（保护模式），以半透明插槽指示落点，drop 时读取固定。
+const DOCK_MIME = 'application/x-openos-dock'
+const APP_MIME = 'application/x-openos-app'
+const SHORTCUT_MIME = 'application/x-openos-shortcut'
+
+const drag = ref<{ id: string; internal: boolean } | null>(null)
+const preview = ref<string[] | null>(null) // 内部拖动的实时顺序（松手才提交）
+const slotIdx = ref(-1)                    // 外部拖入的落点插槽（显示列表下标）
+let droppedInside = false                  // 本轮拖动是否落在了 Dock 内
+
+const displayApps = computed<AppDef[]>(() => {
+  const ids = preview.value ?? dockApps.value.map((a) => a.id)
+  return ids.map((id) => apps.byId(id)).filter((a): a is AppDef => !!a)
+})
+
+function wantedDrag(dt: DataTransfer | null): boolean {
+  return !!dt && [DOCK_MIME, APP_MIME, SHORTCUT_MIME].some((m) => dt.types.includes(m))
+}
+
+function itemDragStart(e: DragEvent, appId: string) {
+  e.dataTransfer?.setData(DOCK_MIME, appId)
+  if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
+  drag.value = { id: appId, internal: true }
+  preview.value = null
+  droppedInside = false
+  mouseX = null
+  tip.value = null
+  requestAnimationFrame(applyMagnify) // 收起放大与提示，避免拖拽过程中残留
+}
+
+/** 指针 x 应插入到哪个应用项之前（应用项 DOM 顺序 = 显示顺序）。 */
+function indexAt(x: number): number {
+  const els = dockEl.value?.querySelectorAll<HTMLElement>('.dock-item[data-app]') || []
+  for (let i = 0; i < els.length; i++) {
+    const r = els[i].getBoundingClientRect()
+    if (x < r.left + r.width / 2) return i
+  }
+  return els.length
+}
+
+/** 落点之前固定应用的数量 = 固定列表中的目标下标（临时驻留的运行应用不入列）。 */
+function pinnedIndexBefore(displayIdx: number, excludeId?: string): number {
+  return displayApps.value
+    .slice(0, Math.max(0, displayIdx))
+    .filter((a) => a.id !== excludeId && dockStore.effectiveSet.has(a.id))
+    .length
+}
+
+function onDockDragOver(e: DragEvent) {
+  if (!wantedDrag(e.dataTransfer)) return
+  e.preventDefault()
+  const dt = e.dataTransfer!
+  dt.dropEffect = dt.effectAllowed === 'copy' || dt.effectAllowed === 'copyLink' ? 'copy' : 'move'
+  const idx = indexAt(e.clientX)
+  if (drag.value?.internal) {
+    const cur = preview.value ?? dockApps.value.map((a) => a.id)
+    const from = cur.indexOf(drag.value.id)
+    if (from >= 0 && from !== idx) {
+      const arr = [...cur]
+      arr.splice(from, 1)
+      arr.splice(from < idx ? idx - 1 : idx, 0, drag.value.id)
+      preview.value = arr
+    }
+  } else {
+    drag.value = { id: '', internal: false } // 外部拖入标记：控制插槽渲染（全局 dragend 清理）
+    slotIdx.value = idx
+  }
+}
+
+function onDockDragLeave(e: DragEvent) {
+  const rt = e.relatedTarget as Node | null
+  if (!rt || !dockEl.value?.contains(rt)) slotIdx.value = -1
+}
+
+function onDockDrop(e: DragEvent) {
+  const dt = e.dataTransfer
+  if (!dt || !wantedDrag(dt)) return
+  e.preventDefault()
+  e.stopPropagation() // 阻断冒泡到桌面层（否则又被当作「拖到桌面创建快捷方式」）
+  droppedInside = true
+  if (drag.value?.internal) {
+    const id = drag.value.id
+    const wasPinned = dockStore.effectiveSet.has(id)
+    dockStore.pinAt(id, pinnedIndexBefore(displayApps.value.findIndex((a) => a.id === id), id))
+    if (!wasPinned) toast(`已在 Dock 中保留「${apps.byId(id)?.name || id}」`)
+  } else {
+    let appId = ''
+    if (dt.types.includes(APP_MIME)) {
+      appId = dt.getData(APP_MIME)
+    } else if (dt.types.includes(SHORTCUT_MIME)) {
+      try {
+        const s = JSON.parse(dt.getData(SHORTCUT_MIME))
+        if (s?.kind === 'app') appId = String(s.id)
+        else toast('文件快捷方式暂不支持固定到 Dock')
+      } catch { /* 数据损坏忽略 */ }
+    }
+    if (appId && apps.byId(appId)) {
+      // 插入点之前的固定应用数 = 固定列表下标；slotIdx 异常时兜底追加到末尾
+      const idx = slotIdx.value >= 0 ? pinnedIndexBefore(slotIdx.value) : dockStore.effective.length
+      dockStore.pinAt(appId, idx)
+      toast(`已固定「${apps.byId(appId)!.name}」到 Dock`)
+    }
+  }
+  drag.value = null
+  preview.value = null
+  slotIdx.value = -1
+}
+
+function itemDragEnd(e: DragEvent) {
+  const d = drag.value
+  if (!d?.internal || droppedInside) return
+  // 拖出 Dock 释放（且非 Esc 取消）→ 取消固定；Dock 边缘留缓冲带防误触
+  const r = dockEl.value?.getBoundingClientRect()
+  const outside = !!r && (e.clientY < r.top - 36 || e.clientX < r.left - 48 || e.clientX > r.right + 48)
+  if (outside && e.dataTransfer?.dropEffect !== 'none') {
+    const name = apps.byId(d.id)?.name || d.id
+    dockStore.unpin(d.id)
+    toast(`已从 Dock 移除「${name}」（启动台可重新固定）`)
+  }
+}
+
+// 外部拖入（启动台/快捷方式）的 dragend 在源元素上触发，Dock 收不到，全局兜底清理
+function onGlobalDragEnd() {
+  drag.value = null
+  preview.value = null
+  slotIdx.value = -1
+}
+onMounted(() => window.addEventListener('dragend', onGlobalDragEnd))
+onBeforeUnmount(() => window.removeEventListener('dragend', onGlobalDragEnd))
+
+// ---- 右键菜单：打开 / 固定切换（显示权归全局菜单单例 ui/menu.ts） ----
+const itemMenu = useMenu('dock-item')
+const menuAppId = ref('')
+const itemMenuPos = ref({ x: 0, y: 0 })
+const itemMenuEl = ref<HTMLElement>()
+
+function onItemContext(e: MouseEvent, appId: string) {
+  e.preventDefault()
+  e.stopPropagation()
+  menuAppId.value = appId
+  itemMenu.open(e.clientX, e.clientY)
+}
+
+function menuKeep() {
+  const id = menuAppId.value
+  itemMenu.close()
+  if (id) dockStore.pinAt(id, dockStore.effective.length)
+}
+
+function menuUnpin() {
+  const id = menuAppId.value
+  itemMenu.close()
+  if (id) dockStore.unpin(id)
+}
+
+// 菜单开着时再右键另一项 = 原地换目标（owner 不变，靠 menuPos 触发）；
+// Dock 在屏幕底部，菜单位置在弹出点基础上向上展开并夹在视口内。
+watch([() => itemMenu.isOpen, menuPos], ([open]) => {
+  if (!open) { menuAppId.value = ''; return }
+  itemMenuPos.value = { ...menuPos.value }
+  void nextTick(() => {
+    const el = itemMenuEl.value
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    itemMenuPos.value = {
+      x: Math.max(6, Math.min(menuPos.value.x, window.innerWidth - r.width - 6)),
+      y: Math.max(32, menuPos.value.y - r.height),
+    }
+  })
+})
 
 // ---- 邻居放大（macOS Dock）：指针距离连续衰减，直接写 DOM 避免 Vue 重渲抖动 ----
 const dockEl = ref<HTMLElement>()
@@ -151,7 +328,11 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
 
 <template>
   <div class="dock-area" :class="{ autohidden: autoHidden }">
-    <div ref="dockEl" class="dock os-glass" @pointermove="onMove" @pointerover="onOver" @pointerleave="onLeave">
+    <div
+      ref="dockEl" class="dock os-glass"
+      @pointermove="onMove" @pointerover="onOver" @pointerleave="onLeave"
+      @dragover="onDockDragOver" @dragleave="onDockDragLeave" @drop="onDockDrop"
+    >
       <div v-if="tip" class="dock-tip" :style="{ left: tip.x + 'px' }">{{ tip.text }}</div>
       <button class="dock-item launcher" data-name="启动台" aria-label="启动台" @click="emit('launchpad')">
         <span class="launcher-icon">
@@ -180,17 +361,38 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
           </svg>
         </span>
       </button>
-      <div class="dock-sep" />
-      <button
-        v-for="app in dockApps" :key="app.id"
-        class="dock-item"
-        :data-name="app.name"
-        :aria-label="app.name"
-        @click="dockClick(app.id)"
+      <div v-if="dockApps.length" class="dock-sep" />
+      <template v-for="(a, i) in displayApps" :key="a.id">
+        <div v-if="drag != null && !drag.internal && i === slotIdx" class="dock-slot" />
+        <button
+          class="dock-item" :class="{ dragging: drag?.id === a.id && drag.internal }"
+          :data-app="a.id"
+          :data-name="a.name"
+          :aria-label="a.name"
+          draggable="true"
+          @click="dockClick(a.id)"
+          @dragstart="itemDragStart($event, a.id)"
+          @dragend="itemDragEnd"
+          @contextmenu.prevent.stop="onItemContext($event, a.id)"
+        >
+          <AppIcon :app="a.id" :icon="a.icon" :size="42" />
+          <span class="dot" v-if="windows.runningAppIds.includes(a.id)" />
+        </button>
+      </template>
+      <div v-if="drag != null && !drag.internal && slotIdx === displayApps.length" class="dock-slot" />
+
+      <!-- 应用右键菜单：打开 / 固定切换 -->
+      <div
+        v-if="itemMenu.isOpen" ref="itemMenuEl"
+        class="os-menu os-menu-root dock-item-menu"
+        :style="{ left: itemMenuPos.x + 'px', top: itemMenuPos.y + 'px' }"
+        @contextmenu.prevent.stop
       >
-        <AppIcon :app="app.id" :size="42" />
-        <span class="dot" v-if="windows.runningAppIds.includes(app.id)" />
-      </button>
+        <button @click="dockClick(menuAppId); itemMenu.close()">打开</button>
+        <div class="sep" />
+        <button v-if="dockStore.effectiveSet.has(menuAppId)" @click="menuUnpin">从 Dock 中移除</button>
+        <button v-else @click="menuKeep">在 Dock 中保留</button>
+      </div>
 
       <!-- 废纸篓（右侧分区） -->
       <template v-if="hasFilesApp">
@@ -238,9 +440,12 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
 <style scoped>
 .dock-area {
   position: fixed; bottom: 6px; left: 0; right: 0;
-  display: flex; justify-content: center; z-index: 9000; pointer-events: none;
+  display: flex; justify-content: center; z-index: 9650; pointer-events: none;
   transition: transform .32s cubic-bezier(.4, .1, .6, 1), opacity .24s ease;
 }
+/* 9650：高于启动台全屏层（9600）——启动台打开时 Dock 保持可见可交互
+   （macOS 行为：可点击图标、可把应用拖入 Dock 固定）；低于 Spotlight 遮罩
+   （9700），聚焦搜索期间点 Dock 区域仍是点遮罩收起搜索 */
 /* 自动隐藏：整体沉到屏幕外（留 10px 余量，连投影一起收干净） */
 .dock-area.autohidden {
   transform: translateY(calc(100% + 12px));
@@ -267,6 +472,16 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
   will-change: transform;
 }
 .dock-item:active { filter: brightness(.85); }
+/* 拖动中的项：原位半透明（图标随指针飞行的快照由浏览器渲染） */
+.dock-item.dragging { opacity: .3; }
+/* 外部拖入（启动台/桌面快捷方式）的落点插槽 */
+.dock-slot {
+  flex: none; width: 46px; height: 46px; border-radius: 12px;
+  border: 1.5px dashed rgba(10, 132, 255, .6);
+  background: rgba(10, 132, 255, .14);
+  pointer-events: none;
+}
+.dock-item-menu { position: fixed; min-width: 160px; transform-origin: bottom left; }
 .launcher {
   display: flex; align-items: center; justify-content: center;
 }

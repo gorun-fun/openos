@@ -26,10 +26,12 @@ import (
 	"openos/server/internal/ai"
 	"openos/server/internal/auth"
 	"openos/server/internal/bus"
+	"openos/server/internal/calendar"
 	"openos/server/internal/goder"
 	"openos/server/internal/osmcp"
 	"openos/server/internal/store"
 	"openos/server/internal/vfs"
+	"openos/server/internal/webproxy"
 )
 
 func main() {
@@ -70,6 +72,23 @@ func main() {
 	fs := vfs.New(dataDir, db, hub, aiSvc.Ask)
 	goderMgr := goder.New(dataDir)
 	goderMgr.Start() // OPENOS_GODER=off 或二进制缺失时自动降级（available=false）
+	// AI ↔ goder 联动：系统设置的模型配置以托管供应商（OpenOS）写入各 goder
+	// 用户的 settings.json 并设为默认模型；goder 设置页经反代注入 managed 只读展示
+	goderMgr.SetAIProviderSource(func() (goder.ProviderConfig, bool) {
+		base, key, model, ok := aiSvc.Provider()
+		return goder.ProviderConfig{BaseURL: base, APIKey: key, Model: model}, ok
+	})
+	aiSvc.AfterSave = func(base, key, model string) {
+		if n := goderMgr.SyncAIProvider(goder.ProviderConfig{BaseURL: base, APIKey: key, Model: model}, true); n > 0 {
+			log.Printf("goder: AI 模型配置已同步 %d 个用户", n)
+		}
+	}
+	// 启动自愈：托管供应商可能在 goder 设置页被用户改动/删除，保用户自选的默认模型
+	if base, key, model, ok := aiSvc.Provider(); ok {
+		if n := goderMgr.SyncAIProvider(goder.ProviderConfig{BaseURL: base, APIKey: key, Model: model}, false); n > 0 {
+			log.Printf("goder: 启动时补齐 %d 个用户的托管 AI 供应商", n)
+		}
+	}
 	// 删除用户后的级联磁盘清理：真实终端沙箱 + goder 会话数据
 	authSvc.SetUserDeletedHook(func(name string) {
 		fs.DeleteHome(name)
@@ -262,11 +281,22 @@ func main() {
 	authed.HandleFunc("GET /api/ai/config", auth.RequireAdmin(http.HandlerFunc(aiSvc.GetConfig)).ServeHTTP)
 	authed.HandleFunc("PUT /api/ai/config", auth.RequireAdmin(http.HandlerFunc(aiSvc.SaveConfig)).ServeHTTP)
 	authed.HandleFunc("POST /api/ai/test", auth.RequireAdmin(http.HandlerFunc(aiSvc.Test)).ServeHTTP)
+	// AI 服务状态（所有登录用户可读：设置页展示当前模型与 goder 启用状态，不含密钥）
+	authed.HandleFunc("GET /api/ai/status", func(w http.ResponseWriter, r *http.Request) {
+		_, _, model, _ := aiSvc.Provider()
+		writeJSON(w, map[string]any{
+			"configured": aiSvc.Configured(), "model": model, "demo": !aiSvc.Configured(),
+			"goder": goderMgr.Status(),
+		})
+	})
 
 	// goder 集成状态（前端引导）
 	authed.HandleFunc("GET /api/goder/status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, goderMgr.Status())
 	})
+
+	// 日历：中国法定节假日（含调休安排）查询，内置已发布年份 + 在线同步 + 缓存
+	authed.HandleFunc("GET /api/calendar/holidays", calendar.HolidaysHandler)
 
 	// 终端能力（真实 shell 是否开启）
 	authed.HandleFunc("GET /api/term/capability", func(w http.ResponseWriter, r *http.Request) {
@@ -287,10 +317,12 @@ func main() {
 	}
 	goderProxy := goderMgr.ProxyHandler(goderIdentity)
 	mux.Handle("/goder-api/", authSvc.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 首次到达时为该用户落桌面控制插件 wrapper（先于 goder-serve 懒启动
-		// 该用户的 gh，保证插件在 gh 启动那一刻已就位；幂等低开销）
+		// 首次到达时为该用户落桌面控制插件 wrapper 并确保托管 AI 供应商就位
+		// （均先于 goder-serve 懒启动该用户的 gh，保证在 gh 启动那一刻已生效；
+		// 幂等低开销，指纹不变直接跳过）
 		if id := auth.FromContext(r); id != nil {
 			osmcpMgr.EnsureUser(id.Username)
+			goderMgr.EnsureAIUser(id.Username)
 		}
 		goderProxy.ServeHTTP(w, r)
 	})))
@@ -312,8 +344,22 @@ func main() {
 		mux.Handle("/", spaHandler(dist, fileServer))
 	}
 
+	// ---- 应用代理（网页应用 config.kind=proxy 的服务端反代，见 README「应用代理」）----
+	// 同源 iframe 的子资源请求经 openos_token Cookie 自动携带登录态，
+	// 包内再按 role_apps 校验该用户对此应用的访问权。
+	root := http.Handler(mux)
+	if envOr("OPENOS_PROXY", "") != "off" {
+		px := webproxy.New(db)
+		mux.Handle("/app/{id}/", authSvc.Middleware(http.HandlerFunc(px.Handler)))
+		// CatchEscape 挂在整棵路由树外层：代理页面逃逸到本源任意路径（不止 SPA
+		// 兜底——目标站常用 /api 等本源真实路由前缀，SSO 跳转 location.href=
+		// '/api/auth/sso/login' 会撞 OpenOS 自身路由 404，路径重合甚至误调系统
+		// 接口）的请求按 Referer 307 回代理路径。仍在安全头/日志/限流内层。
+		root = webproxy.CatchEscape(db, mux)
+	}
+
 	// ---- 中间件链：恢复 → 安全头 → 访问日志 → 限流 ----
-	handler := withRecovery(withSecurityHeaders(withLogging(rateLimit(authSvc, mux))))
+	handler := withRecovery(withSecurityHeaders(withLogging(rateLimit(authSvc, root))))
 
 	addr := envOr("OPENOS_ADDR", "127.0.0.1:8081")
 	srv := &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
@@ -516,9 +562,11 @@ func envOr(k, def string) string {
 }
 
 func sanitizeID(s string) string {
+	// 保留点号：前端按域名自动生成的应用 ID（如 web-www.baidu.com）与服务端清洗规则
+	// 必须一致，否则图标等以落库前 ID 拼出的派生 URL 会指向不存在的应用
 	var b strings.Builder
 	for _, r := range strings.ToLower(s) {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
 			b.WriteRune(r)
 		}
 	}

@@ -117,3 +117,27 @@ func TestSystemKVMigration(t *testing.T) {
 		t.Fatalf("用户设置不应被迁移波及，实际 %q", v)
 	}
 }
+
+// TestAppByIDAndRoleAccess 应用代理路由逐请求用到的两个查询。
+func TestAppByIDAndRoleAccess(t *testing.T) {
+	db := openTestDB(t)
+	if err := db.UpsertApp(AppDef{ID: "px1", Name: "代理示例", Config: []byte(`{"kind":"proxy","url":"https://x.example/"}`)}); err != nil {
+		t.Fatalf("UpsertApp: %v", err)
+	}
+	a, ok := db.AppByID("px1")
+	if !ok || a.Name != "代理示例" || string(a.Config) != `{"kind":"proxy","url":"https://x.example/"}` {
+		t.Fatalf("AppByID 结果不符：%+v ok=%v", a, ok)
+	}
+	if _, ok := db.AppByID("missing"); ok {
+		t.Fatal("不存在的应用应返回 false")
+	}
+	if err := db.SetRoleApps("user", []string{"px1"}); err != nil {
+		t.Fatalf("SetRoleApps: %v", err)
+	}
+	if !db.RoleCanAccessApp("user", "px1") {
+		t.Fatal("授权角色应可访问")
+	}
+	if db.RoleCanAccessApp("admin", "px1") {
+		t.Fatal("未授权角色不应可访问")
+	}
+}

@@ -8,6 +8,7 @@ import { api, type AppDef } from '../../api/client'
 import { bus } from '../../bus/bus'
 import {
   OsButton, OsInput, OsSelect, OsToggle, OsPanel, OsTable, OsLayout, OsTabs, OsModal,
+  OsEmpty, AppIcon,
 } from '../../ui'
 
 const props = defineProps<{ win: WinState }>()
@@ -16,18 +17,23 @@ const desktop = useDesktop()
 const apps = useApps()
 const isAdmin = session.user?.role === 'admin'
 
+// 角色名中文显示（内置角色映射；宿主注入的自定义角色保留原名，悬停可见英文）
+const ROLE_LABELS: Record<string, string> = { admin: '管理员', user: '用户', guest: '访客' }
+function roleLabel(r: string) { return ROLE_LABELS[r] || r }
+
 const tab = ref('appearance')
 const items = computed(() => {
+  // AI 服务全员可见（只读状态 + goder 启用引导），其余管理页仅管理员
   const base = [
     { key: 'appearance', label: '外观', icon: '🎨' },
     { key: 'account', label: '账户', icon: '👤' },
+    { key: 'ai', label: 'AI 服务', icon: '✦' },
   ]
   if (isAdmin) {
     base.push(
       { key: 'users', label: '用户管理', icon: '👥' },
       { key: 'access', label: '应用授权', icon: '🔐' },
-      { key: 'registry', label: '第三方应用', icon: '🧩' },
-      { key: 'ai', label: 'AI 服务', icon: '✦' },
+      { key: 'registry', label: '应用管理', icon: '🧩' },
       { key: 'system', label: '系统信息', icon: 'ℹ️' },
     )
   }
@@ -53,7 +59,7 @@ const users = ref<UserRow[]>([])
 const showCreate = ref(false)
 const nu = ref({ username: '', password: '', role: 'user', displayName: '' })
 // 创建用户的角色下拉跟随系统实际角色（含宿主注入的自定义角色）
-const roleOptions = computed(() => roles.value.map(r => ({ value: r, label: r })))
+const roleOptions = computed(() => roles.value.map(r => ({ value: r, label: roleLabel(r) })))
 
 async function loadUsers() { users.value = await api.get<UserRow[]>('/api/users') }
 
@@ -105,12 +111,71 @@ async function saveAccess() {
   apps.refresh() // 自己桌面立即生效
 }
 
-// ---- 第三方应用注册 ----
+// ---- 应用管理（第三方 + 内置网页应用的列表、弹窗式添加/编辑）----
 const schemaText = ref('')
 const regName = ref('')
 const regId = ref('')
 const regMsg = ref('')
-const registryApps = computed(() => allApps.value.filter((a) => !a.builtin))
+const schemaDlg = ref(false)
+const webName = ref('')
+const webUrl = ref('')
+const webId = ref('')
+const webMsg = ref('')
+const webDlg = ref(false)
+// 代理嵌入开关：config.kind=proxy，目标站经服务端反代（可嵌入拒绝 iframe 的站点）
+const webProxy = ref(false)
+// 自定义请求头（仅代理模式生效——iframe 直嵌无法附带自定义头）：行式编辑，
+// 保存时合并为 config.headers 对象（同名行后者覆盖前者）
+const webHeaders = ref<{ name: string; value: string }[]>([])
+function addWebHeader() { webHeaders.value.push({ name: '', value: '' }) }
+function delWebHeader(i: number) { webHeaders.value.splice(i, 1) }
+// 编辑中的应用（null = 添加模式；编辑时 ID 只读，提交走 upsert）
+const editing = ref<AppDef | null>(null)
+
+// config 在 API 里可能是字符串（旧数据双重编码）或嵌套对象（种子/新数据），统一解析
+const parseCfg = (a: AppDef): any => {
+  if (!a.config) return {}
+  if (typeof a.config === 'string') { try { return JSON.parse(a.config) } catch { return {} } }
+  return a.config
+}
+const isWebApp = (a: AppDef) => parseCfg(a).kind === 'web' || parseCfg(a).kind === 'proxy'
+// 列表 = 全部第三方应用 + 内置网页应用（内置项只读，配置随版本发布）
+const registryApps = computed(() => allApps.value.filter((a) => !a.builtin || isWebApp(a)))
+const appType = (a: AppDef) => {
+  const k = parseCfg(a).kind
+  return !a.config ? '未知' : k === 'web' ? '网页应用' : k === 'proxy' ? '代理网页' : '声明式'
+}
+
+function openAddWeb() {
+  editing.value = null
+  webName.value = ''; webUrl.value = ''; webId.value = ''; webMsg.value = ''; webProxy.value = false
+  webHeaders.value = []
+  webDlg.value = true
+}
+function openEditWeb(a: AppDef) {
+  editing.value = a
+  webName.value = a.name
+  webId.value = a.id
+  webUrl.value = parseCfg(a).url || ''
+  webProxy.value = parseCfg(a).kind === 'proxy'
+  const hs = parseCfg(a).headers || {}
+  webHeaders.value = Object.entries(hs).map(([name, value]) => ({ name, value: String(value) }))
+  webMsg.value = ''
+  webDlg.value = true
+}
+function openAddSchema() {
+  editing.value = null
+  regId.value = ''; regName.value = ''; schemaText.value = ''; regMsg.value = ''
+  schemaDlg.value = true
+}
+function openEditSchema(a: AppDef) {
+  editing.value = a
+  regId.value = a.id
+  regName.value = a.name
+  schemaText.value = a.config || ''
+  regMsg.value = ''
+  schemaDlg.value = true
+}
 
 const EXAMPLE_SCHEMA = JSON.stringify({
   title: '团队公告板',
@@ -139,13 +204,15 @@ async function registerApp() {
   try {
     JSON.parse(schemaText.value) // 校验
     await api.post('/api/apps', {
-      id: regId.value, name: regName.value, icon: 'default',
+      id: editing.value ? editing.value.id : regId.value, name: regName.value, icon: 'default',
       category: '第三方', config: schemaText.value, width: 760, height: 560,
     })
-    regMsg.value = '✓ 注册成功，已可在 Dock 使用'
+    regMsg.value = '✓ 已保存'
     regId.value = ''; regName.value = ''
+    editing.value = null
+    schemaDlg.value = false
     loadAccess()
-  } catch (e: any) { regMsg.value = '注册失败：' + e.message }
+  } catch (e: any) { regMsg.value = '保存失败：' + e.message }
 }
 async function removeApp(id: string) {
   if (!confirm(`删除第三方应用 ${id}？`)) return
@@ -153,14 +220,59 @@ async function removeApp(id: string) {
   loadAccess()
 }
 
-// ---- AI 服务（goder 接入配置） ----
+// ---- 网页应用注册（iframe 嵌入，config.kind=web，渲染走 WebApp 容器）----
+async function registerWebApp() {
+  webMsg.value = ''
+  const raw = webUrl.value.trim()
+  let u: URL
+  try { u = new URL(raw) } catch { webMsg.value = '地址格式不正确'; return }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') { webMsg.value = '地址需为 http(s):// 开头'; return }
+  // 与服务端 sanitizeID 同规则（小写、剔除 [a-z0-9-_.] 以外字符）——图标等
+  // 派生 URL 必须用最终落库 ID，否则会指向不存在的应用（曾因点号被剥出过 404）
+  const id = editing.value ? editing.value.id
+    : (webId.value.trim() || 'web-' + u.hostname).toLowerCase().replace(/[^a-z0-9-_.]/g, '')
+  if (!id) { webMsg.value = '应用 ID 不能为空'; return }
+  // config.headers 仅代理模式写入（直嵌模式带不上自定义头，存了也是死配置）
+  const cfg: Record<string, any> = { kind: webProxy.value ? 'proxy' : 'web', url: u.href }
+  if (webProxy.value) {
+    const hs = webHeaders.value.filter((h) => h.name.trim())
+    if (hs.length) cfg.headers = Object.fromEntries(hs.map((h) => [h.name.trim(), h.value]))
+  }
+  try {
+    await api.post('/api/apps', {
+      id, name: webName.value.trim() || u.hostname,
+      icon: webProxy.value ? `/app/${id}/${u.origin.replace('://', '/')}/favicon.ico` : `${u.origin}/favicon.ico`,
+      category: '网络', config: JSON.stringify(cfg), width: 1000, height: 660,
+    })
+    webMsg.value = '✓ 已保存，Dock 即时可见（新应用需在「应用授权」中给角色开放）'
+    webName.value = ''; webUrl.value = ''; webId.value = ''; webHeaders.value = []
+    editing.value = null
+    webDlg.value = false
+    loadAccess()
+  } catch (e: any) { webMsg.value = '保存失败：' + e.message }
+}
+
+// ---- AI 服务（OpenOS 唯一的 AI 应用是 goder，此处配置与其模型配置联动） ----
 const aiCfg = ref({ baseUrl: '', apiKey: '', model: '' })
 const aiConfigured = ref(false)
 const aiMsg = ref('')
 const aiTesting = ref(false)
 const aiTestResult = ref<any>(null)
+// goder 状态（available=false = 未部署/被停用；全员可见的启用引导依据）
+const aiStatus = ref<any>(null)
+const goderDisabled = computed(() => !!aiStatus.value?.goder?.disabled)
+const goderUnavailable = computed(() => !!aiStatus.value?.goder && !aiStatus.value.goder.available)
+const goderIdle = computed(() => {
+  const g = aiStatus.value?.goder
+  return !!g && g.available && !g.disabled && !g.running
+})
+const goderSynced = computed(() => Number(aiStatus.value?.goder?.aiSyncedUsers) || 0)
 
 async function loadAI() {
+  try {
+    aiStatus.value = await api.get<any>('/api/ai/status')
+  } catch { /* ignore */ }
+  if (!isAdmin) return
   try {
     const c = await api.get<{ baseUrl: string; apiKey: string; model: string; configured: boolean }>('/api/ai/config')
     aiCfg.value = { baseUrl: c.baseUrl, apiKey: c.apiKey, model: c.model }
@@ -172,8 +284,8 @@ async function saveAI() {
   try {
     await api.put('/api/ai/config', aiCfg.value)
     aiConfigured.value = true
-    aiMsg.value = '✓ 已保存并即时生效'
-    loadAI()
+    aiMsg.value = '✓ 已保存并同步到 goder'
+    await loadAI()
   } catch (e: any) { aiMsg.value = e.message }
 }
 async function testAI() {
@@ -203,7 +315,8 @@ async function loadSystem() {
 }
 
 onMounted(() => {
-  if (isAdmin) { loadUsers(); loadAccess(); loadAI() }
+  loadAI()
+  if (isAdmin) { loadUsers(); loadAccess() }
 })
 watch(tab, (t) => { if (t === 'system') loadSystem() })
 </script>
@@ -244,7 +357,7 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
       <h2 class="sec">登录与安全</h2>
       <div class="card">
         <div class="group">
-          <div class="g-text"><div class="g-title">账户</div><div class="g-sub">{{ session.user?.username }} · {{ session.user?.displayName }} · 角色 {{ session.user?.role }}</div></div>
+          <div class="g-text"><div class="g-title">账户</div><div class="g-sub">{{ session.user?.username }} · {{ session.user?.displayName }} · 角色 {{ roleLabel(session.user?.role || '') }}</div></div>
         </div>
         <div class="group">
           <div class="g-text"><div class="g-title">原密码</div></div>
@@ -294,7 +407,7 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
     <template v-else-if="tab === 'access'">
       <div class="panel-actions">
         <OsTabs
-          :tabs="roles.map(r => ({ key: r, label: r }))"
+          :tabs="roles.map(r => ({ key: r, label: roleLabel(r) }))"
           v-model="accessRole"
         />
         <span class="grow" />
@@ -316,71 +429,152 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
       <p class="hint">保存后，该角色所有在线用户的 Dock 将即时更新（通过 sys:apps-changed 事件广播）。</p>
     </template>
 
-    <!-- 第三方应用注册 -->
+    <!-- 第三方应用：列表为主，添加/注册走弹窗 -->
     <template v-else-if="tab === 'registry'">
-      <h2 class="sec">注册声明式应用（JSON Schema）</h2>
-      <OsPanel>
-        <div class="form">
+      <div class="reg-head">
+        <h2 class="sec" style="margin: 0">应用（{{ registryApps.length }}）</h2>
+        <span class="grow" />
+        <OsButton size="sm" @click="openAddWeb">＋ 添加网页应用</OsButton>
+        <OsButton size="sm" @click="openAddSchema">＋ 注册声明式应用</OsButton>
+      </div>
+
+      <OsPanel v-if="registryApps.length" class="reg-list">
+        <div v-for="a in registryApps" :key="a.id" class="reg-item">
+          <AppIcon :app="a.id" :icon="a.icon" :size="34" />
+          <div class="reg-meta">
+            <span class="an">{{ a.name }}<em v-if="a.builtin" class="builtin-badge">内置</em></span>
+            <span class="aid">{{ a.id }} · {{ appType(a) }}</span>
+          </div>
+          <span class="grow" />
+          <OsButton size="sm" @click="bus.emit('sys:open', { app: a.id })">打开</OsButton>
+          <!-- 内置应用配置随版本发布，不可编辑/删除 -->
+          <OsButton v-if="!a.builtin" size="sm" @click="isWebApp(a) ? openEditWeb(a) : openEditSchema(a)">编辑</OsButton>
+          <OsButton v-if="!a.builtin" size="sm" variant="danger" @click="removeApp(a.id)">删除</OsButton>
+        </div>
+      </OsPanel>
+      <OsEmpty v-else text="还没有第三方应用，点右上角按钮添加" />
+
+      <!-- 弹窗：添加 / 编辑网页应用（iframe 嵌入，可选服务端代理） -->
+      <OsModal v-if="webDlg" :title="editing ? '编辑网页应用' : '添加网页应用'" :ok-text="editing ? '保存' : '添加'"
+               @ok="registerWebApp" @cancel="webDlg = false; editing = null">
+        <div class="dlg-form">
+          <div><label>应用名称</label><OsInput v-model="webName" placeholder="企业邮箱" /></div>
+          <div><label>网页地址</label><OsInput v-model="webUrl" placeholder="https://example.com/" mono /></div>
+          <div v-if="!editing"><label>应用 ID（可选，缺省按域名生成）</label><OsInput v-model="webId" placeholder="web-mail" mono /></div>
+          <label class="px-toggle"><input type="checkbox" v-model="webProxy" /> 应用代理（服务端反代嵌入）</label>
+          <!-- 自定义请求头：仅代理模式生效（iframe 直嵌无法附带自定义头） -->
+          <div v-if="webProxy" class="hdr-list">
+            <label>自定义请求头（随代理转发到目标站，如内网系统的认证头）</label>
+            <div v-for="(h, i) in webHeaders" :key="i" class="hdr-row">
+              <OsInput v-model="h.name" placeholder="Header-Name" mono />
+              <OsInput v-model="h.value" placeholder="值" mono />
+              <OsButton size="sm" variant="danger" @click="delWebHeader(i)">删除</OsButton>
+            </div>
+            <OsButton size="sm" @click="addWebHeader">+ 添加请求头</OsButton>
+          </div>
+          <p class="hint">
+            默认 iframe 直嵌，要求目标站点未设置 X-Frame-Options / CSP frame-ancestors 防嵌（图标取站点 favicon）。
+            勾选「应用代理」后经 OpenOS 服务端反代加载，可嵌入拒绝 iframe 的站点（含内网系统）；
+            自定义请求头随每个代理请求（含 WebSocket 握手）发给目标站，Cookie 类头与目标站登录态自动合并。
+            目标站脚本将与桌面同源执行，仅用于可信应用。
+          </p>
+          <span class="msg">{{ webMsg }}</span>
+        </div>
+      </OsModal>
+
+      <!-- 弹窗：注册 / 编辑声明式应用（JSON Schema） -->
+      <OsModal v-if="schemaDlg" :title="editing ? '编辑声明式应用' : '注册声明式应用'" :ok-text="editing ? '保存' : '注册'"
+               @ok="registerApp" @cancel="schemaDlg = false; editing = null">
+        <div class="dlg-form">
           <div class="two">
-            <div><label>应用 ID（英文）</label><OsInput v-model="regId" placeholder="notice-board" mono /></div>
+            <div><label>应用 ID（英文）</label><OsInput v-model="regId" placeholder="notice-board" mono :disabled="!!editing" /></div>
             <div><label>应用名称</label><OsInput v-model="regName" placeholder="公告板" /></div>
           </div>
           <label>应用 Schema
             <OsButton size="sm" @click="schemaText = EXAMPLE_SCHEMA">填入示例模板</OsButton>
           </label>
           <textarea v-model="schemaText" class="schema" spellcheck="false" placeholder="粘贴 JSON schema…" />
-          <div>
-            <OsButton variant="primary" @click="registerApp">注册应用</OsButton>
-            <span class="msg">{{ regMsg }}</span>
-          </div>
+          <span class="msg">{{ regMsg }}</span>
+          <p class="hint">dataSource 支持：static（items）/ rest（url、method+body、headers、auth、path 点路径、interval 轮询、topic 总线推送刷新）。相对路径 url 默认携带登录态。详见 README「第三方接入指南 · 方式一」。</p>
         </div>
-        <p class="hint">dataSource 支持：static（items）/ rest（url、method+body、headers、auth、path 点路径、interval 轮询、topic 总线推送刷新）。相对路径 url 默认携带登录态。详见 README「第三方接入指南 · 方式一」。</p>
-      </OsPanel>
-
-      <h2 class="sec">已注册的第三方应用</h2>
-      <OsPanel v-if="registryApps.length">
-        <div v-for="a in registryApps" :key="a.id" class="reg-item">
-          <span class="an">{{ a.name }}</span><span class="aid">{{ a.id }}</span>
-          <span class="grow" />
-          <OsButton size="sm" @click="bus.emit('sys:open', { app: a.id }); ">在桌面打开</OsButton>
-          <OsButton size="sm" variant="danger" @click="removeApp(a.id)">删除</OsButton>
-        </div>
-      </OsPanel>
+      </OsModal>
     </template>
-    <!-- AI 服务（goder） -->
+    <!-- AI 服务（goder 联动） -->
     <template v-else-if="tab === 'ai'">
-      <h2 class="sec">接入真实大模型（任意 OpenAI 兼容接口）</h2>
-      <OsPanel>
-        <div class="form">
-          <div class="ai-status" :class="{ on: aiConfigured }">
-            {{ aiConfigured ? '✓ AI 服务已接入（goder 使用真实模型）' : '● 未配置——goder 运行在演示模式' }}
+      <!-- goder 未启用：全员提示找管理员，管理员另给部署指引 -->
+      <div v-if="goderDisabled || goderUnavailable" class="card">
+        <div class="group">
+          <div class="g-text">
+            <div class="g-title">AI 服务未启用</div>
+            <div class="g-sub">OpenOS 的 AI 能力由 goder 提供，当前系统未启用 goder，请联系管理员启用。</div>
           </div>
-          <div class="two">
-            <div>
-              <label>Base URL</label>
-              <OsInput v-model="aiCfg.baseUrl" placeholder="https://open.bigmodel.cn/api/paas/v4" mono />
-            </div>
-            <div>
-              <label>模型</label>
-              <OsInput v-model="aiCfg.model" placeholder="glm-4-flash" mono />
-            </div>
-          </div>
-          <label>API Key（留空或掩码表示不修改）</label>
-          <OsInput v-model="aiCfg.apiKey" type="password" placeholder="sk-…" mono />
-          <div class="row-actions">
-            <OsButton variant="primary" @click="saveAI">保存配置</OsButton>
-            <OsButton :disabled="aiTesting" @click="testAI">{{ aiTesting ? '测试中…' : '测试连接' }}</OsButton>
-            <span class="msg">{{ aiMsg }}</span>
-          </div>
-          <div v-if="aiTestResult" class="test-result" :class="{ ok: aiTestResult.ok }">
-            <template v-if="aiTestResult.ok">
-              ✓ 连接成功 · {{ aiTestResult.latencyMs }}ms · 模型 {{ aiTestResult.model }} 回复「{{ aiTestResult.reply }}」
-            </template>
-            <template v-else>✕ {{ aiTestResult.error }}</template>
-          </div>
-          <p class="hint">保存后即时生效，无需重启服务。密钥仅存于服务端 SQLite，不会下发到浏览器（界面上始终脱敏）。</p>
         </div>
-      </OsPanel>
+        <div v-if="isAdmin" class="group">
+          <div class="g-text">
+            <div class="g-title">管理员部署指引</div>
+            <div class="g-sub g-code">
+              {{ goderDisabled ? '检测到 OPENOS_GODER=off：去掉该环境变量并重启服务即可启用。' : '未找到 goder 组件：运行 make goder 构建，或使用自带 goder 的 Docker 镜像（见 README「goder 部署」）。' }}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <template v-else>
+        <h2 class="sec">AI 服务（goder 模型配置）</h2>
+        <div class="card">
+          <div class="group">
+            <div class="g-text">
+              <div class="g-title">服务状态</div>
+              <div class="g-sub">
+                <template v-if="aiConfigured">
+                  ✓ 已接入 · 模型 {{ aiCfg.model || aiStatus?.model }} · 已下发 goder 各用户（提供方 {{ aiStatus?.goder?.aiProvider || 'OpenOS' }}，保存时设为默认模型）
+                  <template v-if="goderSynced">，覆盖 {{ goderSynced }} 个用户</template>
+                </template>
+                <template v-else>● 未配置——goder 各用户使用自己已有的模型配置</template>
+                <template v-if="goderIdle">；goder 将在首次打开时自动启动</template>
+              </div>
+            </div>
+          </div>
+          <div v-if="!isAdmin" class="group">
+            <div class="g-text">
+              <div class="g-title">配置由管理员统一管理</div>
+              <div class="g-sub">模型的接入地址与密钥仅管理员可修改；如需更换模型，请联系管理员。</div>
+            </div>
+          </div>
+        </div>
+
+        <OsPanel v-if="isAdmin">
+          <div class="form">
+            <div class="ai-status" :class="{ on: aiConfigured }">
+              {{ aiConfigured ? '✓ AI 服务已接入（goder 使用统一配置的模型）' : '● 未配置——goder 运行在各用户自有模型配置上' }}
+            </div>
+            <div class="two">
+              <div>
+                <label>Base URL</label>
+                <OsInput v-model="aiCfg.baseUrl" placeholder="https://open.bigmodel.cn/api/paas/v4" mono />
+              </div>
+              <div>
+                <label>模型</label>
+                <OsInput v-model="aiCfg.model" placeholder="glm-4-flash" mono />
+              </div>
+            </div>
+            <label>API Key（留空或掩码表示不修改）</label>
+            <OsInput v-model="aiCfg.apiKey" type="password" placeholder="sk-…" mono />
+            <div class="row-actions">
+              <OsButton variant="primary" @click="saveAI">保存并同步到 goder</OsButton>
+              <OsButton :disabled="aiTesting" @click="testAI">{{ aiTesting ? '测试中…' : '测试连接' }}</OsButton>
+              <span class="msg">{{ aiMsg }}</span>
+            </div>
+            <div v-if="aiTestResult" class="test-result" :class="{ ok: aiTestResult.ok }">
+              <template v-if="aiTestResult.ok">
+                ✓ 连接成功 · {{ aiTestResult.latencyMs }}ms · 模型 {{ aiTestResult.model }} 回复「{{ aiTestResult.reply }}」
+              </template>
+              <template v-else>✕ {{ aiTestResult.error }}</template>
+            </div>
+            <p class="hint">保存后即时生效，并同步写入所有 goder 用户的模型配置（提供方 OpenOS，设为默认模型，goder 设置页中只读展示）；用户自建的其他模型不受影响。密钥仅存于服务端 SQLite，不会下发到浏览器。</p>
+          </div>
+        </OsPanel>
+      </template>
     </template>
 
     <!-- 系统信息 -->
@@ -426,6 +620,7 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
 .g-text { flex: 1; min-width: 0; }
 .g-title { font-size: 13px; }
 .g-sub { font-size: 11.5px; color: var(--os-text-secondary); margin-top: 1px; }
+.g-sub.g-code { font-family: var(--os-mono); word-break: break-all; }
 .card .group .msg { font-size: 12px; color: var(--os-text-secondary); }
 
 /* 侧栏彩色图标块（SF Symbols 彩色方块语言） */
@@ -475,8 +670,28 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
   border: 1px solid var(--os-border-strong); background: var(--os-input-bg); color: var(--os-text);
   font-family: var(--os-mono); font-size: 12px; line-height: 1.5;
 }
-.reg-item { display: flex; align-items: center; gap: 10px; padding: 8px 4px; border-bottom: 1px solid var(--os-border); }
+.reg-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.reg-list { padding: 4px 8px; }
+.reg-item { display: flex; align-items: center; gap: 12px; padding: 8px 4px; border-bottom: 1px solid var(--os-border); }
 .reg-item:last-child { border-bottom: none; }
+.reg-item:hover { background: var(--os-hover); }
+.reg-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.reg-meta .an, .reg-meta .aid { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.builtin-badge {
+  font-style: normal; font-size: 10px; font-weight: 600; margin-left: 6px; padding: 1px 5px;
+  border-radius: 4px; color: var(--os-text-secondary); background: var(--os-hover);
+  border: 1px solid var(--os-border); vertical-align: 1px;
+}
+/* 弹窗表单：覆盖 OsModal 内容默认居中，改左对齐纵排 */
+.dlg-form { text-align: left; display: flex; flex-direction: column; gap: 8px; width: 460px; max-width: 70vw; }
+.dlg-form label { font-size: 12px; color: var(--os-text-secondary); display: flex; align-items: center; gap: 8px; }
+.dlg-form .hint { margin-top: 2px; }
+.dlg-form .px-toggle { cursor: pointer; user-select: none; }
+.dlg-form .hdr-list { display: flex; flex-direction: column; gap: 6px; }
+.dlg-form .hdr-row { display: flex; gap: 6px; align-items: center; }
+.dlg-form .hdr-row > :first-child { flex: 2; }
+.dlg-form .hdr-row > :nth-child(2) { flex: 3; }
+.dlg-form .schema { max-height: 32vh; }
 
 .ai-status { font-size: 13px; color: #b25b00; background: rgba(255,159,10,.12); padding: 8px 12px; border-radius: 8px; }
 .ai-status.on { color: #1d8a3e; background: rgba(48,209,88,.12); }

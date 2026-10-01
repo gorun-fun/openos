@@ -56,6 +56,8 @@ const emit = defineEmits<{ select: [key: string] }>()
 }
 .os-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .os-content { flex: 1; min-height: 0; overflow: auto; padding: 16px; display: flex; flex-direction: column; }
+/* 子项禁止 flex 收缩：一旦收缩，内容被压变形且溢出被吞掉，滚动永远不触发（窗口拖小时复现） */
+.os-content > :deep(*) { flex-shrink: 0; }
 .os-statusbar {
   flex: none; height: 24px; display: flex; align-items: center; padding: 0 12px;
   border-top: 1px solid var(--os-border); font-size: 11.5px; color: var(--os-text-secondary);

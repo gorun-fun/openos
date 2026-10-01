@@ -7,3 +7,4 @@ server/openos-server
 *.pid
 .goder-src/
 .zcode/
+.playwright-cli/

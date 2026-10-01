@@ -14,6 +14,7 @@ export const builtinComponents: Record<string, () => Promise<any>> = {
   pdf: () => import('../apps/pdf/PdfApp.vue'),
   goder: () => import('../apps/goder/GoderStudio.vue'),
   notes: () => import('../apps/notes/NotesApp.vue'),
+  calendar: () => import('../apps/calendar/CalendarApp.vue'),
   welcome: () => import('../apps/welcome/WelcomeApp.vue'),
 }
 
@@ -30,6 +31,7 @@ export const appChrome: Record<string, 'default' | 'merged'> = {
   pdf: 'merged',
   terminal: 'merged',
   notes: 'merged',
+  calendar: 'merged',
   goder: 'merged',
 }
 

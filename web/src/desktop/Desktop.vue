@@ -4,6 +4,8 @@ import { useSession } from '../stores/session'
 import { useDesktop } from '../stores/desktop'
 import { useApps } from '../stores/apps'
 import { useWindows } from '../stores/windows'
+import { useNotifications } from '../stores/notifications'
+import { useCalendar } from '../stores/calendar'
 import { bus } from '../bus/bus'
 import MenuBar from './MenuBar.vue'
 import Dock from './Dock.vue'
@@ -12,6 +14,8 @@ import Spotlight from './Spotlight.vue'
 import WindowFrame from './WindowFrame.vue'
 import Shortcuts from './Shortcuts.vue'
 import Widgets from './Widgets.vue'
+import NotificationCenter from './NotificationCenter.vue'
+import DialogHost from '../ui/DialogHost.vue'
 import { snapPreview } from './snapState'
 import { fsApi } from '../api/client'
 import { toast } from '../ui/toast'
@@ -24,6 +28,8 @@ const session = useSession()
 const desktop = useDesktop()
 const apps = useApps()
 const windows = useWindows()
+const notifications = useNotifications()
+const cal = useCalendar()
 
 // ---- 全局事件总线路由：任何入口（终端 / goder / 其他窗口）都可操控桌面 ----
 const offs: (() => void)[] = []
@@ -33,10 +39,18 @@ onMounted(async () => {
   await apps.refresh()
   bus.connect(session.user!.username)
 
+  // 通知中心：加载历史/偏好 + 订阅总线 sys:notify（服务端定向与其他端广播）
+  offs.push(notifications.install())
+  // 日历：日程与节假日加载 + 提醒引擎（到期经通知中心横幅提醒）
+  cal.load()
+  cal.startReminders()
+
   offs.push(
     bus.on('sys:open', (p: any) => { if (p?.app) windows.open(p.app) }),
     bus.on('sys:cmd', (p: any) => runCmd(p)),
     bus.on('sys:apps-changed', () => apps.refresh()),
+    // 服务重启等场景：WS 重连成功后重拉应用列表，避免空窗期加载的旧/空状态不自愈
+    bus.on('sys:bus-reconnected', () => apps.refresh()),
     bus.on('sys:presence', (p: any) => {
       if (p.online && p.user !== session.user!.username) toast(`${p.user} 上线了`)
     }),
@@ -133,6 +147,9 @@ function runCmd(p: any) {
 // ---- 键盘快捷键 ----
 const launchpadOpen = ref(false)
 const spotOpen = ref(false)
+// 任何窗口被激活（点 Dock 图标 / 总线 sys:open 等）时收起启动台——macOS 行为；
+// 启动台打开期间 Dock 仍可交互（z 序高于启动台层，见 Dock.vue）
+watch(() => windows.activeId, () => { launchpadOpen.value = false })
 function onShortcut(e: KeyboardEvent) {
   const inField = !!(e.target as HTMLElement)?.closest?.('input, textarea, [contenteditable="true"]')
   if (e.key === 'Escape') {
@@ -263,6 +280,9 @@ function ctxCycleNoteColor() {
   <div class="desktop" :style="{ background: desktop.wallpapers[desktop.wallpaper] }" @contextmenu="onContext" @dragover.prevent @drop="onDrop">
     <MenuBar @launchpad="launchpadOpen = true" @spotlight="spotOpen = true" />
 
+    <!-- 通知中心（横幅栈 + 右侧面板，入口在菜单栏时钟） -->
+    <NotificationCenter />
+
     <Widgets ref="widgetsRef" />
     <Shortcuts ref="shortcutsRef" />
 
@@ -274,6 +294,9 @@ function ctxCycleNoteColor() {
 
     <Launchpad v-if="launchpadOpen" @close="launchpadOpen = false" />
     <Spotlight v-if="spotOpen" @close="spotOpen = false" />
+
+    <!-- 跨应用弹窗宿主：registerDialog/openDialog 的系统级模态浮层（见 ui/dialogService.ts） -->
+    <DialogHost />
 
     <!-- 窗口吸附预览（桌面层渲染，避免被窗口裁剪） -->
     <div v-if="snapPreview" class="snap-preview" :style="{

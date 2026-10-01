@@ -17,7 +17,7 @@ withDefaults(defineProps<{
 
 <style scoped>
 .os-input {
-  padding: 6px 10px; border-radius: 8px; font-size: 13px; min-width: 0;
+  padding: 6px 10px; border-radius: 8px; font-size: 13px; min-width: 0; width: 100%; box-sizing: border-box;
   border: 1px solid var(--os-border-strong); background: var(--os-input-bg); color: var(--os-text);
   transition: border-color .14s, box-shadow .14s;
 }

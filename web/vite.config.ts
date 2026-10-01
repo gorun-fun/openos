@@ -17,6 +17,8 @@ export default defineConfig({
       '/goder-api': { target: 'http://127.0.0.1:8081', ws: true },
       '/vendor': 'http://127.0.0.1:8081',
       '/ws': { target: 'ws://127.0.0.1:8081', ws: true },
+      // 应用代理（/app/<id>/<目标URL>，网页应用 kind=proxy；含 WebSocket 子路由）
+      '/app': { target: 'http://127.0.0.1:8081', ws: true },
     },
   },
   build: { chunkSizeWarningLimit: 1500 },

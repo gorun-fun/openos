@@ -43,4 +43,7 @@ export const icons: Record<string, string> = {
   // 文件应用工具栏
   sort: s('<path d="M5 2.8v10M2.6 10.4 5 12.8l2.4-2.4"/><path d="M11 13.2v-10M8.6 5.6 11 3.2l2.4 2.4"/>'),
   more: s('<circle cx="3.6" cy="8" r="1.25" fill="currentColor" stroke="none"/><circle cx="8" cy="8" r="1.25" fill="currentColor" stroke="none"/><circle cx="12.4" cy="8" r="1.25" fill="currentColor" stroke="none"/>'),
+  // 网页应用容器（WebApp）
+  refresh: s('<path d="M13.7 10a6 6 0 1 1-1.4-6.2L15.3 6.7"/><path d="M15.3 2.7v4h-4"/>'),
+  link: s('<path d="M12 8.7v4a1.3 1.3 0 0 1-1.3 1.3H3.3A1.3 1.3 0 0 1 2 12.7V5.3A1.3 1.3 0 0 1 3.3 4h4"/><path d="M10 2h4v4"/><path d="M6.7 9.3 14 2"/>'),
 }

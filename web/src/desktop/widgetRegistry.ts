@@ -3,6 +3,7 @@
 //   widget —— 持久化的条目（c/r 网格坐标 + 自定义字段，随用户跨会话保存）
 //   update —— (patch) 合并字段并立即持久化
 import type { Component } from 'vue'
+import CalendarWidget from './widgets/CalendarWidget.vue'
 
 export interface WidgetDef {
   /** 类型标识（持久化用，保持稳定） */
@@ -36,7 +37,10 @@ export function widgetDef(type: string): WidgetDef | undefined {
   return defs.get(type)
 }
 
-// ---- 内置三件 ----
+// ---- 内置小组件 ----
+// 时钟/监控/便签由 Widgets.vue 内部渲染（不传 component）；日历小组件自带
+// 组件，经通用 <component :is> 通道渲染（与宿主自定义小组件同一通道）。
 registerWidget({ type: 'clock', label: '时钟', icon: '🕐', singleton: true })
 registerWidget({ type: 'note', label: '便签', icon: '📝' })
 registerWidget({ type: 'monitor', label: '系统监控', icon: '📊', singleton: true })
+registerWidget({ type: 'calendar', label: '日历', icon: '📅', singleton: true, component: CalendarWidget })

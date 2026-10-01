@@ -13,7 +13,7 @@ import { bus } from '../bus/bus'
 import { useWindows } from '../stores/windows'
 import { useDesktop } from '../stores/desktop'
 import { useNotes } from '../stores/notes'
-import { toast } from '../ui/toast'
+import { useNotifications } from '../stores/notifications'
 import { openPath } from '../apps/openWith'
 import type { Note } from '../stores/notes'
 
@@ -146,7 +146,12 @@ const ACTIONS: Record<string, Action> = {
 
   notify({ text, type }) {
     if (!text) throw new Error('缺少 text')
-    toast(String(text), { type: type === 'success' || type === 'error' ? type : 'info' })
+    // 入系统通知中心：右上角横幅 + 面板可回看（替代旧的纯 toast 轻提示）
+    useNotifications().notify({
+      appId: 'goder',
+      title: type === 'error' ? 'Goder 出错' : 'Goder 提示',
+      body: String(text),
+    })
     return { ok: true }
   },
 }

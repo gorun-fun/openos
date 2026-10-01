@@ -164,6 +164,7 @@ var builtinApps = []AppDef{
 	{ID: "pdf", Name: "PDF 阅读器", Icon: "pdf", Category: "办公", Builtin: true, Width: 860, Height: 640},
 	{ID: "goder", Name: "Goder - AI助手", Icon: "goder", Category: "AI", Builtin: true, Width: 1220, Height: 780},
 	{ID: "notes", Name: "便签", Icon: "notes", Category: "工具", Builtin: true, Width: 780, Height: 560},
+	{ID: "calendar", Name: "日历", Icon: "calendar", Category: "工具", Builtin: true, Width: 980, Height: 660},
 	{ID: "welcome", Name: "使用指南", Icon: "welcome", Category: "系统", Builtin: true, Width: 760, Height: 580},
 }
 
@@ -178,9 +179,9 @@ const goderAppID = "goder"
 
 // 默认角色 → 应用授权矩阵。
 var defaultRoleApps = map[string][]string{
-	"admin": {"terminal", "files", "calculator", "settings", "docs", "sheets", "slides", "pdf", "goder", "notes", "welcome"},
-	"user":  {"terminal", "files", "calculator", "docs", "sheets", "slides", "pdf", "goder", "notes", "welcome"},
-	"guest": {"calculator", "notes", "welcome"},
+	"admin": {"terminal", "files", "calculator", "settings", "docs", "sheets", "slides", "pdf", "goder", "notes", "calendar", "welcome"},
+	"user":  {"terminal", "files", "calculator", "docs", "sheets", "slides", "pdf", "goder", "notes", "calendar", "welcome"},
+	"guest": {"calculator", "notes", "calendar", "welcome"},
 }
 
 // StorageQuota 每用户虚拟文件空间上限（字节，按内容长度估算）。
@@ -293,7 +294,7 @@ func (db *DB) seed(cfg *config) error {
 			cfgJSON = string(a.Config)
 		}
 		if _, err := db.Exec(`INSERT INTO apps(id,name,icon,category,builtin,hidden,config,width,height) VALUES(?,?,?,?,?,?,?,?,?)
-			ON CONFLICT(id) DO UPDATE SET name=excluded.name, icon=excluded.icon, width=excluded.width, height=excluded.height`,
+			ON CONFLICT(id) DO UPDATE SET name=excluded.name, icon=excluded.icon, config=excluded.config, width=excluded.width, height=excluded.height`,
 			a.ID, a.Name, a.Icon, a.Category, boolInt(a.Builtin), boolInt(a.Hidden), cfgJSON, a.Width, a.Height); err != nil {
 			return err
 		}
@@ -602,11 +603,43 @@ func (db *DB) ListAppsForRole(role string) ([]AppDef, error) {
 	return out, rows.Err()
 }
 
+// AppByID 按 ID 查询单个应用（应用代理路由逐请求加载配置）。
+func (db *DB) AppByID(id string) (AppDef, bool) {
+	var a AppDef
+	var cfg string
+	var hidden int
+	err := db.QueryRow(`SELECT id,name,icon,category,builtin,hidden,config,width,height FROM apps WHERE id=?`, id).
+		Scan(&a.ID, &a.Name, &a.Icon, &a.Category, &a.Builtin, &hidden, &cfg, &a.Width, &a.Height)
+	if err != nil {
+		return a, false
+	}
+	a.Hidden = hidden != 0
+	if cfg != "" {
+		a.Config = json.RawMessage(cfg)
+	}
+	return a, true
+}
+
+// RoleCanAccessApp 角色是否被授权访问某应用（与 ListAppsForRole 同一张 role_apps）。
+func (db *DB) RoleCanAccessApp(role, appID string) bool {
+	var n int
+	if err := db.QueryRow(`SELECT 1 FROM role_apps WHERE role=? AND app_id=?`, role, appID).Scan(&n); err != nil {
+		return false
+	}
+	return true
+}
+
 // UpsertApp 注册或更新第三方应用。
 func (db *DB) UpsertApp(a AppDef) error {
 	cfg := ""
 	if len(a.Config) > 0 {
 		cfg = string(a.Config)
+		// 客户端曾以 JSON.stringify 提交（config 字段是带引号的 JSON 字符串），
+		// 落库前剥一层编码，保证库内统一为裸 JSON 文本
+		var inner string
+		if a.Config[0] == '"' && json.Unmarshal(a.Config, &inner) == nil {
+			cfg = inner
+		}
 	}
 	if a.Width <= 0 {
 		a.Width = 800

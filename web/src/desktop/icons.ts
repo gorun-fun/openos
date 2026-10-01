@@ -157,6 +157,21 @@ export const APP_ICONS: Record<string, IconDef> = {
       <rect x="24" y="44.5" width="16" height="3.6" rx="1.8" fill="#fff"/>
       <path d="M54 7 l1.5 3.5 3.5 1.5 -3.5 1.5 -1.5 3.5 -1.5 -3.5 -3.5 -1.5 3.5 -1.5 Z" fill="#fff" opacity=".95"/>`),
   },
+  // 日历：iOS 日历风格 —— 白底 + 红色星期 + 当天日期大字（模块加载时按
+  // 当天动态生成，刷新页面即更新）
+  calendar: {
+    label: '日历',
+    svg: (() => {
+      const now = new Date()
+      const wk = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][now.getDay()]
+      return shell('cl', '#f2f2f4', '#d9d9de', `
+      <path d="M6 19.5 H58" stroke="#e4e4e8" stroke-width="1.5" stroke-linecap="round"/>
+      <text x="32" y="16.5" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif"
+        font-size="9.5" font-weight="700" fill="#e0342b">${wk}</text>
+      <text x="32" y="49" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif"
+        font-size="28" font-weight="300" fill="#2c2c30">${now.getDate()}</text>`)
+    })(),
+  },
   goder: { src: '/icons/goder.svg', label: 'goder' },
   // 第三方应用默认图标：浅灰底 + 四色应用矩阵
   default: {
@@ -169,7 +184,11 @@ export const APP_ICONS: Record<string, IconDef> = {
   },
 }
 
-export function iconOf(id: string): IconDef {
+// icon 优先级：icon 字段命中注册表（含宿主注入）→ icon 字段为 http(s) URL（网页应用
+// 的站点 favicon 直连）→ 按 id 查注册表 → default。URL 加载失败由 AppIcon 兜底。
+export function iconOf(id: string, icon?: string): IconDef {
+  if (icon && APP_ICONS[icon]) return APP_ICONS[icon]
+  if (icon && /^https?:\/\//.test(icon)) return { src: icon }
   return APP_ICONS[id] || APP_ICONS.default
 }
 

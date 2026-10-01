@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"openos/server/internal/bus"
+	"openos/server/internal/goder"
 	"openos/server/internal/store"
 	"openos/server/internal/vfs"
 )
@@ -365,7 +366,7 @@ func TestManagerEnsureAndHeal(t *testing.T) {
 
 	// 用户名含特殊字符 → 清洗后目录
 	m.EnsureUser("we ird!")
-	wrap := filepath.Join(userGrfHome(deps.DataDir, "we ird!"), "plugins", wrapperFileName())
+	wrap := filepath.Join(goder.GrfHomePath(deps.DataDir, "we ird!"), "plugins", wrapperFileName())
 	raw, err := os.ReadFile(wrap)
 	if err != nil {
 		t.Fatalf("EnsureUser 未落 wrapper: %v", err)

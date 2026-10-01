@@ -4,6 +4,7 @@ import { useSession } from '../stores/session'
 import { useWindows } from '../stores/windows'
 import { useDesktop } from '../stores/desktop'
 import { useApps } from '../stores/apps'
+import { useNotifications } from '../stores/notifications'
 import { api } from '../api/client'
 import { bus } from '../bus/bus'
 import { shell } from '../shell'
@@ -15,6 +16,7 @@ const session = useSession()
 const windows = useWindows()
 const desktop = useDesktop()
 const apps = useApps()
+const notifications = useNotifications()
 
 const now = ref(new Date())
 let timer = 0
@@ -184,7 +186,11 @@ defineExpose({ closeMenu })
         {{ desktop.dark ? '🌙' : '☀️' }}
       </button>
       <span class="mb user">{{ session.user?.displayName || session.user?.username }}</span>
-      <span class="mb time">{{ timeText }}</span>
+      <!-- 时钟即通知中心入口（macOS 习惯）：点击唤出右侧通知面板，未读时显小红点 -->
+      <button class="mb time" data-os-nc-clock title="通知中心" @click="notifications.togglePanel()">
+        {{ timeText }}
+        <i v-if="notifications.unread" class="nc-dot" />
+      </button>
     </nav>
 
     <OsModal v-if="showAbout" title="关于 OpenOS" okText="好" :cancelText="''" @ok="showAbout = false" @cancel="showAbout = false">
@@ -223,7 +229,11 @@ button.mb { cursor: pointer; }
 }
 .chip.icon { background: transparent; border-color: transparent; padding: 1px 8px; }
 .user { color: var(--os-text-secondary); }
-.time { font-variant-numeric: tabular-nums; }
+.time { font-variant-numeric: tabular-nums; position: relative; padding: 2px 8px; }
+.nc-dot {
+  position: absolute; top: 1px; right: 1px; width: 5px; height: 5px;
+  border-radius: 50%; background: #ff5f57; box-shadow: 0 0 0 1.5px rgba(0, 0, 0, .18);
+}
 
 .menu-anchor { position: relative; display: flex; }
 .dropdown {

@@ -48,6 +48,8 @@ class Bus {
       // 重连后重放订阅与积压消息
       if (this.remoteSubs.size) this.send({ action: 'sub', topics: [...this.remoteSubs] })
       while (this.queue.length) this.send(this.queue.shift()!)
+      // 连接（含断线重连）成功即广播：服务端重启窗口期加载的应用列表等状态可借此自愈
+      this.dispatchLocal('sys:bus-reconnected', { me: this.me }, 'system')
     }
     ws.onmessage = (ev) => {
       try {

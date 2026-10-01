@@ -434,7 +434,7 @@ func (s *Server) registerBridgeTools() {
 
 	s.add(Tool{
 		Name:        "os_notify",
-		Description: "向用户桌面发送一条轻提示（toast，自动消失）。type：info（默认）/ success / error。",
+		Description: "向用户桌面发送一条系统通知（右上角横幅 + 通知中心可回看）。type：info（默认）/ success / error。",
 		Schema: obj(map[string]any{
 			"text": pstr("提示内容"),
 			"type": pstr("info | success | error（可选）"),

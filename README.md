@@ -10,12 +10,14 @@
 |---|---|
 | 🪟 窗体管理 | 拖拽、八向缩放、红绿灯、**边缘吸附（上=最大化/左右=半屏，带预览）**、最小化飞入 Dock 动画、焦点层级、窗口状态跨会话恢复、**最大化直角全屏形态** |
 | 🔎 聚焦搜索 | **Spotlight 拟合（⌘/Alt+Space 或菜单栏放大镜）**：应用 + 文件递归搜索 + 即时计算器 + 系统操作，文件结果带右侧预览面板（种类/大小/时间/缩略图） |
-| 🚀 桌面体验 | 启动台（F4，带搜索）、Dock 邻居放大、**Dock 废纸篓（满/空状态、右键清倒）**、完整菜单栏（系统/窗口/帮助/关于、快捷键字形、macOS 时间格式）、快捷键（Alt+W/M/↩/\`）、窗口级错误边界、401 全局登出 |
+| 🚀 桌面体验 | 启动台（F4，带搜索）、Dock 邻居放大、**Dock 可定制（拖动排序 / 拖出或右键取消固定 / 从启动台·桌面快捷方式拖入固定，未固定的运行应用临时驻留）**、**Dock 废纸篓（满/空状态、右键清倒）**、完整菜单栏（系统/窗口/帮助/关于、快捷键字形、macOS 时间格式）、快捷键（Alt+W/M/↩/\`）、窗口级错误边界、401 全局登出 |
 | 🚌 事件总线 | WebSocket 主题订阅/发布，`*` 通配；本地即时分发 + 跨端广播；断线自动重连并重放订阅；服务端处理器同总线挂载 |
 | 🧩 开放能力 | ① 组件型：`OpenOS.registerApp()`（支持 template 字符串）② 声明式：JSON Schema 注册即得新应用（**带鉴权 REST / POST / 点路径 / 总线推送刷新**）③ Os* 业务组件库：**表格分页排序与单元格渲染插槽、表单校验（OsForm/OsField）、上传（OsUpload 带进度）、全局 Toast、打开/存储文件对话框（`fileDialog` 复用文件管理窗口选择；OsFilePicker 为窗口内 Sheet 形态）** |
 | ✦ Goder - AI助手 | **完整 AI 编程 IDE 内置**（goder 嵌入式集成：项目/会话/聊天/审查/终端/事件台，每用户独立 gh server，与 grf-play 同款集成方式），**默认置于桌面** |
 | 🗒 便签 | 多张彩色便签随手记（自动保存、换色、删除），一键**钉到桌面**成为小组件；桌面便签可拖动、右下角缩放（**尺寸为网格整数倍，精确对齐**） |
-| 📦 内置应用 | **双模式终端（虚拟 ⇄ 真实 shell，ANSI 彩色，Tab 补全，一体式工具栏）**、**访达式文件管理（见下）**、计算器（圆形按键/明暗主题/退格）、系统设置（彩色边栏 + 分组行 + 壁纸缩略图） |
+| 🔔 通知中心 | **系统级通知（仿 macOS）**：任何应用经 `OpenOS.notify()` 或总线 `sys:notify` 发送 → 右上角横幅（悬停暂停/点击跳转来源应用）+ **菜单栏时钟唤出的通知面板**（历史回看、未读红点、提示声/勿扰开关、一键清除）；历史与偏好按用户持久化；goder 的 `os_notify` 同走此通道 |
+| 📅 日历 | **中国节假日同步（内置已发布年份 + holiday-cn/timor 双源在线更新，调休「休/班」标记）**、农历/传统节日副行（干支/生肖）、日程管理（标题/日期/时间/提前提醒：事件时刻~提前1天）、**提醒到期经通知中心横幅弹出（应用关闭也提醒）**；桌面日历小组件（今日大字 + 迷你月历，点日期直达） |
+| 📦 内置应用 | **双模式终端（虚拟 ⇄ 真实 shell，ANSI 彩色，Tab 补全，一体式工具栏）**、**访达式文件管理（见下）**、计算器（圆形按键/明暗主题/退格）、系统设置（彩色边栏 + 分组行 + 壁纸缩略图）、**通用网页应用容器（iframe 直嵌 / 服务端代理两形态，管理界面可零代码收录站点）** |
 | 🗂 文件（访达拟合） | **图标/列表/分栏/画廊四视图**、**右键菜单（打开/打开方式/快速查看/显示简介/拷贝/剪切/复制副本）**、**多选（⌘点选/Shift 范围/⌘A）**、**键盘导航（方向键/⏎重命名/空格快速预览/⌫ 移到废纸篓）**、**拖拽移动（拖入文件夹/侧栏目录/废纸篓，⌥ 拖拽复制）**、**废纸篓（移入/清倒/Dock 联动）**、图片缩略图、底部路径栏、原位重命名、`/api/fs/search` 递归搜索与 `/api/fs/copy` 复制端点 |
 | 📑 办公应用 | **文档 = Markdown 编辑器（编辑/分栏/预览，⌘S/另存为/打开…，自动保存，md 源码保真）**；**表格 = CSV/TSV（动态行列、边缘自动扩张、⌘S/另存为/打开…、Excel 剪贴板互通、公式引擎）**；**幻灯片 = HTML 格式（画布直接富文本编辑、深浅主题、演示模式、导出独立 HTML 双击即可放映、兼容旧 .slides.json 自动升级）**；PDF（文件空间/本机打开、翻页缩放）——三者均直接读写服务端文件并与文件应用双击联动 |
 | 👥 多用户多角色 | admin/user/guest，角色×应用授权矩阵实时生效，**角色变更/删除用户令牌即时吊销** |
@@ -108,7 +110,7 @@ export OPENOS_AI_MODEL=glm-4-flash
 { "topic": "app:calc", "payload": {...}, "from": "alice", "ts": 1760000000 }
 ```
 
-**内置主题**：`sys:open` · `sys:cmd`（goder 指令）· `sys:apps-changed` · `sys:presence` · `sys:agent`（goder 桌面控制插件下行，PublishTo 定向到用户）· `agent:resp`（前端桥应答，服务端处理器接住）· `fs:changed` · `term:<user>` · `chat:goder`
+**内置主题**：`sys:open` · `sys:cmd`（goder 指令）· `sys:apps-changed` · `sys:presence` · `sys:notify`（系统通知：前端 `notify({broadcast:true})` 广播 / 服务端 `PublishTo` 定向）· `sys:agent`（goder 桌面控制插件下行，PublishTo 定向到用户）· `agent:resp`（前端桥应答，服务端处理器接住）· `fs:changed` · `term:<user>` · `chat:goder`
 
 ### 前端总线 API
 
@@ -179,7 +181,7 @@ openos-server 进程内 osmcp 包（20 个 os_* 工具，gh 侧全名 mcp__openo
 | 类别 | 工具 |
 |---|---|
 | 系统 | `os_info`（版本/用户/goder 状态/在线用户）、`os_apps_list`（可用应用） |
-| 窗口/桌面 | `os_desktop_state`（窗口列表+外观实时状态）、`os_window_open/close/do`（focus/minimize/最大化/半屏吸附/移动尺寸/改标题）、`os_app_open_file`（按扩展名选应用打开）、`os_desktop_do`（壁纸/深色/Dock 自动隐藏）、`os_notify`（toast） |
+| 窗口/桌面 | `os_desktop_state`（窗口列表+外观实时状态）、`os_window_open/close/do`（focus/minimize/最大化/半屏吸附/移动尺寸/改标题）、`os_app_open_file`（按扩展名选应用打开）、`os_desktop_do`（壁纸/深色/Dock 自动隐藏）、`os_notify`（系统通知，入通知中心可回看） |
 | 数据 | `os_notes_do`（便签增删改查）、`os_settings_get/put`、`os_fs_list/read/write/mkdir/delete/search/usage`（VFS，限定 `/home/<用户>`、≤8MB、配额 100MB，写入广播 `fs:changed` 自动刷新文件应用） |
 | 通用通道 | `os_bus_publish`（向自己桌面发布任意总线主题，可驱动声明式应用的 `dataSource.topic`） |
 
@@ -190,6 +192,33 @@ openos-server 进程内 osmcp 包（20 个 os_* 工具，gh 侧全名 mcp__openo
 相关环境变量：`OPENOS_OSMCP=off`（停用插件）、`OPENOS_OSMCP_ADDR`（默认 127.0.0.1:7712，被占自动回退随机端口）。
 
 **与 `sys:cmd` 的关系**：`sys:cmd` 是轻量指令通道（见下节），适合脚本与简单场景；openos MCP 插件是面向 AI 的完整控制面（带状态查询与结构化应答），两者并存互补。
+
+## 通知中心与日历
+
+### 通知中心（系统级通知，仿 macOS）
+
+任何应用（内置 / 宿主 / 第三方脚本 / goder AI）都可以发系统通知：右上角横幅自动消失（悬停暂停、点击跳转来源应用），并记入**通知中心面板**（点菜单栏时钟唤出；未读时时钟显小红点）。面板支持提示声开关、勿扰模式（横幅静默、仅入列表）与一键清除；通知历史与偏好按用户持久化（`user_settings` 的 `notifications` 键，最多保留 100 条，跨设备一致）。
+
+```ts
+import { notify } from '@/framework'          // 或 window.OpenOS.notify（第三方脚本）
+
+// 本机通知：横幅 + 入通知中心
+notify({ title: '下载完成', body: 'report.pdf 已保存', appId: 'files' })
+
+// 广播通知：同一账号其他在线端（或 sys:* 订阅者）各自弹出（总线 sys:notify）
+notify({ title: '系统公告', body: '今晚 22:00 例行维护', broadcast: true })
+```
+
+服务端推送（定向到某个用户的桌面）：`hub.PublishTo(user, "sys:notify", map[string]any{"title": "...", "body": "...", "appId": "..."})`；goder 桌面控制插件的 `os_notify` 工具同走通知中心。提示音由 WebAudio 合成（无外部资源）。
+
+### 日历（中国节假日 + 农历 + 日程提醒）
+
+- **节假日**：后端 `GET /api/calendar/holidays?year=YYYY`（需登录）返回 `{year, source, days:[{name,date,isOffDay}]}`；`isOffDay=false` 为调休补班日。数据分层：**内置已发布年份**（2025/2026，与国务院办公厅安排一致）→ **在线同步其余年份**（holiday-cn → timor.tech 双源回退，结果缓存 24h；未发布年份缓存 1h 后重试，`days` 恒为数组）。`OPENOS_HOLIDAY_SYNC=off` 可关闭在线同步（纯内网部署）。
+- **月历**：周一开头；网格线形态，**上下滚动/滑动翻月**（带滑入动画）；法定节假日红字 + 「休/班」角标，农历日/传统节日（春节/元宵/端午/七夕/中秋/重阳/腊八/除夕）作副行，选中日显示干支生肖年全称（农历换算为内置 1900-2100 速查表算法，无外部依赖）。
+- **自由日标记**：应用可在任意日期上叠加自定义彩色标签（月历格子内 chip、选中日徽标、小组件彩点三处渲染；内存态不持久化，生命周期由来源应用维护；同 `appId` 同日重复登记为替换）：`OpenOS.calendar.mark('2026-10-05', { appId: 'release', text: '发布', color: '#e5484d' })`，批量传日期数组；`unmark(dates, appId?)` 移除，`marksOf(date)` 查询。
+- **日程与提醒**：事件存 `user_settings` 的 `calendar.events` 键（`{id,title,date,time?,remind}`，自动保存）；提醒可选事件时刻/提前 5m/15m/1h/1 天（全天事件按 09:00 计），到期由桌面级提醒引擎（30s 轮询）经**通知中心**横幅弹出——日历应用关着也会提醒；已触发记录防重复。
+- **桌面小组件**：右键桌面 → 添加小组件 → 日历（今日大字 + 迷你月历含节假日红字/班标/事件圆点/日标记彩点；点任意日期打开日历并定位到该天）。
+- **SDK**：`OpenOS.calendar.list()/add()/remove()/holidayOf()/mark()/unmark()/marksOf()/today()`；宿主可经 `@openos/framework` 导入 `useCalendar` 等直接读写。
 
 ## 第三方接入指南
 
@@ -309,10 +338,183 @@ OPENOS_EXCHANGE_SECRET=<密钥> OPENOS_EXCHANGE_ROLES=front,boss,manager \
   （用户设置数据可安全导出/清理，不波及系统密钥）。
 
 **壳定制**（`createOpenOS()` 新增选项）：`theme: { accent }`（全局强调色，选中/焦点/
-渐变派生色自动计算）、`wallpapers`（壁纸注入）、`dockOrder`（Dock 排序）、
+渐变派生色自动计算）、`wallpapers`（壁纸注入）、`dockOrder`（Dock 初始排序——用户
+未自行定制 Dock 时的默认顺序，用户拖动/固定/移除后以个人配置为准）、
 `appMenus`（应用菜单注入）、`widgets`（自定义桌面小组件，右键菜单自动出现）、
 `menubarExtras` 支持数组多槽。宿主可从 `@openos/framework` 直接导入 `bus` / `api` /
 `fsApi` / 全部 Os* 组件 / 状态仓库，无需深入内部路径。
+
+### 多应用联动（跨应用弹窗与数据服务）
+
+业务系统常有「在 A 应用办到一半，需要 B 应用的一项能力/一份数据」的诉求，OpenOS
+内置两条联动通道（见 `web/src/ui/dialogService.ts` 与 `web/src/stores/windows.ts`）：
+
+**① 跨应用弹窗——拉起 B 应用的业务弹窗，不打开 B 的主窗口**
+
+弹窗由提供方应用注册（归属清晰、可懒加载），调用方一行代码拉起并 `await` 业务结果：
+
+```ts
+// 房态管理注册「入住」弹窗（方式三编译期注册；运行时等价 OpenOS.registerApp 的 dialogs 选项，
+// 或独立 OpenOS.registerDialog('roommgmt:checkin', { component: CheckInDialog, title: '办理入住' })）
+createOpenOS({
+  dialogs: { 'roommgmt:checkin': { component: () => import('./dialogs/CheckInDialog.vue'), title: '办理入住', width: 520 } },
+})
+
+// 订单应用：点击「入住」按钮 → 直接拉起房态管理的入住弹窗，办理完拿到结果继续本应用流程
+const checkedIn = await OpenOS.openDialog('roommgmt:checkin', { roomId, orderId })
+if (checkedIn) toast('入住成功', { type: 'success' })
+```
+
+弹窗组件认三个 props：`params`（调用入参）、`close(result)`（完成并回传，成为
+`openDialog` 的 Promise 值）、`cancel()`（取消，Promise 以 `undefined` 收场）。
+Esc / 点遮罩默认等同取消（`openDialog` 第三参 `{ escClose, backdropClose, title, width }`
+可调）。渲染为系统级模态浮层（`DialogHost`，视觉同 OsModal），支持叠开。
+
+**② 跨应用数据服务——B 应用的数据给 A 应用用**
+
+原则是**数据权威在后端**：金额/房态等业务数据只存一份（宿主后端），各应用经
+REST 各自拉取，不存在前端互抄。需要跨应用/跨窗口实时同步时走事件总线：
+
+```ts
+// 房态管理：金额变化后广播（app:* 前缀默认远程订阅——多标签页/多窗口自动同步）
+bus.emit('app:hotel.finance:changed', { date: '2026-10-02', income: 4820 })
+
+// 经营应用：订阅刷新自己的统计视图（bus.on 返回卸载函数，组件卸载时调用）
+const off = bus.on('app:hotel.finance:changed', (p) => refresh(p.date))
+```
+
+同 bundle 的宿主应用（方式三）也可以直接共享 Pinia store，按耦合偏好二选一；
+独立部署/声明式应用之间则一律走「后端 REST + 总线推送」。弹窗回传值
+（`openDialog` 的 Promise）是联动的第三种形态——适合「让用户在 B 里选一次，A 拿结果」
+的交互（内置范本：`ui/fileDialog` 文件选择即此模式）。
+
+### 方式四：网页应用（iframe 集成，收录现成站点）
+
+不需要对方提供任何代码，把现成网页站点直接嵌成桌面应用（统一融合工具栏：标题 +
+域名 + 刷新 / 浏览器打开）。两条路径：
+
+**管理员界面添加（通用）**：**系统设置 → 第三方应用 → 添加网页应用**，填名称与
+`https://` 地址即可，应用落库为 `config = {"kind":"web","url":…}`（渲染走通用
+`WebApp.vue` 容器），图标自动取站点 favicon（失败回落默认图标），再到「应用授权」
+给角色开放，`sys:apps-changed` 广播后各端 Dock 即时出现。
+
+**内置收录（编译期）**：`web/src/apps/web/registry.ts` 注册表加一行、图标放
+`web/public/icons/` 并在 `desktop/icons.ts` 注册、服务端 `store.go` 的
+`builtinApps` 加条目与角色授权（存量库升级自动补种，内置应用配置每次启动以种子
+为准刷新）。收录前提见上文「跨域边界」——目标站未设防嵌头才可直嵌；设防站点
+走下文应用代理（kind=proxy）。
+
+**跨域边界**：iframe 直嵌要求目标站未设置 `X-Frame-Options` / CSP `frame-ancestors`
+防嵌头（设防的公网站点无法客户端绕过，会显示空白；此类站点改用应用代理）。跨域
+iframe 由浏览器同源策略天然隔离，双方脚本无法互访，OpenOS 登录态与桌面状态不受
+影响；iframe 带 sandbox 且**不含 `allow-top-navigation`**——部分站点
+会执行 framebusting（`top.location` 自拔），该限制确保被嵌站点永远无法把整个桌面
+导航走。扫码登录类站点天然适配（登录态存目标站自身 Cookie，受浏览器第三方 Cookie
+政策约束，Safari 等严格环境下如遇登录异常可用工具栏「浏览器打开」兜底）。需要与
+桌面双向通信的站点，后续可经 `postMessage` 桥扩展。
+
+#### 应用代理（kind=proxy，拒绝 iframe 嵌入的站点）
+
+添加网页应用时勾选**「应用代理（服务端反代嵌入）」**，应用落库为
+`config = {"kind":"proxy","url":"https://目标/","headers":{"X-Api-Key":"…"}}`：目标站点不再由浏览器直连，而是经
+OpenOS 服务端反代加载——剥掉 `X-Frame-Options` / CSP `frame-ancestors` 等防嵌响应头，
+内部系统与设置了防嵌的公网站点（如 GitHub）都能在窗体内打开。前端仍是同一个
+`WebApp.vue` 容器，仅 iframe 地址换成 `/app/<id>/…`。
+
+**URL 映射（紧凑形态）**：目标地址 `https://h:8443/a/b?q` 映射为
+`/app/<id>/https/h:8443/a/b?q`（scheme 段不写 `://`，避免路径中的 `//` 被浏览器与
+Go ServeMux 的 cleanPath 折叠成 307 清洗重定向）。三层地址覆盖让页面内所有请求
+持续命中代理：
+
+1. **服务端重写**（`server/internal/webproxy/rewrite.go`）：HTML 的
+   `href/src/action/srcset/style`、`<style>` 与 CSS 的 `url()` / `@import`、
+   `meta refresh` 全部改写为代理路径——含根绝对路径与跨域 CDN 地址（`<base>` 注入
+   做不到根绝对路径，这是必须重写的原因）；
+2. **注入 hook 脚本**（`hook.js`，紧跟 `<head>` 早于页面脚本执行）：包装
+   `fetch` / `XMLHttpRequest` / `WebSocket`（改走 `/app/<id>/ws/…` 由服务端泵转）/
+   `EventSource` / `Worker` / `window.open` / `sendBeacon` / `history.pushState` /
+   `document.cookie`（改写 `path=/` 防止 cookie 种到整个 OpenOS 源）/ 图片等
+   URL 反射属性与 `setAttribute`，JS 动态拼接的地址同样映射回代理路径；并禁用
+   目标站在本源注册 Service Worker；
+3. **相对地址天然解析**：页面在 `/app/<id>/<目标URL>` 之下，`fetch('api/x')` 这类
+   相对拼接无需任何拦截即落在代理路径内。
+
+**会话与跳转**：目标站 `Set-Cookie` 被收归代理路径（剥 `Domain`、`Path` 映射到
+`/app/<id>/…`，http 部署剥 `Secure` 并把 `SameSite=None` 降级 `Lax`），登录态在
+代理路径下闭环；30x 的 `Location` 同样重写。gzip 响应解压后改写；SSE / 大文件 /
+视频流式透传；WebSocket 双向泵转。
+
+**自定义请求头（仅代理模式，`config.headers`）**：管理界面添加/编辑网页应用时，
+勾选「应用代理」后可为该应用配置一组固定的请求头，随每个代理请求（含 WebSocket
+握手与 favicon 取图）发给目标站——典型场景是内网系统按 `Authorization` /
+`X-Api-Key` 等头鉴权。语义与限制：
+
+- 配置头在**剥除 OpenOS 会话之后**应用，优先级最高（可覆盖代理默认的
+  `X-Forwarded-*`）；管理员显式写死的目标站凭据不受「剥 Authorization」约束。
+- `Cookie` 头为合并语义：配置值在前、保留的目标站会话 Cookie 在后（不顶掉用户
+  在目标站的登录态）。
+- 逐跳与传输控制类头（`Connection` / `Transfer-Encoding` / `Content-Length` /
+  `Host` 等）为黑名单，配置了会被静默丢弃；名称非法或值含 CR/LF 的条目同样丢弃
+  （防头部注入，纵深防御）。
+- iframe 直嵌模式（kind=web）下浏览器无法附带自定义头，编辑区仅代理模式显示。
+
+**Referer / Sec-Fetch / Content-Type 的转发语义**：代理页面的 `Referer` 会被
+还原为**目标站自身的绝对地址**再转发（敏感接口常校验 Referer 白名单；还原值是
+目标站自己的地址，不泄露 OpenOS 宿主信息），无法识别的 Referer 不发送；浏览器
+的 `Sec-Fetch-*` 系头在反代后源关系语义失真，转发前整组剥除；上游偶发重复下发的
+`Content-Type`（实测微信 jslogin 同时给 text/javascript 与 text/html 两个值）按
+单值语义只透传首个——浏览器取末值会让 `<script>` 的严格 MIME 检查（配 nosniff）
+拒绝执行 JSONP。
+
+**窗口内标签页（仅代理模式）**：页面弹出的新窗口被拦截，在原窗体内开标签页而非
+弹出真浏览器窗口——① `window.open(...)` 返回新标签的真实 window 代理（`closed` /
+`close()` / `postMessage` / `document` 等照常可用，命名窗口二次打开复用同一标签）；
+② `target="_blank"` 链接捕获拦截（⌘/Ctrl 等修饰键点击放行原生新窗口）；③ 页内
+`window.close()` 关闭所在标签，关掉最后一个标签即关闭窗体。标签条在多标签时出现，
+切换不重载（iframe 保活）。宿主 API 挂在窗体根元素（`data-os-webapp` 的
+`__openosPxHost`），多代理窗口互不干扰；iframe 直嵌模式（kind=web）因跨域无法
+拦截，`_blank` 仍走浏览器原生行为。
+
+
+**安全边界（务必阅读）**：
+
+- **仅配置目标**：代理目标只能来自管理员注册应用时的 `config.url`，不接受请求方
+  传 URL；配置目标本身允许内网地址（如内网 Grafana，这是管理员的显式选择）。
+- **防 SSRF**：目标以外的主机（跨域子资源、跳转、OAuth 流程）在**拨号层**校验，
+  回环 / 内网 / 链路本地地址一律拒绝，公网站点与跨域 CDN 正常放行。
+- **会话隔离**：转发前剥离 OpenOS 自身会话（`openos_token` 与 `openos_*` Cookie、
+  `Authorization` 头），OpenOS 登录态绝不外发；访问权按角色授权矩阵（`role_apps`）
+  逐请求校验，与启动台可见性一致；未登录 401、未授权 403。
+- **信任模型**：经代理加载的页面与桌面**同源**执行（这与 goder 内嵌同一信任级别），
+  目标站 JS 理论上可访问本源存储与以当前用户身份调用 OpenOS 接口——**仅配置可信
+  应用**（内部系统、自有站点）；不信任的公网站点请用默认 iframe 直嵌（跨域隔离）。
+  同源存储按源共享，两个代理应用若使用相同 localStorage 键可能互相覆盖。
+- **能力限制与逃逸回捕**：`location.href = '/x'` 这类对 location 的直接赋值无法被
+  hook 包装，跳转会逃出代理前缀落到 OpenOS 自身路径——目标站用 `/api` 等本源常见
+  前缀极普遍（典型：SSO 登录 `location.href='/api/auth/sso/login'` 撞上 OpenOS
+  自身 auth 路由 404，路径重合时甚至会误调系统接口）。对此有三层防护：① 服务端
+  **逃逸回捕**（`CatchEscape`，挂在**整棵路由树外层**，覆盖 `/api/*` 等真实路由）——
+  请求携带代理页面的 Referer 时（代理响应统一下发 `Referrer-Policy: same-origin`，
+  同源全量、跨源不发、转发上游前本就剥 Referer），把请求 307 拼回该应用的代理路径
+  （保留方法与请求体，表单 POST 逃逸同样生效；不校验 Referer 与请求 Host 一致，
+  开发模式 vite 代理与宿主网关都会改写 Host）；② 前端守卫（`framework.ts`）——
+  桌面壳检测到自身在 iframe 内启动时拒绝渲染，杜绝「代理 iframe 里套出整个桌面」
+  的套娃形态；③ **SPA 路由还原**——react-router 等按 `location.pathname` 做客户端
+  路由的 SPA 在代理前缀下路由表会全部失配（渲染 404 组件），hook 在页面加载最早期
+  用 `history.replaceState` 把文档地址还原为目标站形态，网络请求仍由 toProxy 以
+  还原前算好的闭包变量映射回代理路径；还原地址持续携带 `__os_px=<id>~<scheme>~
+  <host>` 查询标记（pushState 会覆盖 query，hook 负责维持），`CatchEscape` 兼认该
+  标记做回捕，转发上游与回捕目标都会剥掉它；④ **OAuth 回跳参数双向改写**——纯
+  前端授权的 IdP（Casdoor 等）会从文档 URL 解析 `redirect_uri` 绝对地址、拼上
+  code 后用 location 赋值跳转，跨源绝对地址导航会把 iframe 带到真实域名（登录态
+  建立在代理之外、还会撞上浏览器第三方 cookie 限制），hook 在维护文档地址时把
+  query 中的 `redirect_uri`/`redirectUri` 改写为代理路径（跳转落回本源、回调与
+  会话都经代理完成），服务端转发上游时再把该参数还原为注册的原始绝对地址（IdP
+  白名单校验不受影响）。极少数校验自身域名的站点（OAuth 严格回跳、银行类）仍
+  可能不可用，用工具栏「浏览器打开」兜底。
+
+**开关**：`OPENOS_PROXY=off` 下架 `/app/*` 路由（应用配置保留，iframe 将得到 404）。
+
 
 ### goder 界面操控指令
 
@@ -339,8 +541,9 @@ openos/
 │   │   ├── vfs/             # 虚拟 FS（文本+二进制+配额）+ 虚拟终端
 │   │   ├── ai/              # 在线配置热更、SSE 流式、历史、连通测试
 │   │   ├── goder/            # goder-serve 子进程托管 + /goder-api 身份反代
-│   │   └── osmcp/            # goder 桌面控制 MCP 插件（openos，20 个 os_* 工具）
-│   └── *_test.go            # 单元测试（auth/bus/vfs/osmcp）
+│   │   ├── osmcp/            # goder 桌面控制 MCP 插件（openos，20 个 os_* 工具）
+│   │   └── webproxy/         # 应用代理（网页应用 kind=proxy 的服务端反代 + 地址重写）
+│   └── *_test.go            # 单元测试（auth/bus/vfs/osmcp/webproxy）
 ├── web/                     # Vite 前端
 │   └── src/
 │       ├── desktop/         # Desktop / MenuBar / Dock / Launchpad / WindowFrame / LoginScreen
@@ -393,6 +596,9 @@ git tag v0.0.1 && git push origin v0.0.1   # 推送 tag 即触发发布
 - exchange 令牌交换：密钥恒定时间比较；可选角色白名单（`OPENOS_EXCHANGE_ROLES`）；
   已禁用用户拒绝交换；显示名变更留审计
 - 审计日志 / AI 对话历史按保留期自动清理（默认 90 天，可配置），防止无限膨胀
+- 应用代理（`webproxy`）：SSRF 防线在拨号层（配置目标主机放行、其余主机拒绝内网地址）、
+  转发前剥 OpenOS 会话 Cookie/Authorization、目标站 Cookie 收归 `/app/<id>/` 代理路径、
+  访问权逐请求按角色授权矩阵校验——详见「第三方接入指南 · 应用代理」的安全边界一节
 - jwt_secret 等系统级键存于独立的 `system_kv` 表，与用户界面设置（user_settings）分离
 - 登录防爆破：每 用户名+IP 10 分钟 8 次失败锁定 15 分钟；全局限流 600 次/分钟/IP
 - 虚拟文件系统严格限制在 `/home/<用户>` 内，单文件 ≤8MB，单用户配额 100MB，用户间完全隔离

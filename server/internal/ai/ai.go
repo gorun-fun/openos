@@ -37,6 +37,10 @@ type Service struct {
 	model   string
 
 	startedAt time.Time
+
+	// AfterSave 保存配置后的联动钩子（main 注入：把配置同步为 goder 的
+	// 托管模型供应商；参数为解析后的最终值，任一为空 = 已清除配置）
+	AfterSave func(base, key, model string)
 }
 
 // New 创建服务：优先读库中配置，其次回退环境变量。
@@ -77,6 +81,13 @@ func (s *Service) Model() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.model
+}
+
+// Provider 当前生效的模型配置快照（ok=false 表示未配置，即演示模式）。
+func (s *Service) Provider() (base, key, model string, ok bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.baseURL, s.apiKey, s.model, s.apiKey != "" && s.baseURL != ""
 }
 
 const systemPrompt = `你是「AI 助手」，OpenOS 网页桌面系统的内置 AI 助手（完整编程工作台是另一个应用 goder）。
@@ -199,6 +210,11 @@ func (s *Service) SaveConfig(w http.ResponseWriter, r *http.Request) {
 	s.apply(req.BaseURL, req.APIKey, req.Model)
 	s.db.Audit(auth.FromContext(r).Username, "ai.config", "model="+req.Model, "")
 	writeJSON(w, map[string]string{"ok": "1"})
+	// 联动钩子：同步为 goder 各用户的托管模型供应商（OpenOS 唯一的 AI 应用）
+	if s.AfterSave != nil {
+		base, key, model, _ := s.Provider()
+		s.AfterSave(base, key, model)
+	}
 }
 
 // Test POST /api/ai/test （admin）连通性测试。

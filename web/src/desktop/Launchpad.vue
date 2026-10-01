@@ -2,11 +2,14 @@
 import { computed, ref } from 'vue'
 import { useApps } from '../stores/apps'
 import { useWindows } from '../stores/windows'
+import { useDock } from '../stores/dock'
+import { toast } from '../ui/toast'
 import AppIcon from '../ui/AppIcon.vue'
 
 const emit = defineEmits<{ close: [] }>()
 const apps = useApps()
 const windows = useWindows()
+const dockStore = useDock()
 const q = ref('')
 
 const filtered = computed(() => {
@@ -24,9 +27,20 @@ function open(id: string) {
 }
 
 function onDragStart(e: DragEvent, appId: string) {
-  // 拖出启动台 → 桌面层 drop 处理创建快捷方式
+  // 拖出启动台 → 桌面创建快捷方式 / 拖到 Dock 固定
   e.dataTransfer?.setData('application/x-openos-app', appId)
   e.dataTransfer!.effectAllowed = 'copy'
+}
+
+/** 右键固定到 Dock 末尾（已在 Dock 中则提示）。 */
+function pinToDock(e: MouseEvent, id: string) {
+  e.preventDefault()
+  e.stopPropagation()
+  const app = apps.byId(id)
+  if (!app) return
+  if (dockStore.effectiveSet.has(id)) { toast(`「${app.name}」已在 Dock 中`); return }
+  dockStore.pinAt(id, dockStore.effective.length)
+  toast(`已固定「${app.name}」到 Dock`)
 }
 </script>
 
@@ -41,16 +55,17 @@ function onDragStart(e: DragEvent, appId: string) {
         v-for="(a, i) in filtered" :key="a.id"
         class="lp-item" draggable="true"
         :style="{ '--i': i }"
-        :title="`点击打开 · 拖拽到桌面创建快捷方式`"
+        :title="`点击打开 · 拖到桌面创建快捷方式 / 拖到 Dock 固定`"
         @click="open(a.id)"
         @dragstart="onDragStart($event, a.id)"
+        @contextmenu.prevent.stop="pinToDock($event, a.id)"
       >
-        <AppIcon :app="a.id" :size="68" />
+        <AppIcon :app="a.id" :icon="a.icon" :size="68" />
         <span class="name">{{ a.name }}</span>
       </button>
       <div v-if="!filtered.length" class="empty">没有匹配的应用</div>
     </div>
-    <p class="hint">点击打开 · 拖拽到桌面创建快捷方式 · Esc 关闭</p>
+    <p class="hint">点击打开 · 拖到桌面创建快捷方式 / 拖到 Dock 固定 · 右键固定到 Dock · Esc 关闭</p>
   </div>
 </template>
 
