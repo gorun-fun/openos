@@ -249,6 +249,9 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
 /* overflow 必须保持 visible：一旦某个轴是 auto/scroll，另一个轴的 visible 会被
    规范计算为 auto，放大抬升的图标就会被容器整体裁掉 */
 .dock {
+  /* relative：dock-tip 以 Dock 本体为定位基准（x 坐标按「项中心 - dock 左缘」计算，
+     若基准退化为全宽的 dock-area，tip 会向左偏 dock 居中后的左侧留白宽度） */
+  position: relative;
   display: flex; flex-wrap: wrap; justify-content: center; gap: 6px;
   padding: 8px 10px; border-radius: 22px;
   border: 1px solid var(--os-border);
