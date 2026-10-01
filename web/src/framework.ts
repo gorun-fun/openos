@@ -31,6 +31,7 @@ import { registerIcons, type IconDef } from './desktop/icons'
 import { shell, type ShellBrand } from './shell'
 import { setToken } from './api/client'
 import { registerWidget, type WidgetDef } from './desktop/widgetRegistry'
+import { installMenuGuard } from './ui/menu'
 
 export interface CreateOpenOSOptions {
   /** 编译期注册的宿主应用组件（key = appId，值为懒加载 loader），与内置应用合并 */
@@ -76,6 +77,10 @@ function applyTheme(accent: string) {
 }
 
 export function createOpenOS(opts: CreateOpenOSOptions = {}) {
+  // 0. 全局右键守卫：默认屏蔽浏览器原生菜单（登录页与桌面全阶段生效），
+  //    应用自定义菜单在组件内 stopPropagation 接管，详见 ui/menu.ts
+  installMenuGuard()
+
   // 1. 宿主应用组件与图标注册
   Object.assign(builtinComponents, opts.apps || {})
   if (opts.icons) registerIcons(opts.icons)

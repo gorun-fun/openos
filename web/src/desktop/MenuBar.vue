@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, type Component } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch, type Component } from 'vue'
 import { useSession } from '../stores/session'
 import { useWindows } from '../stores/windows'
 import { useDesktop } from '../stores/desktop'
@@ -8,6 +8,7 @@ import { api } from '../api/client'
 import { bus } from '../bus/bus'
 import { shell } from '../shell'
 import { OsModal, OsButton } from '../ui'
+import { useMenu } from '../ui/menu'
 
 const emit = defineEmits<{ launchpad: []; spotlight: [] }>()
 const session = useSession()
@@ -50,16 +51,17 @@ const extras = computed(() => (shell.menubarExtras ? ([] as Component[]).concat(
 /** 打开同应用的新窗口（携带时间戳参数避开“同参数去重”）。 */
 function newWin(appId: string) { windows.open(appId, { n: Date.now() }) }
 
+// 菜单栏下拉：menuOpen 记录"哪个"下拉，显示权归全局菜单单例（ui/menu.ts）。
+// 点菜单外任意处 / Esc / 其他菜单打开时由单例统一关闭，这里不再自挂 document 监听。
 const menuOpen = ref('')
-function toggle(m: string) { menuOpen.value = menuOpen.value === m ? '' : m }
-function closeMenu() { menuOpen.value = '' }
-
-// 点击菜单栏以外任意处关闭下拉（capture 阶段监听 document）
-function onDocPointerDown(e: PointerEvent) {
-  if (!(e.target as HTMLElement)?.closest?.('.menubar')) closeMenu()
+const dropdown = useMenu('menubar')
+function toggle(m: string) {
+  if (menuOpen.value === m && dropdown.isOpen) { dropdown.close(); return }
+  menuOpen.value = m
+  dropdown.open()
 }
-onMounted(() => document.addEventListener('pointerdown', onDocPointerDown, true))
-onBeforeUnmount(() => document.removeEventListener('pointerdown', onDocPointerDown, true))
+function closeMenu() { dropdown.close() }
+watch(() => dropdown.isOpen, (v) => { if (!v) menuOpen.value = '' })
 
 const showAbout = ref(false)
 const version = ref('')
@@ -111,8 +113,8 @@ defineExpose({ closeMenu })
     <nav class="left">
       <!-- 平时只保留一个系统图标；左侧其余菜单跟随当前应用（macOS 风格） -->
       <div class="menu-anchor">
-        <button class="mb logo" :title="shell.brand.name" @click="toggle('os')">{{ shell.brand.logo }}</button>
-        <div class="dropdown" v-if="menuOpen === 'os'">
+        <button class="mb logo" data-os-menu-anchor :title="shell.brand.name" @click="toggle('os')">{{ shell.brand.logo }}</button>
+        <div class="dropdown os-menu-root" v-if="menuOpen === 'os'">
           <button @click="showAbout = true; closeMenu()">关于 {{ shell.brand.name }}…</button>
           <button @click="windows.open('settings'); closeMenu()">系统设置…</button>
           <button @click="emit('launchpad'); closeMenu()">启动台</button>
@@ -130,8 +132,8 @@ defineExpose({ closeMenu })
       <template v-if="activeApp">
         <!-- 当前应用菜单（粗体应用名） -->
         <div class="menu-anchor">
-          <button class="mb app-name" @click="toggle('app')">{{ activeApp.name }}</button>
-          <div class="dropdown" v-if="menuOpen === 'app'">
+          <button class="mb app-name" data-os-menu-anchor @click="toggle('app')">{{ activeApp.name }}</button>
+          <div class="dropdown os-menu-root" v-if="menuOpen === 'app'">
             <button
               v-for="item in appMenuOf(activeApp.id)" :key="item.label"
               @click="item.run(); closeMenu()"
@@ -146,8 +148,8 @@ defineExpose({ closeMenu })
 
         <!-- 窗口菜单 -->
         <div class="menu-anchor">
-          <button class="mb" @click="toggle('win')">窗口</button>
-          <div class="dropdown" v-if="menuOpen === 'win'">
+          <button class="mb" data-os-menu-anchor @click="toggle('win')">窗口</button>
+          <div class="dropdown os-menu-root" v-if="menuOpen === 'win'">
             <button :disabled="!windows.active" @click="windows.active && windows.minimize(windows.active.id); closeMenu()">最小化<span class="hint">⌥M</span></button>
             <button :disabled="!windows.active" @click="windows.active && windows.toggleMaximize(windows.active.id); closeMenu()">缩放<span class="hint">⌥↩</span></button>
             <button :disabled="!windows.active" @click="windows.active && windows.snap(windows.active.id, 'left'); closeMenu()">左半屏</button>
@@ -160,8 +162,8 @@ defineExpose({ closeMenu })
         </div>
 
         <div class="menu-anchor">
-          <button class="mb" @click="toggle('help')">帮助</button>
-          <div class="dropdown" v-if="menuOpen === 'help'">
+          <button class="mb" data-os-menu-anchor @click="toggle('help')">帮助</button>
+          <div class="dropdown os-menu-root" v-if="menuOpen === 'help'">
             <button v-if="apps.byId('welcome')" @click="windows.open('welcome'); closeMenu()">使用指南</button>
             <button v-if="apps.byId('goder')" @click="windows.open('goder'); closeMenu()">Goder - AI助手</button>
           </div>

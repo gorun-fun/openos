@@ -7,6 +7,7 @@ import { useSession } from '../stores/session'
 import { fsApi } from '../api/client'
 import { bus } from '../bus/bus'
 import { toast } from '../ui/toast'
+import { useMenu } from '../ui/menu'
 import { shell } from '../shell'
 import AppIcon from '../ui/AppIcon.vue'
 
@@ -107,14 +108,15 @@ function openTrash() {
   windows.open('files', { path: trashPath.value }, '废纸篓')
 }
 async function emptyTrash() {
-  trashMenu.value = false
+  trashMenu.close()
   try {
     for (const k of await fsApi.list(trashPath.value)) await fsApi.remove(k.path)
     toast('废纸篓已清倒')
     loadTrash()
   } catch (e: any) { toast(e.message, { type: 'error' }) }
 }
-const trashMenu = ref(false)
+// 显示权归全局菜单单例（ui/menu.ts）：右键废纸篓弹出，点外部/Esc 统一关闭
+const trashMenu = useMenu('dock-trash')
 
 // ---- 自动隐藏（macOS「最大化时隐藏 Dock」）----
 // 有最大化窗口且开启开关时，Dock 沉到屏幕外腾出全高空间；
@@ -195,7 +197,7 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
         <div class="dock-sep" />
         <button
           class="dock-item trash" data-name="废纸篓" aria-label="废纸篓"
-          @click="openTrash" @contextmenu.prevent="trashMenu = !trashMenu"
+          @click="openTrash" @contextmenu.prevent.stop="trashMenu.toggle()"
         >
           <svg viewBox="0 0 64 64" class="trash-icon" :class="{ full: trashFull }" aria-hidden="true">
             <defs>
@@ -223,9 +225,8 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
             <rect x="26.5" y="9.5" width="11" height="6" rx="3" fill="#cfd4de" stroke="#9aa1ae" stroke-width="1.2"/>
           </svg>
         </button>
-        <div v-if="trashMenu" class="trash-mask" @pointerdown="trashMenu = false" />
-        <div v-if="trashMenu" class="os-menu dock-trash-menu" @pointerdown.stop>
-          <button @click="openTrash(); trashMenu = false">打开废纸篓</button>
+        <div v-if="trashMenu.isOpen" class="os-menu os-menu-root dock-trash-menu" @contextmenu.prevent.stop>
+          <button @click="openTrash(); trashMenu.close()">打开废纸篓</button>
           <div class="sep" />
           <button class="danger" :disabled="!trashFull" @click="emptyTrash">清倒废纸篓…</button>
         </div>
@@ -279,7 +280,6 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
   filter: drop-shadow(0 1px 2px rgba(0, 0, 0, .18)) drop-shadow(0 4px 10px rgba(0, 0, 0, .22));
 }
 .dock-trash-menu { position: fixed; bottom: 86px; right: 24px; min-width: 150px; transform-origin: bottom right; }
-.trash-mask { position: fixed; inset: 0; z-index: 9400; }
 .dot {
   position: absolute; bottom: -5px; left: 50%; transform: translateX(-50%);
   width: 4px; height: 4px; border-radius: 50%; background: var(--os-text);

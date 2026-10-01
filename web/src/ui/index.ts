@@ -22,6 +22,7 @@ import AppIcon from './AppIcon.vue'
 
 export { toast, toastState } from './toast'
 export type { ToastType, ToastItem } from './toast'
+export { useMenu, openMenu, closeMenu, installMenuGuard, menuPos } from './menu'
 
 export {
   OsButton, OsInput, OsSelect, OsToggle, OsCheckbox, OsTextarea, OsPanel, OsModal,

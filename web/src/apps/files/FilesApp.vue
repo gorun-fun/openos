@@ -8,7 +8,7 @@ import { useApps } from '../../stores/apps'
 import { useSession } from '../../stores/session'
 import { fsApi, downloadFile, fetchRawBlob, type VFile } from '../../api/client'
 import { bus } from '../../bus/bus'
-import { OsInput, OsEmpty, OsModal, toast } from '../../ui'
+import { OsInput, OsEmpty, OsModal, toast, useMenu, menuPos } from '../../ui'
 import { openPath, openWithApps, isImage, fileEmoji, kindOf, extOf, fmtSize, IMAGE_EXTS, parentOf } from '../openWith'
 import { renderMarkdown } from '../../lib/md'
 import { parseCSV } from '../sheets/engine'
@@ -396,7 +396,7 @@ async function confirmCreate() {
 }
 
 async function newFile(kind: 'md' | 'csv' | 'html') {
-  ctx.value = null
+  ctxMenu.close()
   const def = {
     md: { name: '未命名文稿.md', content: '# 未命名文稿\n\n' },
     csv: { name: '未命名表格.csv', content: '列 1,列 2,列 3\n,,\n' },
@@ -572,8 +572,13 @@ function onKeydown(e: KeyboardEvent) {
   if (view.value === 'column' && target.isDir) enter(target.path)
 }
 
-// ---- 右键菜单 ----
-const ctx = ref<{ x: number; y: number; kind: 'blank' | 'item' } | null>(null)
+// ---- 右键菜单（显示权归全局菜单单例 ui/menu.ts：点外部/Esc/滚动统一关闭，
+//      多窗口/多菜单互斥；这里只保留"空白处/项目"的内容状态与视口夹取）----
+// owner 必须带窗口实例 id：多个文件窗口并存时，owner 不同才能互斥顶替；
+// 右键坐标走全局 menuPos，watch 需同时盯它（菜单开着时再次右键=重定位）。
+const ctx = ref<'blank' | 'item' | null>(null)
+const ctxMenu = useMenu(`files:${props.win.id}`)
+const ctxOpen = computed(() => ctxMenu.isOpen && !!ctx.value)
 const ctxPos = ref({ x: 0, y: 0 })
 const ctxEl = ref<HTMLElement>()
 function openCtx(e: MouseEvent, kind: 'blank' | 'item', f?: VFile) {
@@ -583,18 +588,20 @@ function openCtx(e: MouseEvent, kind: 'blank' | 'item', f?: VFile) {
   e.stopPropagation()
   if (kind === 'item' && f && !hasSel(f.path)) setSelection([f.path])
   if (kind === 'blank' && selPaths.value.length > 1) { /* 空白处右键保留多选，供批量粘贴 */ }
-  ctx.value = { x: e.clientX, y: e.clientY, kind }
+  ctx.value = kind
+  ctxMenu.open(e.clientX, e.clientY)
 }
-watch(ctx, (c) => {
-  if (!c) return
-  ctxPos.value = { x: c.x, y: c.y }
+// 菜单关闭即清空内容；打开/重定位时按全局坐标渲染并夹在视口内（避免右下角弹出越界）
+watch([() => ctxMenu.isOpen, menuPos], ([open]) => {
+  if (!open) { ctx.value = null; return }
+  ctxPos.value = { ...menuPos.value }
   void nextTick(() => {
     const el = ctxEl.value
     if (!el) return
     const r = el.getBoundingClientRect()
     ctxPos.value = {
-      x: Math.max(6, Math.min(c.x, window.innerWidth - r.width - 6)),
-      y: Math.max(32, Math.min(c.y, window.innerHeight - r.height - 6)),
+      x: Math.max(6, Math.min(menuPos.value.x, window.innerWidth - r.width - 6)),
+      y: Math.max(32, Math.min(menuPos.value.y, window.innerHeight - r.height - 6)),
     }
   })
 })
@@ -602,9 +609,9 @@ watch(ctx, (c) => {
 // 显示简介
 const infoFile = ref<VFile | null>(null)
 
-// 工具栏下拉（排序 / 更多操作）
-const sortOpen = ref(false)
-const menuOpen = ref(false)
+// 工具栏下拉（排序 / 更多操作）：同样接入全局菜单单例，owner 带窗口 id 保证多窗口互斥
+const sortMenu = useMenu(`files:${props.win.id}:sort`)
+const moreMenu = useMenu(`files:${props.win.id}:more`)
 function setSort(k: string) {
   if (sortBy.value === k) sortDir.value = sortDir.value === 1 ? -1 : 1
   else { sortBy.value = k; sortDir.value = 1 }
@@ -621,7 +628,7 @@ const openWithList = computed(() => {
 })
 
 function openWithApp(id: string) {
-  ctx.value = null
+  ctxMenu.close()
   if (primary.value) openPath(primary.value, id)
 }
 
@@ -695,16 +702,13 @@ watch(() => columnPaths.value.length, async () => {
 
       <!-- 排序方式 -->
       <div class="tb-anchor">
-        <button class="os-tb-btn" title="排序方式" @click="sortOpen = !sortOpen">⇅</button>
-        <template v-if="sortOpen">
-          <div class="mask" @click="sortOpen = false" />
-          <div class="os-menu sort-menu">
-            <div class="grp">排序方式</div>
-            <button :class="{ check: sortBy === 'name' }" @click="setSort('name'); sortOpen = false">名称<span v-if="sortBy === 'name'" class="hint">{{ sortDir === 1 ? '↑' : '↓' }}</span></button>
-            <button :class="{ check: sortBy === 'size' }" @click="setSort('size'); sortOpen = false">大小<span v-if="sortBy === 'size'" class="hint">{{ sortDir === 1 ? '↑' : '↓' }}</span></button>
-            <button :class="{ check: sortBy === 'time' }" @click="setSort('time'); sortOpen = false">修改时间<span v-if="sortBy === 'time'" class="hint">{{ sortDir === 1 ? '↑' : '↓' }}</span></button>
-          </div>
-        </template>
+        <button class="os-tb-btn" data-os-menu-anchor title="排序方式" @click="sortMenu.toggle()">⇅</button>
+        <div v-if="sortMenu.isOpen" class="os-menu os-menu-root sort-menu">
+          <div class="grp">排序方式</div>
+          <button :class="{ check: sortBy === 'name' }" @click="setSort('name'); sortMenu.close()">名称<span v-if="sortBy === 'name'" class="hint">{{ sortDir === 1 ? '↑' : '↓' }}</span></button>
+          <button :class="{ check: sortBy === 'size' }" @click="setSort('size'); sortMenu.close()">大小<span v-if="sortBy === 'size'" class="hint">{{ sortDir === 1 ? '↑' : '↓' }}</span></button>
+          <button :class="{ check: sortBy === 'time' }" @click="setSort('time'); sortMenu.close()">修改时间<span v-if="sortBy === 'time'" class="hint">{{ sortDir === 1 ? '↑' : '↓' }}</span></button>
+        </div>
       </div>
 
       <div class="search-wrap">
@@ -714,27 +718,24 @@ watch(() => columnPaths.value.length, async () => {
 
       <!-- 更多操作 -->
       <div class="tb-anchor">
-        <button class="os-tb-btn" title="更多操作" @click="menuOpen = !menuOpen">⋯</button>
-        <template v-if="menuOpen">
-          <div class="mask" @click="menuOpen = false" />
-          <div class="os-menu more-menu">
-            <button @click="menuOpen = false; newFile('md')">新建 Markdown 文稿</button>
-            <button @click="menuOpen = false; newFile('csv')">新建 CSV 表格</button>
-            <button @click="menuOpen = false; newFile('html')">新建 HTML 幻灯片</button>
-            <button @click="menuOpen = false; creating = 'dir'; newName = ''">新建文件夹</button>
+        <button class="os-tb-btn" data-os-menu-anchor title="更多操作" @click="moreMenu.toggle()">⋯</button>
+        <div v-if="moreMenu.isOpen" class="os-menu os-menu-root more-menu">
+          <button @click="moreMenu.close(); newFile('md')">新建 Markdown 文稿</button>
+          <button @click="moreMenu.close(); newFile('csv')">新建 CSV 表格</button>
+          <button @click="moreMenu.close(); newFile('html')">新建 HTML 幻灯片</button>
+          <button @click="moreMenu.close(); creating = 'dir'; newName = ''">新建文件夹</button>
+          <div class="sep" />
+          <label class="up">上传文件…<input type="file" multiple hidden @change="moreMenu.close(); onUpload($event)" /></label>
+          <button :disabled="!canPaste()" @click="moreMenu.close(); doPaste()">粘贴项目</button>
+          <div class="sep" />
+          <button :disabled="!selPaths.length" @click="moreMenu.close(); doDownload()">下载</button>
+          <button :disabled="selPaths.length !== 1" @click="moreMenu.close(); startRename(primary)">重新命名</button>
+          <button :disabled="!selPaths.length" @click="moreMenu.close(); deleteSelection()">{{ inTrash ? '立即删除…' : '移到废纸篓' }}</button>
+          <template v-if="path === trashPath">
             <div class="sep" />
-            <label class="up">上传文件…<input type="file" multiple hidden @change="menuOpen = false; onUpload($event)" /></label>
-            <button :disabled="!canPaste()" @click="menuOpen = false; doPaste()">粘贴项目</button>
-            <div class="sep" />
-            <button :disabled="!selPaths.length" @click="menuOpen = false; doDownload()">下载</button>
-            <button :disabled="selPaths.length !== 1" @click="menuOpen = false; startRename(primary)">重新命名</button>
-            <button :disabled="!selPaths.length" @click="menuOpen = false; deleteSelection()">{{ inTrash ? '立即删除…' : '移到废纸篓' }}</button>
-            <template v-if="path === trashPath">
-              <div class="sep" />
-              <button :disabled="!trashFull" class="danger" @click="menuOpen = false; confirmEmpty = true">清倒废纸篓…</button>
-            </template>
-          </div>
-        </template>
+            <button :disabled="!trashFull" class="danger" @click="moreMenu.close(); confirmEmpty = true">清倒废纸篓…</button>
+          </template>
+        </div>
       </div>
     </div>
 
@@ -855,8 +856,9 @@ watch(() => columnPaths.value.length, async () => {
         </div>
 
         <!-- 画廊视图 -->
-        <div v-else-if="view === 'gallery'" class="gallery" tabindex="0" @keydown.left.prevent="stepSel(-1)" @keydown.right.prevent="stepSel(1)">
-          <div v-if="selectedFile" class="g-main">
+        <div v-else-if="view === 'gallery'" class="gallery" tabindex="0" @keydown.left.prevent="stepSel(-1)" @keydown.right.prevent="stepSel(1)"
+          @contextmenu="openCtx($event, 'blank')">
+          <div v-if="selectedFile" class="g-main" @contextmenu="openCtx($event, 'item', selectedFile)">
             <img v-if="isImage(selectedFile) && blobUrl(selectedFile.path)" :src="blobUrl(selectedFile.path)" :alt="baseName(selectedFile.path)" @dblclick="openFile(selectedFile)">
             <div v-else class="g-emoji" @dblclick="openFile(selectedFile)">{{ selectedFile.isDir ? '📁' : fileEmoji(selectedFile.path) }}</div>
             <div class="g-name">
@@ -872,6 +874,7 @@ watch(() => columnPaths.value.length, async () => {
               v-for="f in shown" :id="'f-' + encodeURIComponent(f.path)" :key="f.path"
               class="thumb" :class="{ sel: hasSel(f.path) }"
               @click="setSelection([f.path])" @dblclick="openFile(f)"
+              @contextmenu="openCtx($event, 'item', f)"
             >
               <img v-if="isImage(f) && blobUrl(f.path)" :src="blobUrl(f.path)" alt="">
               <span v-else>{{ f.isDir ? '📁' : fileEmoji(f.path) }}</span>
@@ -893,50 +896,50 @@ watch(() => columnPaths.value.length, async () => {
       <span>{{ shown.length }} 个项目 · 可用 {{ availText }}</span>
     </footer>
 
-    <!-- 右键菜单 -->
-    <div v-if="ctx" ref="ctxEl" class="os-menu" :style="{ left: ctxPos.x + 'px', top: ctxPos.y + 'px' }"
-      @pointerdown.stop @contextmenu.prevent.stop>
+    <!-- 右键菜单：显示权归全局菜单单例，根节点标记 os-menu-root -->
+    <div v-if="ctxOpen" ref="ctxEl" class="os-menu os-menu-root" :style="{ left: ctxPos.x + 'px', top: ctxPos.y + 'px' }"
+      @contextmenu.prevent.stop>
       <!-- 项目菜单 -->
-      <template v-if="ctx.kind === 'item'">
+      <template v-if="ctx === 'item'">
         <div class="grp">{{ selPaths.length > 1 ? `${selPaths.length} 个项目` : baseName(primary) }}</div>
-        <button @click="ctx = null; openSelection()">打开</button>
+        <button @click="ctxMenu.close(); openSelection()">打开</button>
         <div v-if="!inTrash && openWithList.length > 1" class="subwrap">
           <button>打开方式<span class="hint">▸</span></button>
           <div class="os-menu sub">
             <button v-for="a in openWithList" :key="a.id" @click="openWithApp(a.id)">{{ a.name }}</button>
           </div>
         </div>
-        <button v-if="selPaths.length === 1" @click="ctx = null; quickLook(selectedFile!)">快速查看</button>
-        <button @click="ctx = null; infoFile = selectedFile">显示简介</button>
+        <button v-if="selPaths.length === 1" @click="ctxMenu.close(); quickLook(selectedFile!)">快速查看</button>
+        <button @click="ctxMenu.close(); infoFile = selectedFile">显示简介</button>
         <div class="sep" />
-        <button :disabled="inTrash" @click="ctx = null; doCopy()">拷贝<span class="hint">⌘C</span></button>
-        <button :disabled="inTrash" @click="ctx = null; doCut(); toast('已剪切，在目标位置粘贴')">剪切<span class="hint">⌘X</span></button>
-        <button :disabled="inTrash" @click="ctx = null; duplicateSelection()">复制副本<span class="hint">⌘D</span></button>
+        <button :disabled="inTrash" @click="ctxMenu.close(); doCopy()">拷贝<span class="hint">⌘C</span></button>
+        <button :disabled="inTrash" @click="ctxMenu.close(); doCut(); toast('已剪切，在目标位置粘贴')">剪切<span class="hint">⌘X</span></button>
+        <button :disabled="inTrash" @click="ctxMenu.close(); duplicateSelection()">复制副本<span class="hint">⌘D</span></button>
         <div class="sep" />
-        <button v-if="selPaths.length === 1" @click="ctx = null; startRename(primary)">重新命名<span class="hint">⏎</span></button>
-        <button @click="ctx = null; doDownload()">下载</button>
-        <button class="danger" @click="ctx = null; deleteSelection()">{{ inTrash ? '立即删除…' : '移到废纸篓' }}</button>
+        <button v-if="selPaths.length === 1" @click="ctxMenu.close(); startRename(primary)">重新命名<span class="hint">⏎</span></button>
+        <button @click="ctxMenu.close(); doDownload()">下载</button>
+        <button class="danger" @click="ctxMenu.close(); deleteSelection()">{{ inTrash ? '立即删除…' : '移到废纸篓' }}</button>
       </template>
 
       <!-- 空白处菜单 -->
       <template v-else>
-        <button @click="ctx = null; newFile('md')">新建 Markdown 文稿</button>
-        <button @click="ctx = null; newFile('csv')">新建 CSV 表格</button>
-        <button @click="ctx = null; newFile('html')">新建 HTML 幻灯片</button>
-        <button @click="ctx = null; creating = 'dir'; newName = ''">新建文件夹<span class="hint">⇧⌘N</span></button>
+        <button @click="ctxMenu.close(); newFile('md')">新建 Markdown 文稿</button>
+        <button @click="ctxMenu.close(); newFile('csv')">新建 CSV 表格</button>
+        <button @click="ctxMenu.close(); newFile('html')">新建 HTML 幻灯片</button>
+        <button @click="ctxMenu.close(); creating = 'dir'; newName = ''">新建文件夹<span class="hint">⇧⌘N</span></button>
         <div class="sep" />
-        <label class="up">上传文件…<input type="file" multiple hidden @change="ctx = null; onUpload($event)" /></label>
-        <button :disabled="!canPaste()" @click="ctx = null; doPaste()">粘贴项目<span class="hint">⌘V</span></button>
+        <label class="up">上传文件…<input type="file" multiple hidden @change="ctxMenu.close(); onUpload($event)" /></label>
+        <button :disabled="!canPaste()" @click="ctxMenu.close(); doPaste()">粘贴项目<span class="hint">⌘V</span></button>
         <div class="sep" />
         <div class="subwrap">
           <button>排序方式按{{ { name: '名称', size: '大小', time: '修改时间' }[sortBy] || '名称' }}<span class="hint">▸</span></button>
           <div class="os-menu sub">
-            <button @click="setSort('name'); ctx = null">名称</button>
-            <button @click="setSort('size'); ctx = null">大小</button>
-            <button @click="setSort('time'); ctx = null">修改时间</button>
+            <button @click="setSort('name'); ctxMenu.close()">名称</button>
+            <button @click="setSort('size'); ctxMenu.close()">大小</button>
+            <button @click="setSort('time'); ctxMenu.close()">修改时间</button>
           </div>
         </div>
-        <button v-if="path === trashPath" class="danger" :disabled="!trashFull" @click="ctx = null; confirmEmpty = true">清倒废纸篓…</button>
+        <button v-if="path === trashPath" class="danger" :disabled="!trashFull" @click="ctxMenu.close(); confirmEmpty = true">清倒废纸篓…</button>
       </template>
     </div>
 
@@ -988,7 +991,6 @@ watch(() => columnPaths.value.length, async () => {
 .grow { flex: 1; }
 .tb-title { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 38%; }
 .tb-anchor { position: relative; display: flex; }
-.mask { position: fixed; inset: 0; z-index: 50; }
 .sort-menu, .more-menu { position: absolute; top: 33px; right: 0; z-index: 51; min-width: 168px; }
 .more-menu .up, .os-menu .up {
   display: flex; align-items: center; gap: 8px; padding: 5px 10px; border-radius: 6px;

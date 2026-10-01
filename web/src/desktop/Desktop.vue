@@ -15,6 +15,7 @@ import Widgets from './Widgets.vue'
 import { snapPreview } from './snapState'
 import { fsApi } from '../api/client'
 import { toast } from '../ui/toast'
+import { useMenu, menuPos } from '../ui/menu'
 import { widgetDefs, widgetDef } from './widgetRegistry'
 import { appForPath } from '../apps/openWith'
 
@@ -134,7 +135,6 @@ function onShortcut(e: KeyboardEvent) {
   if (e.key === 'Escape') {
     launchpadOpen.value = false
     spotOpen.value = false
-    ctx.value = null
     return
   }
   // 聚焦搜索：⌘/Ctrl/Alt + Space（macOS 为 ⌘Space；浏览器内 Alt 最稳）。
@@ -186,20 +186,24 @@ function restoreWindows(): boolean {
 }
 
 // ---- 桌面右键菜单（区分目标：桌面 / 快捷方式 / 小组件）----
+// 显示权交给全局菜单单例（ui/menu.ts）：同一时刻全系统只有一个菜单，
+// 点外部 / Esc / 滚动统一关闭；这里只保留"右键目标"的内容状态。
 type CtxTarget =
   | { kind: 'shortcut'; key: string }
   | { kind: 'widget'; type: string; noteId?: string }
   | null
-const ctx = ref<{ x: number; y: number; target: CtxTarget } | null>(null)
+const ctx = ref<CtxTarget>(null)
+const menu = useMenu('desktop')
 const ctxPos = ref({ x: 0, y: 0 })
 const ctxEl = ref<HTMLElement>()
 
 function onContext(e: MouseEvent) {
   const t = e.target as HTMLElement
-  // 应用窗口 / 菜单栏 / Dock / 启动台内部：交给应用或浏览器默认菜单
-  if (t.closest('.window, .menubar, .dock, .launchpad, .ctxmenu')) return
+  // 应用窗口 / 菜单栏 / Dock / 启动台内部：交给应用自定义右键；
+  // 未被应用接管的由全局守卫屏蔽原生菜单，桌面不弹菜单
+  if (t.closest('.window, .menubar, .dock, .launchpad')) return
   // 输入框内右键保留系统默认（复制/粘贴等）；例外：桌面小组件（便签）内的
-  // 输入框占满组件，右键是移除/换色的唯一入口，仍弹系统菜单
+  // 输入框占满组件，右键是移除/换色的唯一入口，仍弹桌面菜单
   if (t.closest('input, textarea, [contenteditable="true"]') && !t.closest('.widget')) return
 
   let target: CtxTarget = null
@@ -213,44 +217,47 @@ function onContext(e: MouseEvent) {
   }
 
   e.preventDefault()
-  ctx.value = { x: e.clientX, y: e.clientY, target }
+  e.stopPropagation() // 桌面已接管，阻止全局守卫在冒泡末端又关掉刚打开的菜单
+  ctx.value = target
+  menu.open(e.clientX, e.clientY)
 }
 
-// 渲染后测量菜单尺寸，把菜单夹在视口内（避免右下角弹出越界）
-watch(ctx, (c) => {
-  if (!c) return
-  ctxPos.value = { x: c.x, y: c.y }
+// 菜单关闭即清空右键目标；打开/重定位时按全局坐标渲染并夹在视口内（避免右下角弹出越界）。
+// 同时盯 menuPos：菜单开着时在桌面另一处再右键 = 原地重定位（owner 不变，isOpen 不触发）。
+watch([() => menu.isOpen, menuPos], ([open]) => {
+  if (!open) { ctx.value = null; return }
+  ctxPos.value = { ...menuPos.value }
   void nextTick(() => {
     const el = ctxEl.value
     if (!el) return
     const r = el.getBoundingClientRect()
     ctxPos.value = {
-      x: Math.max(6, Math.min(c.x, window.innerWidth - r.width - 6)),
-      y: Math.max(32, Math.min(c.y, window.innerHeight - r.height - 6)),
+      x: Math.max(6, Math.min(menuPos.value.x, window.innerWidth - r.width - 6)),
+      y: Math.max(32, Math.min(menuPos.value.y, window.innerHeight - r.height - 6)),
     }
   })
 })
 
 function ctxOpenShortcut() {
-  const key = ctx.value?.target
+  const key = ctx.value
   if (key?.kind === 'shortcut') shortcutsRef.value?.openByKey(key.key)
 }
 function ctxRemoveShortcut() {
-  const key = ctx.value?.target
+  const key = ctx.value
   if (key?.kind === 'shortcut') shortcutsRef.value?.removeByKey(key.key)
 }
 function ctxRemoveWidget() {
-  const t = ctx.value?.target
+  const t = ctx.value
   if (t?.kind === 'widget') widgetsRef.value?.remove(t.type, t.noteId)
 }
 function ctxCycleNoteColor() {
-  const t = ctx.value?.target
+  const t = ctx.value
   if (t?.kind === 'widget' && t.type === 'note') widgetsRef.value?.cycleNoteColor(t.noteId)
 }
 </script>
 
 <template>
-  <div class="desktop" :style="{ background: desktop.wallpapers[desktop.wallpaper] }" @pointerdown="ctx = null" @contextmenu="onContext" @dragover.prevent @drop="onDrop">
+  <div class="desktop" :style="{ background: desktop.wallpapers[desktop.wallpaper] }" @contextmenu="onContext" @dragover.prevent @drop="onDrop">
     <MenuBar @launchpad="launchpadOpen = true" @spotlight="spotOpen = true" />
 
     <Widgets ref="widgetsRef" />
@@ -271,39 +278,40 @@ function ctxCycleNoteColor() {
       width: snapPreview.w + 'px', height: snapPreview.h + 'px',
     }" />
 
-    <!-- 右键菜单（pointerdown 阻止冒泡，否则会被桌面层先清空导致点击失效） -->
+    <!-- 右键菜单：显示权归全局菜单单例（点外部/Esc/滚动统一关闭），根节点标记 os-menu-root。
+         注意空白桌面的右键目标为 null，不能拿 ctx 做渲染条件 -->
     <div
-      v-if="ctx" ref="ctxEl" class="ctxmenu"
+      v-if="menu.isOpen" ref="ctxEl" class="os-menu os-menu-root ctxmenu"
       :style="{ left: ctxPos.x + 'px', top: ctxPos.y + 'px' }"
-      @pointerdown.stop @contextmenu.prevent.stop
+      @contextmenu.prevent.stop
     >
       <!-- 右键快捷方式 -->
-      <template v-if="ctx.target?.kind === 'shortcut'">
-        <button @click="ctxOpenShortcut(); ctx = null">打开</button>
-        <button @click="ctxRemoveShortcut(); ctx = null">移除快捷方式</button>
+      <template v-if="ctx?.kind === 'shortcut'">
+        <button @click="ctxOpenShortcut(); menu.close()">打开</button>
+        <button @click="ctxRemoveShortcut(); menu.close()">移除快捷方式</button>
       </template>
 
       <!-- 右键小组件 -->
-      <template v-else-if="ctx.target?.kind === 'widget'">
-        <button v-if="ctx.target.type === 'note'" @click="ctxCycleNoteColor(); ctx = null">🎨 换个颜色</button>
-        <button @click="ctxRemoveWidget(); ctx = null">移除小组件</button>
+      <template v-else-if="ctx?.kind === 'widget'">
+        <button v-if="ctx.type === 'note'" @click="ctxCycleNoteColor(); menu.close()">🎨 换个颜色</button>
+        <button @click="ctxRemoveWidget(); menu.close()">移除小组件</button>
       </template>
 
       <!-- 右键桌面 -->
       <template v-else>
-        <button @click="launchpadOpen = true; ctx = null">启动台</button>
-        <button v-if="apps.byId('terminal')" @click="windows.open('terminal'); ctx = null">打开终端</button>
-        <button v-if="apps.byId('files')" @click="windows.open('files'); ctx = null">打开文件</button>
-        <button v-if="apps.byId('goder')" @click="windows.open('goder'); ctx = null">Goder - AI助手</button>
-        <button v-if="apps.byId('notes')" @click="windows.open('notes'); ctx = null">便签</button>
+        <button @click="launchpadOpen = true; menu.close()">启动台</button>
+        <button v-if="apps.byId('terminal')" @click="windows.open('terminal'); menu.close()">打开终端</button>
+        <button v-if="apps.byId('files')" @click="windows.open('files'); menu.close()">打开文件</button>
+        <button v-if="apps.byId('goder')" @click="windows.open('goder'); menu.close()">Goder - AI助手</button>
+        <button v-if="apps.byId('notes')" @click="windows.open('notes'); menu.close()">便签</button>
         <div class="sep" />
         <div class="ctx-group">添加小组件</div>
-        <button v-for="d in widgetDefs()" :key="d.type" @click="widgetsRef?.add(d.type); ctx = null">
+        <button v-for="d in widgetDefs()" :key="d.type" @click="widgetsRef?.add(d.type); menu.close()">
           {{ d.icon ? d.icon + ' ' : '' }}{{ d.label }}
         </button>
         <div class="sep" />
-        <button @click="desktop.setWallpaper(desktop.wallpaper + 1); ctx = null">更换壁纸</button>
-        <button @click="desktop.setDark(!desktop.dark); ctx = null">切换深浅色</button>
+        <button @click="desktop.setWallpaper(desktop.wallpaper + 1); menu.close()">更换壁纸</button>
+        <button @click="desktop.setDark(!desktop.dark); menu.close()">切换深浅色</button>
       </template>
     </div>
   </div>
@@ -322,21 +330,6 @@ function ctxCycleNoteColor() {
   transition: all .16s var(--os-ease-out);
 }
 
-.ctxmenu {
-  position: fixed; z-index: 9500; min-width: 190px; padding: 6px;
-  background: var(--os-panel); backdrop-filter: blur(30px) saturate(1.8);
-  -webkit-backdrop-filter: blur(30px) saturate(1.8);
-  border: 1px solid var(--os-border);
-  border-radius: 12px; box-shadow: var(--os-shadow-sm), inset 0 1px 0 var(--os-highlight-edge);
-  animation: os-pop-in .14s var(--os-ease-out);
-  transform-origin: top left;
-}
-.ctxmenu button {
-  display: block; width: 100%; text-align: left; padding: 6px 12px; border: none;
-  background: transparent; border-radius: 7px; color: var(--os-text); font-size: 13px; cursor: pointer;
-  transition: background .1s ease;
-}
-.ctxmenu button:hover { background: var(--os-accent); color: #fff; }
-.ctx-group { padding: 5px 12px 3px; font-size: 11px; font-weight: 600; color: var(--os-text-secondary); }
-.sep { height: 1px; background: var(--os-border); margin: 5px 10px; }
+/* 菜单卡片/按钮/分隔线统一用全局 .os-menu 样式（base.css），这里只保留桌面菜单特有的分组标题 */
+.ctx-group { padding: 5px 10px 3px; font-size: 11px; font-weight: 600; color: var(--os-text-secondary); }
 </style>
