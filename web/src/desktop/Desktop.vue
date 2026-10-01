@@ -18,6 +18,7 @@ import { toast } from '../ui/toast'
 import { useMenu, menuPos } from '../ui/menu'
 import { widgetDefs, widgetDef } from './widgetRegistry'
 import { appForPath } from '../apps/openWith'
+import { installAgentBridge } from './agentBridge'
 
 const session = useSession()
 const desktop = useDesktop()
@@ -39,6 +40,8 @@ onMounted(async () => {
     bus.on('sys:presence', (p: any) => {
       if (p.online && p.user !== session.user!.username) toast(`${p.user} 上线了`)
     }),
+    // goder 桌面控制插件（openos MCP）的前端桥：执行 os_* 工具下发的动作
+    installAgentBridge(),
   )
 
   // 恢复上次会话的窗口（按用户持久化），首次进入打开欢迎窗口

@@ -27,11 +27,17 @@ import (
 	"openos/server/internal/auth"
 	"openos/server/internal/bus"
 	"openos/server/internal/goder"
+	"openos/server/internal/osmcp"
 	"openos/server/internal/store"
 	"openos/server/internal/vfs"
 )
 
 func main() {
+	// goder/gh 桌面控制插件的 stdio↔HTTP 适配子命令：早于一切服务初始化分派
+	// （shim 路径不打开数据库、不监听端口）
+	if len(os.Args) > 1 && os.Args[1] == "mcp-shim" {
+		os.Exit(osmcp.RunShim(os.Args[1:]))
+	}
 	startedAt := time.Now()
 	dataDir := envOr("OPENOS_DATA", "data")
 	// 功能裁剪（宿主集成：OPENOS_VFS=off / OPENOS_GODER=off 时下架对应内置应用与能力）
@@ -69,6 +75,16 @@ func main() {
 		fs.DeleteHome(name)
 		goderMgr.DeleteUserData(name)
 	})
+	// goder 桌面控制插件（openos MCP）：gh 侧经 wrapper 自动发现接入，
+	// 向 AI 暴露 os_* 工具（窗口/应用/桌面/便签/VFS/设置/通知/总线发布）
+	osmcpMgr := osmcp.New(osmcp.Deps{
+		DB: db, Hub: hub, FS: fs, DataDir: dataDir,
+		Version: store.Version, StartedAt: startedAt,
+		GoderStatus: goderMgr.Status,
+		OnlineUsers: hub.OnlineUsers,
+	})
+	osmcpMgr.Start()
+	hub.Handle("agent:resp", osmcpMgr.OnBridgeResp)
 	// 数据保留期（防无限增长；0 = 永久保留）：启动清理一次，此后每天一次
 	go scheduleRetention(db)
 
@@ -269,7 +285,15 @@ func main() {
 		}
 		return id.Username, name, true
 	}
-	mux.Handle("/goder-api/", authSvc.Middleware(goderMgr.ProxyHandler(goderIdentity)))
+	goderProxy := goderMgr.ProxyHandler(goderIdentity)
+	mux.Handle("/goder-api/", authSvc.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 首次到达时为该用户落桌面控制插件 wrapper（先于 goder-serve 懒启动
+		// 该用户的 gh，保证插件在 gh 启动那一刻已就位；幂等低开销）
+		if id := auth.FromContext(r); id != nil {
+			osmcpMgr.EnsureUser(id.Username)
+		}
+		goderProxy.ServeHTTP(w, r)
+	})))
 
 	// goder 嵌入库（自包含 ESM）
 	mux.HandleFunc("GET /vendor/goder.js", goderMgr.ServeJS)
@@ -310,6 +334,7 @@ func main() {
 	defer cancel()
 	hub.Close()
 	goderMgr.Stop()
+	osmcpMgr.Stop()
 	srv.Shutdown(ctx)
 	log.Println("已退出")
 }

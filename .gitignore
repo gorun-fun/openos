@@ -6,3 +6,4 @@ server/openos-server
 *.log
 *.pid
 .goder-src/
+.zcode/

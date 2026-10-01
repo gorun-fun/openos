@@ -860,6 +860,12 @@ func contextWithIdentity(r *http.Request, id *Identity) context.Context {
 	return context.WithValue(r.Context(), userKey, id)
 }
 
+// WithIdentity 把身份注入请求上下文并返回新请求（进程内复用 REST handler 用，
+// 如 osmcp 插件以某用户身份调用 vfs handler）。身份须由调用方先行校验。
+func WithIdentity(r *http.Request, id *Identity) *http.Request {
+	return r.WithContext(contextWithIdentity(r, id))
+}
+
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(v)
