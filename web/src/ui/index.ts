@@ -24,7 +24,7 @@ export { toast, toastState } from './toast'
 export type { ToastType, ToastItem } from './toast'
 export { useMenu, openMenu, closeMenu, installMenuGuard, menuPos } from './menu'
 // OsTable 列定义类型：宿主应用以强类型声明列（export type 不产生运行时代码）
-export type { TableColumn } from './OsTable.vue)
+export type { TableColumn } from './OsTable.vue'
 
 export {
   OsButton, OsInput, OsSelect, OsToggle, OsCheckbox, OsTextarea, OsPanel, OsModal,
