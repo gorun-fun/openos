@@ -5,6 +5,7 @@ import { useSession } from '../../stores/session'
 import { useApps } from '../../stores/apps'
 import { api } from '../../api/client'
 import { bus } from '../../bus/bus'
+import { icons } from '../../ui'
 import { ansiToHtml } from './ansi'
 
 const props = defineProps<{ win: WinState }>()
@@ -160,19 +161,20 @@ function onKey(e: KeyboardEvent) {
     <!-- 融合窗体工具栏：虚拟/真实切换 + 标题（用户 — 模式）+ 清屏；整条可拖动窗口（控件自身不参与） -->
     <div class="os-tb term-tb" data-os-drag>
       <div class="os-seg dark-seg">
-        <button :class="{ on: mode === 'virtual' }" @click="switchMode('virtual')">虚拟</button>
+        <button :class="{ on: mode === 'virtual' }" title="虚拟终端（沙箱 VFS）" v-html="icons.virtual" @click="switchMode('virtual')" />
         <button
           :class="{ on: mode === 'real' }"
           :disabled="!realAvailable"
-          :title="realAvailable ? '服务端受控执行（个人沙箱）' : '管理员已关闭真实终端'"
+          :title="realAvailable ? '真实终端（服务端受控执行 · 个人沙箱）' : '管理员已关闭真实终端'"
+          v-html="icons.shell"
           @click="switchMode('real')"
-        >真实</button>
+        />
       </div>
       <span class="os-tb-sep dark-sep" />
       <div class="tb-title">{{ user }} — {{ mode === 'real' ? '真实终端' : '虚拟终端' }}</div>
       <span class="grow" />
       <span class="mode-hint">{{ mode === 'real' ? 'sh 受控执行 · 沙箱内' : '虚拟文件系统' }}</span>
-      <button class="os-tb-btn dark-btn" title="清屏（Ctrl+L）" @click="lines = []">清屏</button>
+      <button class="os-tb-btn dark-btn" title="清屏（Ctrl+L）" v-html="icons.eraser" @click="lines = []" />
     </div>
     <div ref="bodyEl" class="body">
       <div v-for="(l, i) in lines" :key="i" class="line" :class="l.cls" v-html="l.html"></div>
@@ -181,7 +183,7 @@ function onKey(e: KeyboardEvent) {
         <input
           ref="inputEl"
           v-model="input"
-          class="cmd"
+          class="cmd os-flat"
           spellcheck="false"
           autofocus
           @keydown="onKey"
@@ -204,9 +206,11 @@ html.dark .term { background: rgba(12, 12, 15, .98); }
 }
 .dark-seg { background: rgba(255, 255, 255, .1); }
 .dark-seg button {
-  border: none; background: transparent; color: #9a9aa2; font-size: 12px; padding: 2px 12px;
+  border: none; background: transparent; color: #9a9aa2; font-size: 12px; padding: 2px 9px;
   border-radius: 5px; cursor: pointer; font-family: inherit; height: 22px;
+  display: inline-flex; align-items: center; justify-content: center;
 }
+.dark-seg button svg { width: 13px; height: 13px; }
 .dark-seg button.on { background: #5a5a64; color: #fff; }
 .dark-seg button:disabled { opacity: .35; cursor: not-allowed; }
 .dark-sep { background: rgba(255, 255, 255, .12); }

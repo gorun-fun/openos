@@ -7,7 +7,7 @@ import type { WinState } from '../../stores/windows'
 import { useWindows } from '../../stores/windows'
 import { useNotes, NOTE_COLORS } from '../../stores/notes'
 import { bus } from '../../bus/bus'
-import { OsEmpty } from '../../ui'
+import { OsEmpty, icons } from '../../ui'
 
 const props = defineProps<{ win: WinState }>()
 const windows = useWindows()
@@ -63,11 +63,11 @@ function fmt(ts: number) {
       <div class="tb-title">便签</div>
       <span class="count">{{ notes.notes.length }} 张 · 自动保存 · 钉选后桌面同步显示</span>
       <span class="grow" />
-      <button class="os-tb-btn primary" @click="addNote">＋ 新建便签</button>
+      <button class="os-tb-btn primary" title="新建便签" v-html="icons.note" @click="addNote" />
     </div>
 
     <div v-if="!notes.notes.length" class="empty-wrap">
-      <OsEmpty icon="🗒️" text="还没有便签，点「新建便签」随手记一条" />
+      <OsEmpty text="还没有便签，点右上角「＋」随手记一条" />
     </div>
 
     <div v-else class="grid">
@@ -77,6 +77,7 @@ function fmt(ts: number) {
       >
         <textarea
           :value="n.text"
+          class="os-flat"
           placeholder="记点什么…（自动保存）"
           spellcheck="false"
           @input="notes.setText(n.id, ($event.target as HTMLTextAreaElement).value)"

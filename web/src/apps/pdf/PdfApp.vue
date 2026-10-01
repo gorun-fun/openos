@@ -4,7 +4,7 @@ import type { WinState } from '../../stores/windows'
 import { useWindows } from '../../stores/windows'
 import { useSession } from '../../stores/session'
 import { fsApi, fetchRawBlob } from '../../api/client'
-import { OsFilePicker } from '../../ui'
+import { fileDialog, icons } from '../../ui'
 import * as pdfjs from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 
@@ -13,7 +13,6 @@ pdfjs.GlobalWorkerOptions.workerSrc = workerUrl
 const props = defineProps<{ win: WinState }>()
 const windows = useWindows()
 const session = useSession()
-const pickerOpen = ref(false)
 
 const pageNum = ref(1)
 const pageCount = ref(0)
@@ -66,7 +65,6 @@ function onDrop(e: DragEvent) {
 }
 
 async function openVfs(path: string) {
-  pickerOpen.value = false
   loading.value = true
   try {
     const blob = await fetchRawBlob(path)
@@ -75,6 +73,15 @@ async function openVfs(path: string) {
     error.value = '读取文件失败：' + e.message
     loading.value = false
   }
+}
+
+// 从文件空间选择打开：复用文件管理窗口（可拖动、与访达一致的浏览体验）
+async function openFromVfs() {
+  const p = await fileDialog({
+    mode: 'open', title: '打开 PDF 文稿',
+    defaultDir: `/home/${session.user!.username}/文档`, exts: ['pdf'],
+  })
+  if (p) openVfs(p)
 }
 
 async function nav(d: number) {
@@ -109,19 +116,19 @@ onBeforeUnmount(() => doc?.destroy())
   <div class="pdf" @dragover.prevent @drop="onDrop">
     <!-- 融合窗体工具栏：整条可拖动窗口（data-os-drag 事件委托，控件自身不参与） -->
     <div class="os-tb" data-os-drag>
-      <button class="os-tb-btn" title="从文件空间打开…" @click="pickerOpen = true">打开…</button>
+      <button class="os-tb-btn" title="从文件空间打开…" v-html="icons.open" @click="openFromVfs" />
       <label class="os-tb-btn local-open" title="从本机打开">
-        本机…
+        <span v-html="icons.laptop" />
         <input type="file" accept="application/pdf" hidden @change="onPicker" />
       </label>
       <span class="os-tb-sep" />
-      <button class="os-tb-btn" :disabled="pageNum <= 1" title="上一页" @click="nav(-1)">‹</button>
+      <button class="os-tb-btn" :disabled="pageNum <= 1" title="上一页" v-html="icons.chevL" @click="nav(-1)" />
       <span class="pg">{{ pageCount ? `${pageNum} / ${pageCount}` : '—' }}</span>
-      <button class="os-tb-btn" :disabled="pageNum >= pageCount" title="下一页" @click="nav(1)">›</button>
+      <button class="os-tb-btn" :disabled="pageNum >= pageCount" title="下一页" v-html="icons.chevR" @click="nav(1)" />
       <span class="os-tb-sep" />
-      <button class="os-tb-btn" title="缩小" @click="zoom(-0.2)">－</button>
+      <button class="os-tb-btn" title="缩小" v-html="icons.zoomOut" @click="zoom(-0.2)" />
       <span class="pg">{{ Math.round(scale * 100) }}%</span>
-      <button class="os-tb-btn" title="放大" @click="zoom(0.2)">＋</button>
+      <button class="os-tb-btn" title="放大" v-html="icons.zoomIn" @click="zoom(0.2)" />
       <span class="grow" />
       <span class="fname">{{ fileName }}</span>
     </div>
@@ -137,12 +144,6 @@ onBeforeUnmount(() => doc?.destroy())
       <div v-else-if="error" class="drop-hint err">{{ error }}</div>
       <div v-else class="canvas-wrap"><canvas ref="canvasEl" /></div>
     </div>
-
-    <OsFilePicker
-      v-if="pickerOpen" mode="open" title="打开 PDF 文稿"
-      :default-dir="`/home/${session.user!.username}/文档`" :exts="['pdf']"
-      @confirm="openVfs" @cancel="pickerOpen = false"
-    />
   </div>
 </template>
 

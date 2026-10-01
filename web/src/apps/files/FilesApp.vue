@@ -8,7 +8,7 @@ import { useApps } from '../../stores/apps'
 import { useSession } from '../../stores/session'
 import { fsApi, downloadFile, fetchRawBlob, type VFile } from '../../api/client'
 import { bus } from '../../bus/bus'
-import { OsInput, OsEmpty, OsModal, toast, useMenu, menuPos } from '../../ui'
+import { OsInput, OsButton, OsEmpty, OsModal, toast, useMenu, menuPos, icons, resolveFileDialog, type FileDialogRequest } from '../../ui'
 import { openPath, openWithApps, isImage, fileEmoji, kindOf, extOf, fmtSize, IMAGE_EXTS, parentOf } from '../openWith'
 import { renderMarkdown } from '../../lib/md'
 import { parseCSV } from '../sheets/engine'
@@ -21,7 +21,14 @@ const session = useSession()
 const home = `/home/${session.user!.username}`
 const trashPath = home + '/.Trash'
 
-const path = ref(props.win.props?.path || home)
+// —— 文件选择模式（其他应用经 ui/fileDialog 服务唤起本窗口充当「打开/存储」对话框） ——
+// 本窗口仍是完整可拖动的文件管理窗，仅底部状态栏换成选择栏、双击文件=确认。
+const pickerReq: FileDialogRequest | undefined = props.win.props?.picker
+const path = ref(props.win.props?.path || pickerReq?.defaultDir || home)
+const pickName = ref(pickerReq?.defaultName || '')
+const pickOverwrite = ref(false) // save 模式重名：第一次点变「替换」，再点才覆盖
+watch([pickName, path], () => { pickOverwrite.value = false })
+onBeforeUnmount(() => { if (pickerReq) resolveFileDialog(pickerReq.reqId, null) }) // 关窗=取消（幂等）
 const entries = ref<VFile[]>([])
 const loading = ref(true)
 const query = ref('')
@@ -179,8 +186,9 @@ onBeforeUnmount(() => {
 })
 
 // 融合窗体标题行：当前文件夹名 + 已编辑标记，同步给 Dock/切换
+// （选择模式保持 fileDialog 传入的对话框标题，不随目录切换变化）
 const curTitle = computed(() => (path.value === home ? '主页' : path.value === trashPath ? '废纸篓' : baseName(path.value)))
-watch(curTitle, (t) => windows.setTitle(props.win.id, t), { immediate: true })
+watch(curTitle, (t) => { if (!pickerReq) windows.setTitle(props.win.id, t) }, { immediate: true })
 
 // ---- 排序与过滤 ----
 const baseCmp = computed(() => {
@@ -194,11 +202,17 @@ const baseCmp = computed(() => {
 })
 function sortedOf(list: VFile[]): VFile[] {
   const q = query.value.trim().toLowerCase()
-  const filtered = q ? list.filter((f) => f.path.toLowerCase().includes(q)) : list
+  let filtered = q ? list.filter((f) => f.path.toLowerCase().includes(q)) : list
+  // 选择模式 open + 扩展名过滤：只留目录与匹配后缀的文件
+  if (pickerReq?.mode === 'open' && pickerReq.exts?.length) {
+    filtered = filtered.filter((f) => f.isDir || pickerReq.exts!.includes(extOf(f.path)))
+  }
   return [...filtered].sort((a, b) => Number(b.isDir) - Number(a.isDir) || baseCmp.value(a, b))
 }
 const shown = computed(() => sortedOf(entries.value))
 const colShown = (p: string) => sortedOf(colCache.get(p) || [])
+// 空目录/无匹配时切到 flex 居中布局，空状态文案垂直居中（网格/列表会把内容顶在上方）
+const contentClass = computed(() => (!shown.value.length && view.value !== 'column' ? 'view-empty' : 'view-' + view.value))
 
 // 选中项（跨分栏缓存查找）
 const selectedFile = computed(() => {
@@ -250,8 +264,39 @@ const crumbs = computed(() => {
 // ---- 打开 / 快速预览 ----
 async function openFile(f: VFile) {
   if (f.isDir) { enter(f.path); return }
+  if (pickerReq) {
+    // 选择模式：open 双击文件=确认选择；save 双击=带出文件名
+    if (pickerReq.mode === 'open') confirmPick()
+    else pickName.value = baseName(f.path)
+    return
+  }
   if (IMAGE_EXTS.includes(extOf(f.path))) { quickLook(f); return }
   openPath(f.path)
+}
+
+// ---- 选择模式（fileDialog）：目标路径 / 重名确认 / 回执 ----
+const pickSel = computed(() => (selectedFile.value && !selectedFile.value.isDir ? selectedFile.value : null))
+const pickTarget = computed(() => {
+  if (!pickerReq) return ''
+  if (pickerReq.mode === 'open') return pickSel.value?.path || ''
+  const n = pickName.value.trim()
+  return n && n !== '.' && n !== '..' ? path.value.replace(/\/$/, '') + '/' + n : ''
+})
+const pickExists = computed(() => {
+  if (pickerReq?.mode !== 'save' || !pickTarget.value) return false
+  return entries.value.some((f) => !f.isDir && f.path === pickTarget.value)
+})
+const canPick = computed(() => !!pickTarget.value)
+function confirmPick() {
+  if (!pickerReq || !pickTarget.value) return
+  // save 模式重名：第一次点变更为「替换」，再点才真正覆盖（macOS 行为）
+  if (pickerReq.mode === 'save' && pickExists.value && !pickOverwrite.value) { pickOverwrite.value = true; return }
+  resolveFileDialog(pickerReq.reqId, pickTarget.value)
+  windows.close(props.win.id)
+}
+function cancelPick() {
+  if (pickerReq) resolveFileDialog(pickerReq.reqId, null)
+  windows.close(props.win.id)
 }
 function openSelection() {
   for (const p of selPaths.value) {
@@ -531,6 +576,7 @@ function onKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape') { setSelection([]); return }
   if (e.key === 'Enter') {
     e.preventDefault()
+    if (pickerReq) { if (canPick.value) confirmPick(); return } // 选择模式：回车=确认
     if (selPaths.value.length === 1) startRename(primary.value)
     else openSelection()
     return
@@ -702,7 +748,7 @@ watch(() => columnPaths.value.length, async () => {
 
       <!-- 排序方式 -->
       <div class="tb-anchor">
-        <button class="os-tb-btn" data-os-menu-anchor title="排序方式" @click="sortMenu.toggle()">⇅</button>
+        <button class="os-tb-btn" data-os-menu-anchor title="排序方式" v-html="icons.sort" @click="sortMenu.toggle()" />
         <div v-if="sortMenu.isOpen" class="os-menu os-menu-root sort-menu">
           <div class="grp">排序方式</div>
           <button :class="{ check: sortBy === 'name' }" @click="setSort('name'); sortMenu.close()">名称<span v-if="sortBy === 'name'" class="hint">{{ sortDir === 1 ? '↑' : '↓' }}</span></button>
@@ -718,7 +764,7 @@ watch(() => columnPaths.value.length, async () => {
 
       <!-- 更多操作 -->
       <div class="tb-anchor">
-        <button class="os-tb-btn" data-os-menu-anchor title="更多操作" @click="moreMenu.toggle()">⋯</button>
+        <button class="os-tb-btn" data-os-menu-anchor title="更多操作" v-html="icons.more" @click="moreMenu.toggle()" />
         <div v-if="moreMenu.isOpen" class="os-menu os-menu-root more-menu">
           <button @click="moreMenu.close(); newFile('md')">新建 Markdown 文稿</button>
           <button @click="moreMenu.close(); newFile('csv')">新建 CSV 表格</button>
@@ -765,10 +811,10 @@ watch(() => columnPaths.value.length, async () => {
         </button>
       </aside>
 
-      <main ref="contentEl" class="content" :class="'view-' + view" tabindex="0" @keydown="onKeydown"
+      <main ref="contentEl" class="content" :class="contentClass" tabindex="0" @keydown="onKeydown"
         @pointerdown.self="setSelection([])" @contextmenu="openCtx($event, 'blank')">
         <div v-if="loading" class="state">加载中…</div>
-        <OsEmpty v-else-if="view !== 'column' && !shown.length" :text="query ? '没有匹配的文件' : (path === trashPath ? '废纸篓为空' : '此文件夹为空')" icon="📂" />
+        <OsEmpty v-else-if="view !== 'column' && !shown.length" :text="query ? '没有匹配的文件' : (path === trashPath ? '废纸篓为空' : '此文件夹为空')" />
 
         <!-- 图标视图 -->
         <template v-else-if="view === 'icon'">
@@ -784,7 +830,7 @@ watch(() => columnPaths.value.length, async () => {
               <img v-if="!f.isDir && isImage(f) && blobUrl(f.path)" class="thumb" :src="blobUrl(f.path)" alt="">
               <template v-else>{{ f.isDir ? '📁' : fileEmoji(f.path) }}</template>
             </div>
-            <input v-if="renaming === f.path" ref="renameEl" v-model="renameTo" class="rn-input"
+            <input v-if="renaming === f.path" ref="renameEl" v-model="renameTo" class="rn-input os-flat"
               @keydown.enter.prevent="commitRename" @keydown.esc.stop.prevent="renaming = ''" @blur="commitRename" @click.stop />
             <div v-else class="name" :title="baseName(f.path)">{{ baseName(f.path) }}</div>
           </div>
@@ -812,7 +858,7 @@ watch(() => columnPaths.value.length, async () => {
               <td class="tn">
                 <img v-if="!f.isDir && isImage(f) && blobUrl(f.path)" class="lt" :src="blobUrl(f.path)" alt="">
                 <template v-else>{{ f.isDir ? '📁' : fileEmoji(f.path) }}</template>
-                <input v-if="renaming === f.path" ref="renameEl" v-model="renameTo" class="rn-input"
+                <input v-if="renaming === f.path" ref="renameEl" v-model="renameTo" class="rn-input os-flat"
                   @keydown.enter.prevent="commitRename" @keydown.esc.stop.prevent="renaming = ''" @blur="commitRename" @click.stop />
                 <template v-else>{{ baseName(f.path) }}</template>
               </td>
@@ -837,7 +883,7 @@ watch(() => columnPaths.value.length, async () => {
               >
                 <img v-if="!f.isDir && isImage(f) && blobUrl(f.path)" class="lt" :src="blobUrl(f.path)" alt="">
                 <span v-else class="ci">{{ f.isDir ? '📁' : fileEmoji(f.path) }}</span>
-                <input v-if="renaming === f.path" ref="renameEl" v-model="renameTo" class="rn-input"
+                <input v-if="renaming === f.path" ref="renameEl" v-model="renameTo" class="rn-input os-flat"
                   @keydown.enter.prevent="commitRename" @keydown.esc.stop.prevent="renaming = ''" @blur="commitRename" @click.stop />
                 <span v-else class="cn">{{ baseName(f.path) }}</span>
                 <span class="ct">{{ f.isDir ? '' : fmtSize(f.size) }}</span>
@@ -884,8 +930,21 @@ watch(() => columnPaths.value.length, async () => {
       </main>
     </div>
 
-    <!-- 底部：路径栏（可点面包屑）+ 项目数与可用空间 -->
-    <footer class="status">
+    <!-- 底部：选择模式=打开/存储栏；普通模式=路径栏（可点面包屑）+ 项目数与可用空间 -->
+    <footer v-if="pickerReq" class="status pick-foot">
+      <template v-if="pickerReq.mode === 'save'">
+        <label class="pk-lb">存储为：</label>
+        <OsInput v-model="pickName" placeholder="文件名" class="pk-name" @keydown.enter.prevent="confirmPick" />
+        <span v-if="pickExists" class="pk-warn">{{ pickOverwrite ? '再点一次「替换」覆盖同名文件' : '同名文件已存在' }}</span>
+      </template>
+      <span v-else class="pk-sel">{{ pickSel ? baseName(pickSel.path) : '' }}</span>
+      <span class="grow" />
+      <OsButton size="sm" @click="cancelPick">取消</OsButton>
+      <OsButton size="sm" variant="primary" :disabled="!canPick" @click="confirmPick">
+        {{ pickerReq.mode === 'open' ? '打开' : pickExists && !pickOverwrite ? '替换' : '存储' }}
+      </OsButton>
+    </footer>
+    <footer v-else class="status">
       <nav class="pathbar">
         <template v-for="(c, i) in crumbs" :key="c.path">
           <button :class="{ cur: i === crumbs.length - 1 }" @click="enter(c.path)">{{ c.label }}</button>
@@ -1040,6 +1099,8 @@ watch(() => columnPaths.value.length, async () => {
 .content.view-list { display: block; }
 .content.view-column { display: flex; padding: 0; overflow-x: auto; overflow-y: hidden; }
 .content.view-gallery { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+/* 空目录/无匹配：flex 居中放空状态文案 */
+.content.view-empty { display: flex; align-items: center; justify-content: center; }
 .state { padding: 40px; text-align: center; color: var(--os-text-secondary); grid-column: 1 / -1; }
 
 /* 图标视图 */
@@ -1148,6 +1209,13 @@ watch(() => columnPaths.value.length, async () => {
 .pathbar button:hover { background: var(--os-hover); color: var(--os-text); }
 .pathbar button.cur { color: var(--os-text); font-weight: 600; }
 .psep { opacity: .5; }
+
+/* 选择模式底部栏（打开/存储对话框形态） */
+.pick-foot { gap: 8px; }
+.pk-lb { font-size: 12.5px; color: var(--os-text-secondary); white-space: nowrap; }
+.pk-name { width: 240px; }
+.pk-sel { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pk-warn { font-size: 11.5px; color: #e5a00d; white-space: nowrap; }
 
 /* 快速预览 */
 .ql {

@@ -1,18 +1,19 @@
 <script setup lang="ts">
 // 文档应用（Markdown 优先）：编辑 / 分栏 / 预览三态，读写 VFS 文件（默认 .md）。
-// 打开…/存储/另存为走 OsFilePicker；已有文件 1.5s 防抖自动保存。
+// 打开…/存储/另存为走 fileDialog（复用文件管理窗口选择）；已有文件 1.5s 防抖自动保存。
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { WinState } from '../../stores/windows'
 import { useWindows } from '../../stores/windows'
 import { useSession } from '../../stores/session'
 import { fsApi } from '../../api/client'
 import { bus } from '../../bus/bus'
-import { OsFilePicker, toast } from '../../ui'
+import { fileDialog, icons, toast } from '../../ui'
 import { renderMarkdown } from '../../lib/md'
 
 const props = defineProps<{ win: WinState }>()
 const windows = useWindows()
 const session = useSession()
+const docsDir = `/home/${session.user!.username}/文档`
 
 const initialPath: string = props.win.props?.path || ''
 const filePath = ref('')
@@ -20,7 +21,6 @@ const text = ref('')
 const dirty = ref(false)
 const saveHint = ref('')
 const mode = ref<'edit' | 'split' | 'preview'>('split')
-const picker = ref<null | 'open' | 'save'>(null)
 const editorEl = ref<HTMLTextAreaElement>()
 
 const ext = computed(() => filePath.value.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase() || '')
@@ -71,26 +71,28 @@ async function writeOut() {
 
 function save() {
   if (filePath.value) { writeOut(); return }
-  picker.value = 'save'
+  openSaveDialog()
 }
-function saveAs() { picker.value = 'save' }
+function saveAs() { openSaveDialog() }
 
-async function onPickerConfirm(p: string) {
-  const m = picker.value
-  picker.value = null
-  if (m === 'open') {
-    try {
-      const d = await fsApi.read(p)
-      if (d.isBinary) { toast('二进制文件，请在文件应用中预览', { type: 'error' }); return }
-      filePath.value = p
-      text.value = d.content
-      dirty.value = false
-      if (!isMd.value) mode.value = 'edit'
-    } catch (e: any) { toast('打开失败：' + e.message, { type: 'error' }) }
-  } else {
+// 打开/存储选择：复用文件管理窗口（可拖动、与访达一致的浏览体验）
+async function openOpenDialog() {
+  const p = await fileDialog({ mode: 'open', title: '打开文稿', defaultDir: docsDir })
+  if (!p) return
+  try {
+    const d = await fsApi.read(p)
+    if (d.isBinary) { toast('二进制文件，请在文件应用中预览', { type: 'error' }); return }
     filePath.value = p
-    await writeOut()
-  }
+    text.value = d.content
+    dirty.value = false
+    if (!isMd.value) mode.value = 'edit'
+  } catch (e: any) { toast('打开失败：' + e.message, { type: 'error' }) }
+}
+async function openSaveDialog() {
+  const p = await fileDialog({ mode: 'save', title: '存储文稿为', defaultDir: docsDir, defaultName: fileName.value })
+  if (!p) return
+  filePath.value = p
+  await writeOut()
 }
 
 let autoTimer = 0
@@ -113,7 +115,7 @@ function onKey(e: KeyboardEvent) {
     else save()
   } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'o') {
     e.preventDefault()
-    picker.value = 'open'
+    openOpenDialog()
   }
 }
 
@@ -141,40 +143,34 @@ function exportFile() {
   <div class="docs" tabindex="0" @keydown="onKey">
     <!-- 融合窗体工具栏：整条可拖动窗口（data-os-drag 事件委托，控件自身不参与） -->
     <div class="os-tb" data-os-drag>
-      <button class="os-tb-btn" title="打开…（⌘O）" @click="picker = 'open'">打开…</button>
-      <button class="os-tb-btn" title="存储（⌘S）" @click="save">存储</button>
-      <button class="os-tb-btn" title="另存为…（⇧⌘S）" @click="saveAs">另存为…</button>
+      <button class="os-tb-btn" title="打开…（⌘O）" v-html="icons.open" @click="openOpenDialog" />
+      <button class="os-tb-btn" title="存储（⌘S）" v-html="icons.save" @click="save" />
+      <button class="os-tb-btn" title="另存为…（⇧⌘S）" v-html="icons.saveAs" @click="saveAs" />
       <span class="os-tb-sep" />
       <div class="tb-title" :title="filePath || '尚未存储'">
         <span v-if="dirty" class="dot" />{{ fileName }}
       </div>
       <span class="grow" />
       <div v-if="isMd" class="os-seg">
-        <button class="os-seg-btn" :class="{ on: mode === 'edit' }" title="编辑" @click="mode = 'edit'">编辑</button>
-        <button class="os-seg-btn" :class="{ on: mode === 'split' }" title="分栏" @click="mode = 'split'">分栏</button>
-        <button class="os-seg-btn" :class="{ on: mode === 'preview' }" title="预览" @click="mode = 'preview'">预览</button>
+        <button class="os-seg-btn" :class="{ on: mode === 'edit' }" title="编辑" v-html="icons.edit" @click="mode = 'edit'" />
+        <button class="os-seg-btn" :class="{ on: mode === 'split' }" title="分栏" v-html="icons.split" @click="mode = 'split'" />
+        <button class="os-seg-btn" :class="{ on: mode === 'preview' }" title="预览" v-html="icons.eye" @click="mode = 'preview'" />
       </div>
       <span class="os-tb-sep" />
       <span class="meta">{{ saveHint || (dirty ? '未存储' : '') }}</span>
       <span class="meta dim">{{ wordCount }} 字</span>
-      <button class="os-tb-btn" title="导出到本机" @click="exportFile">导出</button>
+      <button class="os-tb-btn" title="导出到本机" v-html="icons.export" @click="exportFile" />
     </div>
 
     <div class="main" :class="'mode-' + mode">
       <textarea
         v-show="mode !== 'preview'"
-        ref="editorEl" v-model="text" class="editor" spellcheck="false"
+        ref="editorEl" v-model="text" class="editor os-flat" spellcheck="false"
         placeholder="# 开始输入 Markdown…"
         @input="onInput" @keydown="onTab"
       />
       <div v-show="mode !== 'edit'" class="preview md-body" v-html="html" />
     </div>
-
-    <OsFilePicker
-      v-if="picker" :mode="picker" :title="picker === 'open' ? '打开文稿' : '存储文稿为'"
-      :default-dir="`/home/${session.user!.username}/文档`" :default-name="fileName"
-      @confirm="onPickerConfirm" @cancel="picker = null"
-    />
   </div>
 </template>
 

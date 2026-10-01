@@ -23,6 +23,9 @@ import AppIcon from './AppIcon.vue'
 export { toast, toastState } from './toast'
 export type { ToastType, ToastItem } from './toast'
 export { useMenu, openMenu, closeMenu, installMenuGuard, menuPos } from './menu'
+export { fileDialog, resolveFileDialog } from './fileDialog'
+export type { FileDialogRequest } from './fileDialog'
+export { icons } from './icons'
 // OsTable 列定义类型：宿主应用以强类型声明列（export type 不产生运行时代码）
 export type { TableColumn } from './OsTable.vue'
 

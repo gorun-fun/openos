@@ -7,12 +7,13 @@ import { useWindows } from '../../stores/windows'
 import { useSession } from '../../stores/session'
 import { fsApi } from '../../api/client'
 import { bus } from '../../bus/bus'
-import { OsFilePicker, toast } from '../../ui'
+import { fileDialog, icons, toast } from '../../ui'
 import { parseDeck, serializeDeck } from './format'
 
 const props = defineProps<{ win: WinState }>()
 const windows = useWindows()
 const session = useSession()
+const docsDir = `/home/${session.user!.username}/文档`
 
 const initialPath: string = props.win.props?.path || ''
 const filePath = ref('')
@@ -22,7 +23,6 @@ const playing = ref(false)
 const theme = ref<'light' | 'dark'>('light')
 const dirty = ref(false)
 const saveHint = ref('')
-const picker = ref<null | 'open' | 'save'>(null)
 const canvasEl = ref<HTMLDivElement>()
 
 const fileName = computed(() => filePath.value ? filePath.value.split('/').pop()! : '未命名演示.html')
@@ -114,29 +114,32 @@ async function writeOut() {
 }
 function save() {
   if (filePath.value) { writeOut(); return }
-  picker.value = 'save'
+  openSaveDialog()
 }
-async function onPickerConfirm(p: string) {
-  const m = picker.value
-  picker.value = null
-  if (m === 'open') {
-    try {
-      const d = await fsApi.read(p)
-      if (d.isBinary) { toast('二进制文件无法打开', { type: 'error' }); return }
-      const pages = parseDeck(d.content)
-      if (pages.length) {
-        slides.value = pages
-        cur.value = 0
-        dirty.value = false
-        await nextTick()
-        if (canvasEl.value) canvasEl.value.innerHTML = slides.value[0] || ''
-      }
-      filePath.value = p
-    } catch (e: any) { toast('打开失败：' + e.message, { type: 'error' }) }
-  } else {
+
+// 打开/存储选择：复用文件管理窗口（可拖动、与访达一致的浏览体验）
+async function openOpenDialog() {
+  const p = await fileDialog({ mode: 'open', title: '打开演示', defaultDir: docsDir, exts: ['html', 'htm'] })
+  if (!p) return
+  try {
+    const d = await fsApi.read(p)
+    if (d.isBinary) { toast('二进制文件无法打开', { type: 'error' }); return }
+    const pages = parseDeck(d.content)
+    if (pages.length) {
+      slides.value = pages
+      cur.value = 0
+      dirty.value = false
+      await nextTick()
+      if (canvasEl.value) canvasEl.value.innerHTML = slides.value[0] || ''
+    }
     filePath.value = p
-    await writeOut()
-  }
+  } catch (e: any) { toast('打开失败：' + e.message, { type: 'error' }) }
+}
+async function openSaveDialog() {
+  const p = await fileDialog({ mode: 'save', title: '存储演示为', defaultDir: docsDir, defaultName: fileName.value })
+  if (!p) return
+  filePath.value = p
+  await writeOut()
 }
 
 let autoTimer = 0
@@ -157,8 +160,8 @@ function exportFile() {
 }
 
 function onKey(e: KeyboardEvent) {
-  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') { e.preventDefault(); if (e.shiftKey) picker.value = 'save'; else save(); return }
-  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'o') { e.preventDefault(); picker.value = 'open'; return }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') { e.preventDefault(); if (e.shiftKey) openSaveDialog(); else save(); return }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'o') { e.preventDefault(); openOpenDialog(); return }
   if (!playing.value) return
   if (e.key === 'ArrowRight' || e.key === ' ') { cur.value = Math.min(cur.value + 1, slides.value.length - 1); e.preventDefault() }
   else if (e.key === 'ArrowLeft') { cur.value = Math.max(cur.value - 1, 0); e.preventDefault() }
@@ -188,23 +191,23 @@ const fmtGroups: { cmd: string; val?: string; label: string; title: string; styl
   <div class="slides" tabindex="0" @keydown="onKey">
     <!-- 融合窗体工具栏：整条可拖动窗口（data-os-drag 事件委托，控件自身不参与） -->
     <div class="os-tb" data-os-drag>
-      <button class="os-tb-btn" title="打开…（⌘O）" @click="picker = 'open'">打开…</button>
-      <button class="os-tb-btn" title="存储（⌘S）" @click="save">存储</button>
-      <button class="os-tb-btn" title="另存为…（⇧⌘S）" @click="picker = 'save'">另存为…</button>
+      <button class="os-tb-btn" title="打开…（⌘O）" v-html="icons.open" @click="openOpenDialog" />
+      <button class="os-tb-btn" title="存储（⌘S）" v-html="icons.save" @click="save" />
+      <button class="os-tb-btn" title="另存为…（⇧⌘S）" v-html="icons.saveAs" @click="openSaveDialog" />
       <span class="os-tb-sep" />
-      <button class="os-tb-btn" title="新建一页" @click="addSlide">＋页</button>
-      <button class="os-tb-btn" title="删除当前页" @click="removeSlide">－页</button>
-      <button class="os-tb-btn" title="上移一页" @click="move(-1)">◀</button>
-      <button class="os-tb-btn" title="下移一页" @click="move(1)">▶</button>
+      <button class="os-tb-btn" title="新建一页" v-html="icons.addPage" @click="addSlide" />
+      <button class="os-tb-btn" title="删除当前页" v-html="icons.delPage" @click="removeSlide" />
+      <button class="os-tb-btn" title="上移一页" v-html="icons.chevL" @click="move(-1)" />
+      <button class="os-tb-btn" title="下移一页" v-html="icons.chevR" @click="move(1)" />
       <span class="os-tb-sep" />
       <div class="os-seg">
-        <button class="os-seg-btn" :class="{ on: theme === 'light' }" title="浅色主题" @click="theme = 'light'; dirty = true; scheduleAutosave()">浅色</button>
-        <button class="os-seg-btn" :class="{ on: theme === 'dark' }" title="深色主题" @click="theme = 'dark'; dirty = true; scheduleAutosave()">深色</button>
+        <button class="os-seg-btn" :class="{ on: theme === 'light' }" title="浅色主题" v-html="icons.sun" @click="theme = 'light'; dirty = true; scheduleAutosave()" />
+        <button class="os-seg-btn" :class="{ on: theme === 'dark' }" title="深色主题" v-html="icons.moon" @click="theme = 'dark'; dirty = true; scheduleAutosave()" />
       </div>
       <span class="grow" />
       <span class="meta">{{ saveHint || (dirty ? '未存储' : '') }}</span>
-      <button class="os-tb-btn" title="导出独立 HTML（双击即可放映）" @click="exportFile">导出</button>
-      <button class="os-tb-btn primary" title="播放演示（方向键翻页，Esc 退出）" @click="playing = true">▶ 演示</button>
+      <button class="os-tb-btn" title="导出独立 HTML（双击即可放映）" v-html="icons.export" @click="exportFile" />
+      <button class="os-tb-btn primary" title="播放演示（方向键翻页，Esc 退出）" v-html="icons.play" @click="playing = true" />
     </div>
 
     <div class="main">
@@ -230,7 +233,7 @@ const fmtGroups: { cmd: string; val?: string; label: string; title: string; styl
           </template>
         </div>
         <div class="canvas-host">
-          <div ref="canvasEl" class="sc canvas" :class="{ dark: theme === 'dark' }" contenteditable="true" spellcheck="false" @input="onEdit" />
+          <div ref="canvasEl" class="sc canvas os-flat" :class="{ dark: theme === 'dark' }" contenteditable="true" spellcheck="false" @input="onEdit" />
         </div>
         <div class="pager">{{ cur + 1 }} / {{ slides.length }}</div>
       </div>
@@ -242,19 +245,12 @@ const fmtGroups: { cmd: string; val?: string; label: string; title: string; styl
         <div class="sc play-slide" v-html="slides[cur]" />
       </div>
       <div class="play-bar">
-        <button class="os-tb-btn" @click="cur = Math.max(0, cur - 1)">‹</button>
+        <button class="os-tb-btn" title="上一页" v-html="icons.chevL" @click="cur = Math.max(0, cur - 1)" />
         <span>{{ cur + 1 }} / {{ slides.length }} · 方向键翻页 · Esc 退出</span>
-        <button class="os-tb-btn" @click="cur = Math.min(slides.length - 1, cur + 1)">›</button>
-        <button class="os-tb-btn" @click="playing = false">退出</button>
+        <button class="os-tb-btn" title="下一页" v-html="icons.chevR" @click="cur = Math.min(slides.length - 1, cur + 1)" />
+        <button class="os-tb-btn" title="退出演示" v-html="icons.close" @click="playing = false" />
       </div>
     </div>
-
-    <OsFilePicker
-      v-if="picker" :mode="picker" :title="picker === 'open' ? '打开演示' : '存储演示为'"
-      :default-dir="`/home/${session.user!.username}/文档`" :default-name="fileName"
-      :exts="picker === 'open' ? ['html', 'htm'] : undefined"
-      @confirm="onPickerConfirm" @cancel="picker = null"
-    />
   </div>
 </template>
 

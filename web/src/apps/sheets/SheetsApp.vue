@@ -1,18 +1,19 @@
 <script setup lang="ts">
 // 表格应用（CSV/TSV）：公式引擎 + Excel 剪贴板互通 + 动态行列 + 自动保存。
-// 打开…/存储/另存为走 OsFilePicker；按扩展名区分逗号/制表符分隔。
+// 打开…/存储/另存为走 fileDialog（复用文件管理窗口选择）；按扩展名区分逗号/制表符分隔。
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { WinState } from '../../stores/windows'
 import { useWindows } from '../../stores/windows'
 import { useSession } from '../../stores/session'
 import { fsApi } from '../../api/client'
 import { bus } from '../../bus/bus'
-import { OsFilePicker, toast } from '../../ui'
+import { fileDialog, icons, toast } from '../../ui'
 import { colName, cellName, evalCell, parseCSV } from './engine'
 
 const props = defineProps<{ win: WinState }>()
 const windows = useWindows()
 const session = useSession()
+const sheetsDir = `/home/${session.user!.username}/表格`
 
 const initialPath: string = props.win.props?.path || ''
 const filePath = ref('')
@@ -29,7 +30,6 @@ const editInCell = ref(false)
 const editVal = ref('')
 const dirty = ref(false)
 const saveHint = ref('')
-const picker = ref<null | 'open' | 'save'>(null)
 const cellEl = ref<HTMLInputElement>()
 const fxEl = ref<HTMLInputElement>()
 const rootEl = ref<HTMLElement>()
@@ -185,7 +185,7 @@ function onGridKey(e: KeyboardEvent) {
     return
   }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') { e.preventDefault(); save(); return }
-  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'o') { e.preventDefault(); picker.value = 'open'; return }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'o') { e.preventDefault(); openOpenDialog(); return }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.shiftKey ? redo() : undo(); e.preventDefault(); return }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') { redo(); e.preventDefault(); return }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') { copyRange(); e.preventDefault(); return }
@@ -295,25 +295,28 @@ async function writeOut() {
 }
 function save() {
   if (filePath.value) { writeOut(); return }
-  picker.value = 'save'
+  openSaveDialog()
 }
-async function onPickerConfirm(p: string) {
-  const m = picker.value
-  picker.value = null
-  if (m === 'open') {
-    try {
-      const d = await fsApi.read(p)
-      if (d.isBinary) { toast('二进制表格文件无法打开', { type: 'error' }); return }
-      filePath.value = p
-      loadText(d.content)
-      dirty.value = false
-      undoStack.value = []
-      redoStack.value = []
-    } catch (e: any) { toast('打开失败：' + e.message, { type: 'error' }) }
-  } else {
+
+// 打开/存储选择：复用文件管理窗口（可拖动、与访达一致的浏览体验）
+async function openOpenDialog() {
+  const p = await fileDialog({ mode: 'open', title: '打开表格', defaultDir: sheetsDir, exts: ['csv', 'tsv'] })
+  if (!p) return
+  try {
+    const d = await fsApi.read(p)
+    if (d.isBinary) { toast('二进制表格文件无法打开', { type: 'error' }); return }
     filePath.value = p
-    await writeOut()
-  }
+    loadText(d.content)
+    dirty.value = false
+    undoStack.value = []
+    redoStack.value = []
+  } catch (e: any) { toast('打开失败：' + e.message, { type: 'error' }) }
+}
+async function openSaveDialog() {
+  const p = await fileDialog({ mode: 'save', title: '存储表格为', defaultDir: sheetsDir, defaultName: fileName.value })
+  if (!p) return
+  filePath.value = p
+  await writeOut()
 }
 
 let autoTimer = 0
@@ -339,25 +342,25 @@ function exportFile() {
   <div ref="rootEl" class="sheets" tabindex="0" @keydown="onGridKey">
     <!-- 融合窗体工具栏：整条可拖动窗口（data-os-drag 事件委托，控件自身不参与） -->
     <div class="os-tb" data-os-drag>
-      <button class="os-tb-btn" title="打开…（⌘O）" @click="picker = 'open'">打开…</button>
-      <button class="os-tb-btn" title="存储（⌘S）" @click="save">存储</button>
-      <button class="os-tb-btn" title="另存为…" @click="picker = 'save'">另存为…</button>
+      <button class="os-tb-btn" title="打开…（⌘O）" v-html="icons.open" @click="openOpenDialog" />
+      <button class="os-tb-btn" title="存储（⌘S）" v-html="icons.save" @click="save" />
+      <button class="os-tb-btn" title="另存为…（⇧⌘S）" v-html="icons.saveAs" @click="openSaveDialog" />
       <span class="os-tb-sep" />
       <span class="cellpos mono">{{ rangeName }}</span>
       <input v-if="editing && !editInCell" ref="fxEl" v-model="editVal" class="fx mono" spellcheck="false"
         @keydown.enter.prevent="commitEdit" @keydown.esc="editing = false" @blur="commitEdit" />
       <input v-else class="fx mono" :value="selRaw" placeholder="点击单元格或输入公式，如 =SUM(A1:A5)" readonly @pointerdown="startEdit(selRaw, false)" />
       <span class="os-tb-sep" />
-      <button class="os-tb-btn" title="撤销（⌘Z）" @click="undo">↩</button>
-      <button class="os-tb-btn" title="重做（⌘Y）" @click="redo">↪</button>
+      <button class="os-tb-btn" title="撤销（⌘Z）" v-html="icons.undo" @click="undo" />
+      <button class="os-tb-btn" title="重做（⌘Y）" v-html="icons.redo" @click="redo" />
       <span class="os-tb-sep" />
-      <button class="os-tb-btn" title="在上方插入行" @click="insertRow">＋行</button>
-      <button class="os-tb-btn" title="在左侧插入列" @click="insertCol">＋列</button>
-      <button class="os-tb-btn" title="删除选中行" @click="deleteRow">－行</button>
-      <button class="os-tb-btn" title="删除选中列" @click="deleteCol">－列</button>
+      <button class="os-tb-btn" title="在上方插入行" v-html="icons.insRow" @click="insertRow" />
+      <button class="os-tb-btn" title="在左侧插入列" v-html="icons.insCol" @click="insertCol" />
+      <button class="os-tb-btn" title="删除选中行" v-html="icons.delRow" @click="deleteRow" />
+      <button class="os-tb-btn" title="删除选中列" v-html="icons.delCol" @click="deleteCol" />
       <span class="grow" />
       <span class="meta">{{ saveHint || (dirty ? '未存储' : '') }}</span>
-      <button class="os-tb-btn" title="导出到本机" @click="exportFile">导出</button>
+      <button class="os-tb-btn" title="导出到本机" v-html="icons.export" @click="exportFile" />
     </div>
 
     <div class="grid-wrap">
@@ -383,7 +386,7 @@ function exportFile() {
             >
               <input
                 v-if="editing && editInCell && sel.r === r - 1 && sel.c === c - 1"
-                ref="cellEl" v-model="editVal" class="cell-input mono" spellcheck="false"
+                ref="cellEl" v-model="editVal" class="cell-input mono os-flat" spellcheck="false"
                 @keydown.enter.prevent="commitEdit"
                 @keydown.esc="editing = false"
                 @blur="commitEdit"
@@ -398,13 +401,6 @@ function exportFile() {
     <footer class="status">
       <span>{{ rangeStats || '支持 =A1+B2、=SUM(A1:A10)、=AVG/MIN/MAX/COUNT · Shift+方向键选区 · Ctrl+C/V 与 Excel 互通 · 边缘自动扩行扩列' }}</span>
     </footer>
-
-    <OsFilePicker
-      v-if="picker" :mode="picker" :title="picker === 'open' ? '打开表格' : '存储表格为'"
-      :default-dir="`/home/${session.user!.username}/表格`" :default-name="fileName"
-      :exts="picker === 'open' ? ['csv', 'tsv'] : undefined"
-      @confirm="onPickerConfirm" @cancel="picker = null"
-    />
   </div>
 </template>
 
