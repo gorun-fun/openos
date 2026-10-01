@@ -13,6 +13,7 @@
 //     theme: { accent: '#e91e63' },                                // 主题强调色
 //     wallpapers: [ 'linear-gradient(…)' ],                        // 壁纸注入（可选）
 //     dockOrder: ['dashboard', 'rooms'],                           // Dock 排序（可选）
+//     chrome: { rooms: 'merged' },                                  // 宿主应用窗体形态（可选）
 //     appMenus: { rooms: [{ label: '新建房态窗口', run: () => {} }] }, // 应用菜单注入
 //     widgets: { weather: { label: '天气', icon: '🌤', component: WeatherWidget } }, // 桌面小组件
 //   })
@@ -26,7 +27,7 @@ import { createPinia } from 'pinia'
 import App from './App.vue'
 import './sdk' // 注入 window.OpenOS 第三方应用 SDK（副作用）
 import './styles/base.css'
-import { builtinComponents } from './stores/apps'
+import { builtinComponents, appChrome } from './stores/apps'
 import { registerIcons, type IconDef } from './desktop/icons'
 import { shell, type ShellBrand } from './shell'
 import { setToken } from './api/client'
@@ -61,6 +62,12 @@ export interface CreateOpenOSOptions {
   appMenus?: Record<string, { label: string; run: () => void }[]>
   /** 注册自定义桌面小组件（右键菜单「添加小组件」自动出现） */
   widgets?: Record<string, Omit<WidgetDef, 'type'> & Partial<Pick<WidgetDef, 'type'>>>
+  /**
+   * 声明宿主应用的窗体外观（键 = appId）：'merged' = 融合工具栏窗体（无独立标题栏，
+   * 应用自绘工具栏承担标题行，红绿灯悬浮其上）；缺省 'default' 标准标题栏。
+   * 与 OpenOS.registerApp 的 chrome 参数同义，供编译期 apps 注册的应用声明。
+   */
+  chrome?: Record<string, 'default' | 'merged'>
 }
 
 /** 应用主题强调色：设置 --os-accent 及其派生令牌（选中/焦点/渐变），立即生效。 */
@@ -83,6 +90,7 @@ export function createOpenOS(opts: CreateOpenOSOptions = {}) {
 
   // 1. 宿主应用组件与图标注册
   Object.assign(builtinComponents, opts.apps || {})
+  if (opts.chrome) Object.assign(appChrome, opts.chrome)
   if (opts.icons) registerIcons(opts.icons)
 
   // 2. 壳配置
@@ -135,6 +143,10 @@ export { useApps } from './stores/apps'
 export { useWindows } from './stores/windows'
 export { useDesktop, DEFAULT_WALLPAPERS } from './stores/desktop'
 export { useNotes, NOTE_COLORS } from './stores/notes'
+export { useNotifications, notify } from './stores/notifications'
+export type { OsNotification, NotifyInput } from './stores/notifications'
+export { useCalendar, todayStr, REMIND_OPTIONS } from './stores/calendar'
+export type { CalEvent, RemindOffset, HolidayInfo } from './stores/calendar'
 export { shell } from './shell'
 export type { ShellBrand, ShellLogin, AppMenuItem } from './shell'
 export { registerWidget, widgetDefs, widgetDef } from './desktop/widgetRegistry'
