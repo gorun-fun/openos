@@ -58,10 +58,11 @@ function fmt(ts: number) {
 
 <template>
   <div class="notes-app">
-    <div class="os-tb notes-bar">
+    <!-- 融合窗体工具栏：整条可拖动窗口（data-os-drag 事件委托，控件自身不参与） -->
+    <div class="os-tb notes-bar" data-os-drag>
       <div class="tb-title">便签</div>
       <span class="count">{{ notes.notes.length }} 张 · 自动保存 · 钉选后桌面同步显示</span>
-      <span class="grow" data-os-drag />
+      <span class="grow" />
       <button class="os-tb-btn primary" @click="addNote">＋ 新建便签</button>
     </div>
 

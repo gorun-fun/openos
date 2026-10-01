@@ -337,7 +337,8 @@ function exportFile() {
 
 <template>
   <div ref="rootEl" class="sheets" tabindex="0" @keydown="onGridKey">
-    <div class="os-tb">
+    <!-- 融合窗体工具栏：整条可拖动窗口（data-os-drag 事件委托，控件自身不参与） -->
+    <div class="os-tb" data-os-drag>
       <button class="os-tb-btn" title="打开…（⌘O）" @click="picker = 'open'">打开…</button>
       <button class="os-tb-btn" title="存储（⌘S）" @click="save">存储</button>
       <button class="os-tb-btn" title="另存为…" @click="picker = 'save'">另存为…</button>
@@ -354,7 +355,7 @@ function exportFile() {
       <button class="os-tb-btn" title="在左侧插入列" @click="insertCol">＋列</button>
       <button class="os-tb-btn" title="删除选中行" @click="deleteRow">－行</button>
       <button class="os-tb-btn" title="删除选中列" @click="deleteCol">－列</button>
-      <span class="grow" data-os-drag />
+      <span class="grow" />
       <span class="meta">{{ saveHint || (dirty ? '未存储' : '') }}</span>
       <button class="os-tb-btn" title="导出到本机" @click="exportFile">导出</button>
     </div>

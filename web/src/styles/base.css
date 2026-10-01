@@ -125,6 +125,8 @@ button { font-family: inherit; }
   flex: none; height: 46px; display: flex; align-items: center; gap: 8px;
   padding: 0 12px 0 84px; overflow: hidden; white-space: nowrap;
   background: var(--os-sidebar); border-bottom: 1px solid var(--os-border);
+  /* 工具栏整条承担窗口拖拽（data-os-drag），禁选文字防拖动时误选 */
+  user-select: none;
 }
 .os-tb-btn {
   border: 1px solid var(--os-border-strong); background: var(--os-panel-solid); color: var(--os-text);

@@ -139,15 +139,16 @@ function exportFile() {
 
 <template>
   <div class="docs" tabindex="0" @keydown="onKey">
-    <div class="os-tb">
+    <!-- 融合窗体工具栏：整条可拖动窗口（data-os-drag 事件委托，控件自身不参与） -->
+    <div class="os-tb" data-os-drag>
       <button class="os-tb-btn" title="打开…（⌘O）" @click="picker = 'open'">打开…</button>
       <button class="os-tb-btn" title="存储（⌘S）" @click="save">存储</button>
       <button class="os-tb-btn" title="另存为…（⇧⌘S）" @click="saveAs">另存为…</button>
       <span class="os-tb-sep" />
-      <div class="tb-title" :title="filePath || '尚未存储'" data-os-drag>
+      <div class="tb-title" :title="filePath || '尚未存储'">
         <span v-if="dirty" class="dot" />{{ fileName }}
       </div>
-      <span class="grow" data-os-drag />
+      <span class="grow" />
       <div v-if="isMd" class="os-seg">
         <button class="os-seg-btn" :class="{ on: mode === 'edit' }" title="编辑" @click="mode = 'edit'">编辑</button>
         <button class="os-seg-btn" :class="{ on: mode === 'split' }" title="分栏" @click="mode = 'split'">分栏</button>

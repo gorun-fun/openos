@@ -186,7 +186,8 @@ const fmtGroups: { cmd: string; val?: string; label: string; title: string; styl
 
 <template>
   <div class="slides" tabindex="0" @keydown="onKey">
-    <div class="os-tb">
+    <!-- 融合窗体工具栏：整条可拖动窗口（data-os-drag 事件委托，控件自身不参与） -->
+    <div class="os-tb" data-os-drag>
       <button class="os-tb-btn" title="打开…（⌘O）" @click="picker = 'open'">打开…</button>
       <button class="os-tb-btn" title="存储（⌘S）" @click="save">存储</button>
       <button class="os-tb-btn" title="另存为…（⇧⌘S）" @click="picker = 'save'">另存为…</button>
@@ -200,7 +201,7 @@ const fmtGroups: { cmd: string; val?: string; label: string; title: string; styl
         <button class="os-seg-btn" :class="{ on: theme === 'light' }" title="浅色主题" @click="theme = 'light'; dirty = true; scheduleAutosave()">浅色</button>
         <button class="os-seg-btn" :class="{ on: theme === 'dark' }" title="深色主题" @click="theme = 'dark'; dirty = true; scheduleAutosave()">深色</button>
       </div>
-      <span class="grow" data-os-drag />
+      <span class="grow" />
       <span class="meta">{{ saveHint || (dirty ? '未存储' : '') }}</span>
       <button class="os-tb-btn" title="导出独立 HTML（双击即可放映）" @click="exportFile">导出</button>
       <button class="os-tb-btn primary" title="播放演示（方向键翻页，Esc 退出）" @click="playing = true">▶ 演示</button>

@@ -3,8 +3,11 @@
 // 集成方式与 grf-play 一致：动态加载 /vendor/goder.js（自包含 ESM web components），
 // configure 连接同源 /goder-api（OpenOS 后端反代 goder-serve 并注入登录身份），
 // 渲染 <goder-app-shell>（会话列表 + 聊天 + 右栏 tab + 事件台）。
-// 窗口控制（关闭/最小化/最大化/拖动）统一由 OpenOS 系统标题栏承担（深色一体化样式，
-// 见 WindowFrame 的 [data-app='goder'] 配色），不向 goder 界面注入任何窗口控件。
+// 融合窗体（appChrome 'merged'）：无系统标题栏，红绿灯悬浮左上角；
+// 容器标记 data-os-drag="top" 把 goder 自绘的第一行（左栏顶行/收起后的
+// 工作卡头部）作为标题栏 —— WindowFrame 经 composedPath 穿透 shadow DOM
+// 委托拖拽；sideTop 注入 72px 占位把折叠侧栏按钮推到红绿灯右侧
+// （对应 goder 桌面态 lights 模式的 80px 留位）。
 import { nextTick, onMounted, ref } from 'vue'
 import type { WinState } from '../../stores/windows'
 import { useWindows } from '../../stores/windows'
@@ -65,6 +68,16 @@ async function init() {
         chevron: false,
         hit: 'content',
       },
+      // 融合窗体红绿灯留位：左栏顶行行首注入 72px 透明占位（84px 悬浮区 -
+      // side-top 自身 12px 左内边距），避免折叠侧栏按钮被红绿灯盖住；
+      // 渲染进 shadow DOM，样式只能内联
+      sideTop: {
+        leading: () => {
+          const spacer = document.createElement('div')
+          spacer.style.cssText = 'flex:none;width:72px'
+          return spacer
+        },
+      },
     })
   } catch (e: any) {
     error.value = 'goder 初始化失败：' + (e?.message || e)
@@ -91,7 +104,8 @@ function retry() {
 </script>
 
 <template>
-  <div class="goder-studio">
+  <!-- data-os-drag="top"：仅顶部一行（goder 自绘顶栏）可拖动窗口，见 WindowFrame -->
+  <div class="goder-studio" data-os-drag="top">
     <div v-if="loading" class="state">正在连接 goder 工作台…</div>
 
     <div v-else-if="unavailable" class="state guide">

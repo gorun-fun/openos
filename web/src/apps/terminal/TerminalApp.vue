@@ -157,8 +157,8 @@ function onKey(e: KeyboardEvent) {
 
 <template>
   <div class="term" @pointerup="inputEl?.focus()">
-    <!-- 融合窗体工具栏：虚拟/真实切换 + 标题（用户 — 模式）+ 清屏 -->
-    <div class="os-tb term-tb">
+    <!-- 融合窗体工具栏：虚拟/真实切换 + 标题（用户 — 模式）+ 清屏；整条可拖动窗口（控件自身不参与） -->
+    <div class="os-tb term-tb" data-os-drag>
       <div class="os-seg dark-seg">
         <button :class="{ on: mode === 'virtual' }" @click="switchMode('virtual')">虚拟</button>
         <button
@@ -170,7 +170,7 @@ function onKey(e: KeyboardEvent) {
       </div>
       <span class="os-tb-sep dark-sep" />
       <div class="tb-title">{{ user }} — {{ mode === 'real' ? '真实终端' : '虚拟终端' }}</div>
-      <span class="grow" data-os-drag />
+      <span class="grow" />
       <span class="mode-hint">{{ mode === 'real' ? 'sh 受控执行 · 沙箱内' : '虚拟文件系统' }}</span>
       <button class="os-tb-btn dark-btn" title="清屏（Ctrl+L）" @click="lines = []">清屏</button>
     </div>

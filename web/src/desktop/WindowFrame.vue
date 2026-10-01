@@ -101,7 +101,11 @@ function onTitlePointerDown(e: PointerEvent) {
   const startX = e.clientX, startY = e.clientY
   const origX = win.x, origY = win.y
   const el = e.currentTarget as HTMLElement
-  el.setPointerCapture(e.pointerId)
+  // 指针捕获设在真实目标而非窗口根：捕获会把后续指针事件重定向到捕获元素，
+  // 若设在窗口根，pointerup 随之重定向，click/dblclick 的最近公共祖先变成
+  // 窗口根 —— 不再穿过应用的 data-os-drag 容器，融合窗体的双击最大化会失效
+  const captureEl = (e.composedPath()[0] as HTMLElement) ?? (e.target as HTMLElement)
+  captureEl.setPointerCapture(e.pointerId)
   const wasSnapped = win.maximized || !!win.prev
 
   const move = (ev: PointerEvent) => {
@@ -134,18 +138,26 @@ function onTitlePointerDown(e: PointerEvent) {
   el.addEventListener('pointerup', up)
 }
 
-// 融合窗体：应用内容里标记 data-os-drag 的区域（标题/留白条）可拖动窗口；控件自身不参与
-function draggableTarget(t: HTMLElement): boolean {
-  if (!t.closest('[data-os-drag]')) return false
+// 融合窗体：应用内容里标记 data-os-drag 的区域（标题/留白条）可拖动窗口；控件自身不参与。
+// shadow DOM 应用（goder 等 web component）的事件 target 冒泡时被重定向到宿主元素，
+// 故用 composedPath 取真实目标判定交互控件，并沿路径（可穿透 shadow 边界）找拖动标记。
+// data-os-drag="top" 变体：标记打在整个容器上、仅窗口顶部一行（红绿灯悬浮区高度内）
+// 生效 —— 供无法逐区域打标的 shadow DOM 应用把自绘顶栏整体作为标题栏。
+function draggableTarget(e: PointerEvent | MouseEvent): boolean {
+  const path = e.composedPath() as HTMLElement[]
+  const t = path[0] ?? (e.target as HTMLElement)
+  const region = path.find((el) => el?.hasAttribute?.('data-os-drag'))
+  if (!region) return false
+  if (region.getAttribute('data-os-drag') === 'top' && e.clientY - props.win.y > 46) return false
   return !t.closest('button, input, select, textarea, a, label, [data-os-no-drag]')
 }
 function onWinPointerDown(e: PointerEvent) {
   store.focus(props.win.id)
-  if (merged.value && draggableTarget(e.target as HTMLElement)) onTitlePointerDown(e)
+  if (merged.value && draggableTarget(e)) onTitlePointerDown(e)
 }
 // 双击工具栏标题区最大化（与标准标题栏双击行为一致）
 function onWinDblClick(e: MouseEvent) {
-  if (merged.value && draggableTarget(e.target as HTMLElement)) store.toggleMaximize(props.win.id)
+  if (merged.value && draggableTarget(e)) store.toggleMaximize(props.win.id)
 }
 
 function onResizePointerDown(e: PointerEvent, dir: string) {
@@ -320,12 +332,4 @@ html.dark .window:not(.focused):not(:hover) .t { background: #55555c; }
 .resize[data-dir='se']  { bottom: -3px; right: -3px; width: 12px; height: 12px; cursor: nwse-resize; }
 .resize[data-dir='sw']  { bottom: -3px; left: -3px; width: 12px; height: 12px; cursor: nesw-resize; }
 .maximized .resize { display: none; }
-
-/* goder：深色工作台，标题栏配色与其界面融合（macOS 一体式外观） */
-.window[data-app='goder'] {
-  --os-window-head: #14161c;
-  --os-border: rgba(255, 255, 255, 0.07);
-}
-.window[data-app='goder'] .title { color: #8b909c; }
-.window[data-app='goder'].focused .title { color: #c7ccd6; }
 </style>

@@ -107,7 +107,8 @@ onBeforeUnmount(() => doc?.destroy())
 
 <template>
   <div class="pdf" @dragover.prevent @drop="onDrop">
-    <div class="os-tb">
+    <!-- 融合窗体工具栏：整条可拖动窗口（data-os-drag 事件委托，控件自身不参与） -->
+    <div class="os-tb" data-os-drag>
       <button class="os-tb-btn" title="从文件空间打开…" @click="pickerOpen = true">打开…</button>
       <label class="os-tb-btn local-open" title="从本机打开">
         本机…

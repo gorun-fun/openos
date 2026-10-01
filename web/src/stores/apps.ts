@@ -30,6 +30,7 @@ export const appChrome: Record<string, 'default' | 'merged'> = {
   pdf: 'merged',
   terminal: 'merged',
   notes: 'merged',
+  goder: 'merged',
 }
 
 interface State {
