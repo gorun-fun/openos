@@ -22,13 +22,17 @@ const ROLE_LABELS: Record<string, string> = { admin: '管理员', user: '用户'
 function roleLabel(r: string) { return ROLE_LABELS[r] || r }
 
 const tab = ref('appearance')
+// 桌面客户端专属：服务器设置（OpenOS 兼容端连接）。标记对象带 settingsUrl =
+// 客户端本地设置页地址（设置服务降级时无该字段，入口随之隐藏）
+const serverSettingsUrl = (window as any).__OPENOS_DESKTOP__?.settingsUrl as string | undefined
 const items = computed(() => {
   // AI 服务全员可见（只读状态 + goder 启用引导），其余管理页仅管理员
   const base = [
     { key: 'appearance', label: '外观', icon: '🎨' },
     { key: 'account', label: '账户', icon: '👤' },
-    { key: 'ai', label: 'AI 服务', icon: '✦' },
   ]
+  if (serverSettingsUrl) base.push({ key: 'server', label: '服务器', icon: '🌐' })
+  base.push({ key: 'ai', label: 'AI 服务', icon: '✦' })
   if (isAdmin) {
     base.push(
       { key: 'users', label: '用户管理', icon: '👥' },
@@ -499,6 +503,11 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
         </div>
       </OsModal>
     </template>
+    <!-- 服务器（桌面客户端专属：内嵌客户端本地设置页，改连 OpenOS 兼容端） -->
+    <template v-else-if="tab === 'server'">
+      <iframe :src="serverSettingsUrl" class="server-frame" title="服务器设置" />
+    </template>
+
     <!-- AI 服务（goder 联动） -->
     <template v-else-if="tab === 'ai'">
       <!-- goder 未启用：全员提示找管理员，管理员另给部署指引 -->
@@ -631,7 +640,14 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
 :deep(.os-sidebar button[data-key='access'] .ic) { background: linear-gradient(180deg, #bf5af2, #8944ab); }
 :deep(.os-sidebar button[data-key='registry'] .ic) { background: linear-gradient(180deg, #5ac8fa, #0a84ff); }
 :deep(.os-sidebar button[data-key='ai'] .ic) { background: linear-gradient(180deg, #ff375f, #d70015); }
+:deep(.os-sidebar button[data-key='server'] .ic) { background: linear-gradient(180deg, #5e5ce6, #3634a3); }
 :deep(.os-sidebar button[data-key='system'] .ic) { background: linear-gradient(180deg, #a2a2a7, #77777c); }
+
+/* 服务器设置：客户端本地设置页占满内容区（高度不够时保底 460px） */
+.server-frame {
+  display: block; width: 100%; height: 100%; min-height: 460px;
+  border: none; border-radius: 8px;
+}
 
 .wallpapers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .wall {

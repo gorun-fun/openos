@@ -10,14 +10,24 @@
 #   ./run.sh stop [desktop]    停止整套：先桌面客户端、后服务端（默认）；
 #                              stop server 仅停服务端；stop desktop 仅停客户端
 #   ./run.sh restart [desktop] 重启（默认整套；restart server 仅服务端，同样含构建）
+#   ./run.sh reset [desktop]   清空桌面客户端全部本地数据（仅 desktop：登录态、站点
+#                              数据、服务器配置 = ~/.openos-desktop 整目录重建；先停
+#                              客户端再执行，完成后保持停止状态，./run.sh start 全新启动）
+#   ./run.sh build [desktop|server|all]
+#                              交叉编译 Linux/Windows 二进制（linux/windows × amd64/arm64）
+#                              到 release/（Windows 产物带 .exe）：desktop=桌面客户端
+#                              （默认，Windows 下 GUI 子系统+应用图标，双击无 cmd 黑框）、
+#                              server=服务端（注入版本号）、all=两者全部
 #
 # 说明：
 #   - 服务端工作目录固定为 server/，与开发模式一致：数据落在 server/data/
 #     （openos.db、homes/、goder 组件等）；前端静态目录以绝对路径注入 OPENOS_DIST，
 #     避免相对 CWD 解析不到 web/dist
 #   - 桌面客户端二进制在仓库根 openos-desktop（缺失或可构建时自动构建；更新代码后
-#     亦可手动 make desktop），日志追加写入 openos-desktop.log；打开地址默认
-#     http://<OPENOS_ADDR>，OPENOS_DESKTOP_URL 可覆盖（开发模式可指 vite 的 5173）
+#     亦可手动 make desktop），日志追加写入 openos-desktop.log；打开地址优先级 =
+#     OPENOS_DESKTOP_URL（显式指定才透传 -url）> 客户端已保存配置
+#     ~/.openos-desktop/config.json（窗口右下角 ⚙ 设置，可连在线 OpenOS 兼容端）>
+#     默认 http://<OPENOS_ADDR>；配置指向远程地址时跳过本地服务端的构建与启动
 #   - 环境变量原样透传（OPENOS_ADDR / OPENOS_DATA / OPENOS_JWT_SECRET / OPENOS_AI_* 等）
 #   - 服务日志追加写入 server/openos-server.log
 #
@@ -42,8 +52,42 @@ case "${ADDR}" in
   *)  HEALTH_ADDR="${ADDR}" ;;
 esac
 PORT="${HEALTH_ADDR##*:}"
-# 桌面客户端打开的 OpenOS 地址：默认服务端健康地址；OPENOS_DESKTOP_URL 可覆盖
-DESKTOP_URL="${OPENOS_DESKTOP_URL:-http://${HEALTH_ADDR}}"
+# 桌面客户端打开的 OpenOS 地址：仅在 OPENOS_DESKTOP_URL 显式指定时透传 -url（仅本次
+# 生效、不写盘）；未设置时不传，由客户端读已保存配置（⚙ 设置页保存的兼容端地址），
+# 无配置则用本地服务端健康地址
+DESKTOP_URL="${OPENOS_DESKTOP_URL:-}"
+
+# 读桌面客户端已保存的服务器配置（~/.openos-desktop/config.json 的 url 字段）。
+# 配置由客户端 json.Marshal 写成单行紧凑 JSON，"url" 字段名唯一，sed 抽取足够
+desktop_config_url() {
+  local f="${HOME}/.openos-desktop/config.json" u
+  [ -f "${f}" ] || return 1
+  u="$(sed -n 's/.*"url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${f}" | head -n 1)"
+  [ -n "${u}" ] || return 1
+  echo "${u}"
+}
+
+# 桌面客户端是否连接远程 OpenOS 兼容端（已保存配置指向非本地地址）：远程时整套
+# 启动无须（也不必等）本地服务端
+desktop_remote() {
+  local u
+  u="$(desktop_config_url 2>/dev/null)" || return 1
+  case "${u}" in
+    http://localhost:*|http://localhost/*|http://127.*|http://\[::1\]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# start/restart 的 desktop 分支公共入口：远程配置时跳过本地服务端（只拉客户端）
+start_full_stack() {
+  if desktop_remote; then
+    echo "→ 桌面客户端已配置连接远程 OpenOS（$(desktop_config_url)），跳过本地服务端"
+    start_desktop
+    return
+  fi
+  start_server
+  start_desktop
+}
 
 # 判定 PID 是否本仓库的 openos-server 主进程：args 含本仓库可执行路径，且不是
 # mcp-shim 子命令——openos-server mcp-shim 是 goder 桌面控制插件的 stdio↔HTTP 桥
@@ -136,6 +180,45 @@ build() {
   (cd "${ROOT}/web" && npm install --no-audit --no-fund && npm run build)
   echo "→ 构建后端（server → openos-server）..."
   (cd "${SERVER_DIR}" && go build -o openos-server .)
+}
+
+# 交叉编译 Linux/Windows 发布二进制（build 子命令）：linux/windows × amd64/arm64，
+# 输出到 release/（Windows 带 .exe 后缀）。target：desktop=桌面客户端（默认）、
+# server=服务端（注入版本号，与 make release 同款 ldflags；纯二进制不含前端产物，
+# 运行时需 OPENOS_DIST 指向 web/dist）、all=两者全部
+build_cross() {
+  local target="$1" goos goarch ext version
+  mkdir -p "${ROOT}/release"
+  version="$(git -C "${ROOT}" describe --tags --exact-match 2>/dev/null \
+    || git -C "${ROOT}" describe --tags 2>/dev/null || echo dev)"
+  for goos in linux windows; do
+    for goarch in amd64 arm64; do
+      ext=""
+      if [ "${goos}" = "windows" ]; then ext=".exe"; fi
+      if [ "${target}" = "desktop" ] || [ "${target}" = "all" ]; then
+        echo "→ 构建 release/openos-desktop-${goos}-${goarch}${ext}"
+        # Windows 用 GUI 子系统（-H windowsgui）：双击启动不弹 cmd 黑框；从终端
+        # 启动时的输出/输入由二进制内 AttachConsole 挂回父终端（console_windows.go），
+        # 启动失败（无终端可挂）弹系统错误框。图标经 desktop/ 下 rsrc_windows_*.syso
+        # 资源文件自动链入（go-winres 生成，重制方法见 desktop/README.md「应用图标」）
+        if [ "${goos}" = "windows" ]; then
+          (cd "${ROOT}/desktop" && CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
+            go build -trimpath -ldflags "-s -w -H windowsgui" \
+            -o "${ROOT}/release/openos-desktop-${goos}-${goarch}${ext}" .)
+        else
+          (cd "${ROOT}/desktop" && CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
+            go build -trimpath -o "${ROOT}/release/openos-desktop-${goos}-${goarch}${ext}" .)
+        fi
+      fi
+      if [ "${target}" = "server" ] || [ "${target}" = "all" ]; then
+        echo "→ 构建 release/openos-server-${goos}-${goarch}${ext}"
+        (cd "${SERVER_DIR}" && CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
+          go build -trimpath -ldflags "-s -w -X openos/server/internal/store.Version=${version}" \
+          -o "${ROOT}/release/openos-server-${goos}-${goarch}${ext}" .)
+      fi
+    done
+  done
+  echo "✓ 完成：${ROOT}/release/（版本 ${version}）"
 }
 
 # 确保桌面客户端二进制存在：有 Go 就构建（增量，秒级）；构建失败但二进制可用则沿用
@@ -231,9 +314,9 @@ stop_server() {
 }
 
 start_desktop() {
-  local pid spid i mark
+  local pid spid i mark open_url args
   if pid="$(find_desktop_pid)"; then
-    echo "桌面客户端已在运行（PID ${pid} → ${DESKTOP_URL}）；如需重启，请执行 ./run.sh restart desktop"
+    echo "桌面客户端已在运行（PID ${pid}）；如需重启，请执行 ./run.sh restart desktop"
     return 0
   fi
   rm -f "${DESKTOP_PID_FILE}"
@@ -245,10 +328,18 @@ start_desktop() {
   mark=0
   if [ -f "${DESKTOP_LOG}" ]; then mark=$(( $(wc -l < "${DESKTOP_LOG}") + 0 )); fi
 
-  echo "→ 启动桌面客户端（${DESKTOP_URL}）..."
+  # 打开地址：OPENOS_DESKTOP_URL 显式时透传 -url（仅本次生效）；否则由客户端读
+  # 已保存配置（⚙ 设置页），无配置用默认本地地址——提示按此优先级展示
+  open_url="${DESKTOP_URL}"
+  if [ -z "${open_url}" ]; then open_url="$(desktop_config_url 2>/dev/null || true)"; fi
+  if [ -z "${open_url}" ]; then open_url="http://${HEALTH_ADDR}"; fi
+  args=()
+  [ -n "${DESKTOP_URL}" ] && args+=(-url "${DESKTOP_URL}")
+
+  echo "→ 启动桌面客户端（${open_url}）..."
   (
     cd "${ROOT}"
-    nohup "${DESKTOP_BIN}" -url "${DESKTOP_URL}" >> "${DESKTOP_LOG}" 2>&1 &
+    nohup "${DESKTOP_BIN}" ${args[@]+"${args[@]}"} >> "${DESKTOP_LOG}" 2>&1 &
     echo $! > "${DESKTOP_PID_FILE}"
   )
   spid="$(cat "${DESKTOP_PID_FILE}")"
@@ -261,7 +352,7 @@ start_desktop() {
       return 1
     fi
     if tail -n +"$((mark + 1))" "${DESKTOP_LOG}" 2>/dev/null | grep -q "桌面客户端已启动"; then
-      echo "✓ 桌面客户端已启动：PID ${spid} → ${DESKTOP_URL}（日志：${DESKTOP_LOG}）"
+      echo "✓ 桌面客户端已启动：PID ${spid} → ${open_url}（日志：${DESKTOP_LOG}）"
       return 0
     fi
     sleep 0.25
@@ -298,16 +389,23 @@ usage() {
 用法: ./run.sh <command> [target]
 
   start     启动（默认 target = desktop）
-  stop      停止（默认 target = desktop）
+  stop     停止（默认 target = desktop）
   restart   重启（默认 target = desktop，同样包含构建）
+  reset     清空桌面客户端全部本地数据（仅 target = desktop）
+  build     交叉编译 Linux/Windows 二进制（linux/windows × amd64/arm64 → release/，
+            Windows 产物带 .exe；默认 target = desktop，server / all 可选；桌面端
+            Windows 构建为 GUI 子系统并带应用图标，双击启动无 cmd 黑框）
 
 target:
   desktop   整套 = 桌面客户端 + 服务端：
               start   先确保服务端运行（未运行则构建并启动），再启动 openos-desktop
-                      （CDP 驱动 Chrome app 模式打开 OpenOS，登录态持久于 ~/.openos-desktop）
+                      （CDP 驱动 Chrome app 模式打开 OpenOS，登录态持久于 ~/.openos-desktop）；
+                      桌面客户端已配置远程 OpenOS 兼容端时跳过本地服务端
               stop    先停桌面客户端、再停服务端
+              build   仅交叉编译桌面客户端二进制
   server    仅服务端（openos-server）。desktop 与 server 是两档目标：desktop=整套
-            （客户端+服务端），server=仅服务端
+            （客户端+服务端），server=仅服务端；build 下另接受 all = 两者全部
+            （server 产物为纯二进制，不含前端，运行时需 OPENOS_DIST 指向 web/dist）
 
 示例：
   ./run.sh start              # 一键：服务端 + 桌面客户端
@@ -316,10 +414,16 @@ target:
   ./run.sh stop               # 整套停止
   ./run.sh stop desktop       # 仅停桌面客户端（服务端继续运行）
   ./run.sh restart            # 整套重建并重启
+  ./run.sh reset              # 清空桌面客户端数据（登录态/站点数据/服务器配置）
+  ./run.sh build              # 交叉编译桌面客户端：release/openos-desktop-{linux,windows}-{amd64,arm64}[.exe]
+  ./run.sh build server       # 交叉编译服务端（注入版本号）
+  ./run.sh build all          # 桌面客户端 + 服务端全部二进制
 
 环境变量原样透传给服务端（OPENOS_ADDR / OPENOS_DATA / OPENOS_JWT_SECRET / OPENOS_AI_* 等）；
-OPENOS_DESKTOP_URL 可改桌面客户端打开地址（默认 http://<OPENOS_ADDR>，开发模式可指
-http://localhost:5173）。
+OPENOS_DESKTOP_URL 可显式指定客户端打开地址（仅本次生效、不写盘；未设置时客户端读
+~/.openos-desktop/config.json 的已保存配置，无配置用 http://<OPENOS_ADDR>）。桌面客户端
+窗口右下角 ⚙ 可随时改连其它 OpenOS 兼容端（在线部署地址，保存在 config.json，下次启动
+自动连接；配置指向远程时 start/restart 跳过本地服务端）。
 EOF
 }
 
@@ -330,10 +434,7 @@ case "${COMMAND}" in
   start)
     [ $# -le 2 ] || { usage >&2; exit 1; }
     case "${TARGET}" in
-      desktop)
-        start_server
-        start_desktop
-        ;;
+      desktop) start_full_stack ;;
       server) start_server ;;
       *) usage >&2; exit 1 ;;
     esac
@@ -355,13 +456,32 @@ case "${COMMAND}" in
       desktop)
         stop_desktop
         stop_server
-        start_server
-        start_desktop
+        start_full_stack
         ;;
       server)
         stop_server
         start_server
         ;;
+      *) usage >&2; exit 1 ;;
+    esac
+    ;;
+  reset)
+    [ $# -le 2 ] || { usage >&2; exit 1; }
+    case "${TARGET}" in
+      desktop)
+        stop_desktop
+        ensure_desktop_bin || exit 1
+        # 前台交互执行（stdin 是终端）：reset 自带范围说明与 [y/N] 确认
+        "${DESKTOP_BIN}" reset
+        echo "完成。执行 ./run.sh start 即可以全新状态启动（服务器配置需在设置页重新填写）。"
+        ;;
+      *) usage >&2; exit 1 ;;
+    esac
+    ;;
+  build)
+    [ $# -le 2 ] || { usage >&2; exit 1; }
+    case "${TARGET}" in
+      desktop|server|all) build_cross "${TARGET}" ;;
       *) usage >&2; exit 1 ;;
     esac
     ;;

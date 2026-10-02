@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- 黑色圆角方形底（macOS 应用图标比例） -->
+  <rect x="16" y="16" width="480" height="480" rx="112" ry="112" fill="#000000"/>
+  <!-- 白色 O：粗描边圆环，不依赖字体 -->
+  <circle cx="256" cy="256" r="118" fill="none" stroke="#FFFFFF" stroke-width="52" stroke-linecap="round"/>
+</svg>

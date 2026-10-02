@@ -38,6 +38,13 @@ onMounted(() => {
   if (sso.value && !ssoError.value) ssoTimer = window.setTimeout(ssoLogin, 600)
 })
 onBeforeUnmount(() => clearTimeout(ssoTimer))
+
+// 桌面客户端专属：登录前切换服务器（OpenOS 兼容端）——整窗转客户端本地设置页，
+// 从那里连接新地址（连回原地址则重新进登录页）
+const serverSettingsUrl = (window as any).__OPENOS_DESKTOP__?.settingsUrl as string | undefined
+function switchServer() {
+  if (serverSettingsUrl) location.href = serverSettingsUrl
+}
 </script>
 
 <template>
@@ -68,6 +75,9 @@ onBeforeUnmount(() => clearTimeout(ssoTimer))
         <span @click="username = 'guest'; password = 'guest123'">guest / guest123（访客）</span>
       </div>
     </div>
+
+    <!-- 桌面客户端专属：登录前切换 OpenOS 兼容端 -->
+    <button v-if="serverSettingsUrl" class="switch-server" @click="switchServer">⚙ 切换服务器</button>
   </div>
 </template>
 
@@ -76,6 +86,18 @@ onBeforeUnmount(() => clearTimeout(ssoTimer))
   height: 100%; display: flex; align-items: center; justify-content: center;
   animation: os-fade-in .4s ease;
 }
+/* 桌面客户端的登录前切换服务器入口（桌面模式专属，浮于页面底部）；
+   平铺 button 规则的 width/active 变换须显式覆盖 */
+.switch-server {
+  position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%);
+  width: auto; padding: 7px 18px; border: none; border-radius: 999px; margin: 0;
+  background: rgba(0, 0, 0, .24); color: rgba(255, 255, 255, .78); font-size: 12.5px;
+  font-weight: 400; letter-spacing: .5px; cursor: pointer;
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  transition: background .15s, color .15s;
+}
+.switch-server:hover:not(:disabled) { background: rgba(0, 0, 0, .34); color: #fff; filter: none; }
+.switch-server:active:not(:disabled) { transform: translateX(-50%); }
 .login-card {
   width: 348px; padding: 44px 38px 26px; text-align: center; border-radius: 24px;
   background: rgba(255,255,255,.16);

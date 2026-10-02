@@ -10,11 +10,17 @@
 //
 // 职责：
 //  1. 定位 Chrome（-chrome / $OPENOS_CHROME 可覆盖），用专用用户目录拉起
-//     --app=<OpenOS 地址>（默认 http://127.0.0.1:8081，-url 可改）；
+//     --app=<OpenOS 地址>（-url 显式 > <profile>/config.json 已保存配置 > 默认
+//     http://127.0.0.1:8081）；
 //  2. 在调试端口起 CDP，连浏览器级 WebSocket，对每个页面目标注入
 //     window.__OPENOS_DESKTOP__ 标记——前端 WebApp.vue 检测到该标记后，
 //     代理应用 iframe 直连 config.url 真实地址，而非 /app/<id>/ 反代路径；
-//  3. 监听 Ctrl+C / 主窗口关闭 / Chrome 退出，随之收尾退出（按进程组清理）。
+//  3. 服务器设置（settings.go）：OpenOS 前端「系统设置 → 服务器」分区（桌面模式
+//     专属，内嵌客户端本地设置页）与登录页「切换服务器」入口改连任何 OpenOS 兼容端
+//     （在线部署地址）；目标地址打不开时自动转入设置页兜底；
+//  4. reset 子命令（reset.go）：清空全部本地数据（登录态、站点数据、服务器配置），
+//     先停运行中的实例再删目录；
+//  5. 监听 Ctrl+C / 主窗口关闭 / Chrome 退出，随之收尾退出（按进程组清理）。
 //
 // 安全边界：--disable-web-security 意味着窗口内跨源脚本可互访，且调试端口只绑
 // 127.0.0.1；专用 profile 仅用于打开 OpenOS，不要当日常浏览器使用。
@@ -43,10 +49,21 @@ import (
 )
 
 func main() {
-	urlFlag := flag.String("url", "http://127.0.0.1:8081", "OpenOS 地址（开发模式可指 http://127.0.0.1:5173）")
+	// Windows GUI 子系统（-H windowsgui）下挂回父终端：cmd/PowerShell 启动时恢复
+	// stdio（启动横幅、reset 的输出与确认输入）；其它平台 no-op
+	attachParentConsole()
+
+	// 子命令分派（须在 flag.Parse 之前——位置参数不属于任何 flag，与 openos-server
+	// 的 mcp-shim 同一模式）。reset：清空全部本地数据（profile + 服务器配置）
+	if len(os.Args) > 1 && os.Args[1] == "reset" {
+		os.Exit(runReset(os.Args[2:]))
+	}
+
+	urlFlag := flag.String("url", "", "OpenOS 地址（默认读 <profile>/config.json 的已保存配置，无配置用 http://127.0.0.1:8081；显式指定仅本次生效、不落盘，开发模式可指 http://localhost:5173）")
 	chromeFlag := flag.String("chrome", "", "Chrome/Chromium/Edge 可执行文件路径（默认自动探测，$OPENOS_CHROME 同效）")
 	profileFlag := flag.String("profile", "", "专用用户数据目录（默认 ~/.openos-desktop，登录态持久化于此）")
 	portFlag := flag.Int("port", 0, "CDP 调试端口（默认自动选取空闲端口）")
+	confPortFlag := flag.Int("conf-port", 0, "服务器设置页的回环端口（默认 17700，被占自动递增；$OPENOS_DESKTOP_CONF_PORT 同效）")
 	flag.Parse()
 
 	home, err := os.UserHomeDir()
@@ -59,6 +76,38 @@ func main() {
 	}
 	if err := os.MkdirAll(profile, 0o700); err != nil {
 		fatal(err)
+	}
+	// 记录客户端 pid：reset 子命令据此停止运行中的实例（配进程身份校验防 PID 复用）
+	_ = os.WriteFile(filepath.Join(profile, "client.pid"), []byte(strconv.Itoa(os.Getpid())), 0o600)
+
+	// 服务器配置（OpenOS 兼容端地址）：-url 显式 > 已保存配置 > 默认本地。
+	// -url 只覆盖本次运行，不写盘——run.sh 透传的开发地址不会顶掉用户保存的在线端
+	confPath := filepath.Join(profile, "config.json")
+	cfg := loadDesktopConfig(confPath)
+	target := *urlFlag
+	if target == "" {
+		target = cfg.URL
+	}
+	if target == "" {
+		target = "http://127.0.0.1:8081"
+	}
+	if norm, err := normalizeTargetURL(target); err == nil {
+		target = norm
+	} else if *urlFlag == "" {
+		fmt.Fprintf(os.Stderr, "已保存的地址无效（%v），回退默认本地地址\n", err)
+		target = "http://127.0.0.1:8081"
+	} else {
+		fatal(fmt.Errorf("-url 无效: %w", err))
+	}
+	sw := newServerConf(confPath, cfg, target)
+	confPort := *confPortFlag
+	if confPort == 0 {
+		confPort = 17700
+		if v := os.Getenv("OPENOS_DESKTOP_CONF_PORT"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				confPort = n
+			}
+		}
 	}
 
 	chromePath, err := findChrome(*chromeFlag)
@@ -73,15 +122,15 @@ func main() {
 		}
 	}
 
-	cmd := exec.Command(chromePath, chromeArgs(*urlFlag, profile, port)...)
+	cmd := exec.Command(chromePath, chromeArgs(target, profile, port)...)
 	setSysProcAttr(cmd)
 	tail := &tailBuf{}
 	cmd.Stderr = tail
 	if err := cmd.Start(); err != nil {
 		fatal(err)
 	}
-	fmt.Printf("OpenOS 桌面客户端已启动\n  浏览器:   %s\n  地址:     %s\n  调试端口: %d（CDP）\n  用户目录: %s\n",
-		chromePath, *urlFlag, port, profile)
+	fmt.Printf("OpenOS 桌面客户端已启动\n  浏览器:   %s\n  地址:     %s\n  调试端口: %d\n  用户目录: %s\n",
+		chromePath, target, port, profile)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
@@ -98,11 +147,21 @@ func main() {
 	}
 
 	done := make(chan struct{}) // 主窗口关闭
-	osdOrigin := ""
-	if u, err := url.Parse(*urlFlag); err == nil && u.Host != "" {
-		osdOrigin = u.Scheme + "://" + u.Host
+	// 主窗口会话 + 导航回调：设置页「连接」与 ⚙ 入口都经它导航主窗口
+	mw := &mainWindow{}
+	nav := func(u string) {
+		if sid := mw.get(); sid != "" {
+			if _, err := conn.call("Page.navigate", map[string]any{"url": u}, sid); err != nil {
+				fmt.Fprintf(os.Stderr, "主窗口导航失败: %v\n", err)
+			}
+		}
 	}
-	go watchTargets(conn, os.Getpid(), port, osdOrigin, docReferrer(), done)
+	// 回环设置页（服务器设置）：主窗口右下角 ⚙ 进入；目标地址打不开时自动转入
+	selfBase := listenSettings(confPort, sw, nav)
+	if selfBase != "" {
+		fmt.Printf("  设置页:   %s（窗口右下角 ⚙ 进入；连接的地址保存在 %s）\n", selfBase, confPath)
+	}
+	go watchTargets(conn, os.Getpid(), port, sw, docReferrer(), selfBase, mw, done)
 
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
@@ -136,8 +195,11 @@ func main() {
 
 // watchTargets 对所有页面目标注入桌面端标记，并监听主窗口（首个 page 目标）销毁；
 // 同时在每个页面会话上开启 Network/Fetch 域，运行 SameSite Cookie 桥（bridgeCookie）
-// 与请求头改写（fetchHandler）。
-func watchTargets(c *cdp, pid, port int, osdOrigin, docRef string, done chan<- struct{}) {
+// 与请求头改写（fetchHandler）。连接的 OpenOS 源（守卫 / Referer 改写 / Cookie 归一化
+// 豁免）经 serverConf 动态取值——设置页切换服务器后自动跟随。selfBase 为本地设置页
+// 基地址（空 = 设置服务降级；标记对象里的 settingsUrl 亦随之省略，前端不显示入口）；
+// mw 记录主窗口会话供设置页导航。
+func watchTargets(c *cdp, pid, port int, sw *serverConf, docRef, selfBase string, mw *mainWindow, done chan<- struct{}) {
 	// 自动附身：开启后已存在与新建的 page 目标都会逐个收到 attachedToTarget（flat 会话）
 	if _, err := c.call("Target.setAutoAttach", map[string]any{
 		"autoAttach":             true,
@@ -148,17 +210,18 @@ func watchTargets(c *cdp, pid, port int, osdOrigin, docRef string, done chan<- s
 		close(done)
 		return
 	}
-	mark := markSource(pid, port, docRef)
+	mark := markSource(pid, port, docRef, selfBase)
 	shim := cookieShimSource()
 	mainTarget := ""
 	sess := map[string]*pageSession{} // sessionId → 网络事件关联状态
 	sessTarget := map[string]string{} // sessionId → targetId（主帧守卫只认主窗口）
-	go fetchHandler(c, osdOrigin)
+	go fetchHandler(c, sw)
 	// 首个 page 会话供 normalizeLoop 使用（Network.* 只能在页面级会话上调用）
 	var sessMu sync.Mutex
 	firstPage := ""
 	firstSession := func() string { sessMu.Lock(); defer sessMu.Unlock(); return firstPage }
-	go normalizeLoop(c, firstSession)
+	go normalizeLoop(c, firstSession, sw)
+	lastErrNav := time.Time{} // chrome-error 兜底防抖（事件循环单协程访问）
 	for ev := range c.Events() {
 		switch ev.Method {
 		case "Target.attachedToTarget":
@@ -186,16 +249,24 @@ func watchTargets(c *cdp, pid, port int, osdOrigin, docRef string, done chan<- s
 				}
 				sessMu.Unlock()
 			}
+			sessTarget[p.SessionID] = p.TargetInfo.TargetID
 			// 标记两路齐下：新文档（任何脚本执行前注入，覆盖刷新/跳转）+ 当前文档（立即生效）。
 			// 注意 addScriptToEvaluateOnNewDocument 只覆盖主帧（跨源子帧不注入），
 			// 子帧靠 Runtime.contextCreated 即时补丁 + 周期 walker 兜底（见下）
 			_, _ = c.call("Page.addScriptToEvaluateOnNewDocument", map[string]any{"source": mark}, p.SessionID)
 			_, _ = c.call("Runtime.evaluate", map[string]any{"expression": mark}, p.SessionID)
+			// 主窗口会话记录：设置页「连接」的导航经此下发；并补初始导航竞态
+			//（附身晚于 Chrome 完成初始导航时 frameNavigated 已错过，见 initialWatch）
+			if p.TargetInfo.TargetID == mainTarget {
+				mw.set(p.SessionID)
+				if selfBase != "" {
+					go initialWatch(c, p.SessionID, sw, selfBase)
+				}
+			}
 			// Cookie 桥与 realm 补丁需要 Network/Runtime 事件流；主帧导航守卫需要 Page 事件
 			if _, err := c.call("Network.enable", nil, p.SessionID); err == nil {
 				sess[p.SessionID] = newPageSession()
 			}
-			sessTarget[p.SessionID] = p.TargetInfo.TargetID
 			_, _ = c.call("Page.enable", nil, p.SessionID)
 			// 请求级拦截（fetchHandler）：剥 Sec-Fetch-* / OpenOS 源 Referer 改写。
 			// 诊断模式：OSD_NO_FETCH=1 时关闭拦截（排查拦截对目标站 SSO 的影响）
@@ -249,10 +320,29 @@ func watchTargets(c *cdp, pid, port int, osdOrigin, docRef string, done chan<- s
 			if json.Unmarshal(ev.Params, &p) != nil || p.Frame.ParentID != "" || p.Frame.URL == "" {
 				continue
 			}
-			if osdOrigin != "" && mainTarget != "" && sessTarget[ev.SessionID] == mainTarget &&
-				!strings.HasPrefix(p.Frame.URL, osdOrigin) {
-				fmt.Printf("主帧被导航到 %s，回捕到 %s\n", p.Frame.URL, osdOrigin)
-				_, _ = c.call("Page.navigate", map[string]any{"url": osdOrigin + "/"}, ev.SessionID)
+			if mainTarget == "" || sessTarget[ev.SessionID] != mainTarget {
+				continue
+			}
+			// 服务器地址打不开（DNS 失败 / 拒绝连接等）：chrome-error 页不跑任何注入
+			// 脚本、⚙ 入口也无处安放，直接转入本地设置页（带 unreachable 提示），
+			// 5s 冷却防抖；设置服务降级时退化为下面的守卫回捕
+			if strings.HasPrefix(p.Frame.URL, "chrome-error://") && selfBase != "" {
+				if time.Since(lastErrNav) > 5*time.Second {
+					lastErrNav = time.Now()
+					fmt.Printf("服务器地址打不开（%s），转入设置页\n", sw.Current())
+					_, _ = c.call("Page.navigate", map[string]any{
+						"url": selfBase + "/?unreachable=" + url.QueryEscape(sw.Current()),
+					}, ev.SessionID)
+				}
+				continue
+			}
+			// 守卫目标跟随 serverConf（设置页里切换服务器后立即生效）；设置页自身
+			// （selfBase 前缀）必须豁免——它本就不在 OpenOS 源下，否则一进就被顶掉
+			if origin := sw.Origin(); origin != "" &&
+				!strings.HasPrefix(p.Frame.URL, origin) &&
+				!strings.HasPrefix(p.Frame.URL, selfBase) {
+				fmt.Printf("主帧被导航到 %s，回捕到 %s\n", p.Frame.URL, origin)
+				_, _ = c.call("Page.navigate", map[string]any{"url": origin + "/"}, ev.SessionID)
 			}
 		case "Network.responseReceived":
 			var p struct {
@@ -315,8 +405,9 @@ func watchTargets(c *cdp, pid, port int, osdOrigin, docRef string, done chan<- s
 //     iframe 文档导航的 Referer 是嵌入页地址，对按 Referer 白名单风控的接口
 //     （微信 webwxnewloginpage 同款）等于自曝。其余 Referer（目标站自身页面间）原样。
 //
-// 每个事件必须 continue：暂停中的请求不继续，页面会挂死（authRequired 走默认处理）。
-func fetchHandler(c *cdp, osdOrigin string) {
+// OpenOS 源经 serverConf 动态取值（设置页切换服务器后跟随）。每个事件必须 continue：
+// 暂停中的请求不继续，页面会挂死（authRequired 走默认处理）。
+func fetchHandler(c *cdp, sw *serverConf) {
 	for ev := range c.FetchEvents() {
 		switch ev.Method {
 		case "Fetch.requestPaused":
@@ -329,7 +420,7 @@ func fetchHandler(c *cdp, osdOrigin string) {
 			}
 			_ = json.Unmarshal(ev.Params, &p)
 			cont := map[string]any{"requestId": p.RequestID}
-			if hdrs, changed := rewriteHeaders(p.Request.Headers, p.Request.URL, osdOrigin); changed {
+			if hdrs, changed := rewriteHeaders(p.Request.Headers, p.Request.URL, sw.Origin()); changed {
 				cont["headers"] = hdrs
 			}
 			_, _ = c.call("Fetch.continueRequest", cont, ev.SessionID)
@@ -471,9 +562,11 @@ func patchLoop(c *cdp, sessionId, shim string) {
 
 // normalizeLoop 周期性把 Cookie jar 归一为 SameSite=None（发送侧修复）：顶层 1P 登录
 // （「登录」按钮 window.open）落地的未标注 SameSite Cookie 按 Lax 语义不会附到跨站
-// iframe 请求上，统一改写为 None+Secure 后 iframe 内即为登录态。本地域（OpenOS 自身）
-// 不动——http 站点的 Cookie 被强加 Secure 会直接失效。
-func normalizeLoop(c *cdp, firstSession func() string) {
+// iframe 请求上，统一改写为 None+Secure 后 iframe 内即为登录态。本地域与当前
+// OpenOS 源不动——http 站点（本地服务端 / http 兼容端）的 Cookie 被强加 Secure 会
+// 直接失效，且 OpenOS 自身会话是第一方、无需归一化。OpenOS 源经 serverConf 动态
+// 取值（设置页切换服务器后跟随）。
+func normalizeLoop(c *cdp, firstSession func() string, sw *serverConf) {
 	t := time.NewTicker(2 * time.Second)
 	defer t.Stop()
 	for range t.C {
@@ -505,7 +598,7 @@ func normalizeLoop(c *cdp, firstSession func() string) {
 				continue
 			}
 			d := strings.TrimPrefix(ck.Domain, ".")
-			if d == "localhost" || d == "127.0.0.1" || strings.HasPrefix(d, "127.") || d == "[::1]" {
+			if isLocalHost(d) || sw.CoversHost(d) {
 				continue
 			}
 			path := ck.Path
@@ -623,13 +716,20 @@ func bridgeCookie(c *cdp, sessionId, pageURL, line string) {
 
 // markSource 生成注入脚本，做两件事：
 //  1. 在 window 上钉死只读标记 __OPENOS_DESKTOP__——前端（web/src/apps/web/WebApp.vue）
-//     据此让代理应用直连真实地址；
+//     据此让代理应用直连真实地址；标记对象带 settingsUrl（本地设置页地址）时，
+//     前端「系统设置 → 服务器」分区与登录页「切换服务器」入口据此显示（桌面模式
+//     专属；设置服务降级时无该字段，前端不显示入口）；
 //  2. SameSite Cookie shim：跨站 iframe 里未标注 SameSite 的 document.cookie 写入
 //     默认按 Lax 处理而被静默丢弃（美团 settoken 实测），shim 给这类写入自动补
 //     SameSite=None（https 帧再补 Secure，Chrome 要求 None 须伴 Secure）。
 //     注入发生在每个新文档任何脚本执行前，主文档与全部子帧生效。
-func markSource(pid, port int, docRef string) string {
-	v, _ := json.Marshal(map[string]any{"client": "openos-desktop", "pid": pid, "debugPort": port})
+func markSource(pid, port int, docRef, settingsURL string) string {
+	v, _ := json.Marshal(struct {
+		Client      string `json:"client"`
+		Pid         int    `json:"pid"`
+		DebugPort   int    `json:"debugPort"`
+		SettingsURL string `json:"settingsUrl,omitempty"`
+	}{Client: "openos-desktop", Pid: pid, DebugPort: port, SettingsURL: settingsURL})
 	return `;(function(){
 try{
   if(!window.__OPENOS_DESKTOP__){
@@ -810,5 +910,7 @@ func (t *tailBuf) String() string {
 
 func fatal(err error) {
 	fmt.Fprintln(os.Stderr, "openos-desktop:", err)
+	// Windows 双击启动（GUI 子系统、无控制台）时 stderr 不可见，弹错误框兜底
+	fatalDialog(err)
 	os.Exit(1)
 }

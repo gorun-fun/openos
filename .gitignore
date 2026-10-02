@@ -9,3 +9,6 @@ server/openos-server
 .zcode/
 .playwright-cli/
 openos-desktop
+release/
+desktop/desktop
+desktop/probe/
