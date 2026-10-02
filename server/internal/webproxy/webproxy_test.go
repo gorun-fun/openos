@@ -647,3 +647,103 @@ func TestMergeCookies(t *testing.T) {
 		t.Errorf("空配置应保留 jar: %q", got)
 	}
 }
+
+// proxyFor 测试辅助：对指定上游目标直接调 serveHTTPProxy（绕过 Handler 的
+// 鉴权/路由层，该层依赖 auth 包私有上下文）。
+func proxyFor(t *testing.T, upstreamURL, compactRest string, hdr map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	p := New(nil)
+	pcfg := &proxyConfig{Kind: "proxy", URL: upstreamURL}
+	r := httptest.NewRequest("GET", "/app/x/"+compactRest, nil)
+	for k, v := range hdr {
+		r.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	tu, err := decodeTarget(compactRest)
+	if err != nil {
+		t.Fatalf("decodeTarget(%q): %v", compactRest, err)
+	}
+	p.serveHTTPProxy(w, r, "x", tu, pcfg)
+	return w
+}
+
+// TestServeHTTPProxyOverlimit 超限文本响应：不重写、不截断——已读入前段与剩余流
+// 原文透传（旧实现按 16MB+1 截断并按截断长度回写 Content-Length，浏览器拿到
+// 合法长度但不完整的文档）。
+func TestServeHTTPProxyOverlimit(t *testing.T) {
+	big := []byte(`<html><head></head><body>` + strings.Repeat("a", maxRewriteBody) + `</body></html>`)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write(big)
+	}))
+	defer upstream.Close()
+	upURL := mustURL(t, upstream.URL)
+
+	w := proxyFor(t, upstream.URL, upURL.Scheme+"/"+upURL.Host+"/big", nil)
+	if w.Code != 200 {
+		t.Fatalf("code=%d", w.Code)
+	}
+	if got := w.Body.Len(); got != len(big) {
+		t.Errorf("超限响应被截断：got %d want %d", got, len(big))
+	}
+	if strings.Contains(w.Body.String(), "hook.js") {
+		t.Errorf("超限响应不应注入 hook")
+	}
+}
+
+// TestServeHTTPProxyGzipBomb 解压放大防护：压缩态在限内、解压后超限的响应按
+// 压缩态原文透传（Content-Encoding 保留），不得无界解压（内存放大）；损坏的
+// gzip 流与无法解压的压缩编码（br）同样原文透传而非改写压缩字节。
+func TestServeHTTPProxyGzipBomb(t *testing.T) {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, _ = zw.Write([]byte(strings.Repeat("a", maxRewriteBody+64)))
+	zw.Close()
+	bomb := append([]byte(nil), buf.Bytes()...) // 压缩态很小、解压后超限
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/bomb":
+			w.Header().Set("Content-Encoding", "gzip")
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write(bomb)
+		case "/corrupt":
+			w.Header().Set("Content-Encoding", "gzip")
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte("not-gzip-at-all"))
+		case "/br":
+			w.Header().Set("Content-Encoding", "br")
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte("pretend-brotli-bytes"))
+		}
+	}))
+	defer upstream.Close()
+	upURL := mustURL(t, upstream.URL)
+	compact := upURL.Scheme + "/" + upURL.Host
+
+	// 压缩炸弹：压缩态原文透传（Content-Encoding 保留、无注入、无截断）
+	w := proxyFor(t, upstream.URL, compact+"/bomb", nil)
+	if w.Code != 200 {
+		t.Fatalf("bomb code=%d", w.Code)
+	}
+	if !bytes.Equal(w.Body.Bytes(), bomb) {
+		t.Errorf("压缩态应原文透传：got %d bytes", w.Body.Len())
+	}
+	if w.Header().Get("Content-Encoding") != "gzip" {
+		t.Errorf("Content-Encoding 应保留：%q", w.Header().Get("Content-Encoding"))
+	}
+
+	// 损坏 gzip 流 / br 编码：原文透传，不做改写（改写压缩字节只会破坏流）
+	for _, path := range []string{"/corrupt", "/br"} {
+		w := proxyFor(t, upstream.URL, compact+path, nil)
+		if w.Code != 200 {
+			t.Fatalf("%s code=%d", path, w.Code)
+		}
+		if strings.Contains(w.Body.String(), "hook.js") {
+			t.Errorf("%s 不应注入 hook", path)
+		}
+		if w.Header().Get("Content-Encoding") == "" {
+			t.Errorf("%s Content-Encoding 应保留", path)
+		}
+	}
+}

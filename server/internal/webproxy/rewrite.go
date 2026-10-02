@@ -21,20 +21,19 @@ var urlAttrMode = map[string]string{
 
 func isSpace(b byte) bool { return b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '\f' }
 
-func indexCloseTag(body []byte, from int, name string) int {
-	pat := []byte("</" + name)
-	lowered := bytes.ToLower(body)
-	for i := from; ; {
-		j := bytes.Index(lowered[i:], pat)
-		if j < 0 {
-			return -1
-		}
-		j += i
-		if e := bytes.IndexByte(body[j:], '>'); e >= 0 {
-			return j + e + 1
-		}
+// indexCloseTag 在 body[from:] 中查找 </name…> 闭合标签的结束位置。lowered 是
+// body 的预折小写副本（由调用方整篇折一次传入——按标签逐次 ToLower 会对脚本多的
+// 页面产生 O(标签数×文档长) 的重复分配）。
+func indexCloseTag(body, lowered []byte, from int, name string) int {
+	j := bytes.Index(lowered[from:], []byte("</"+name))
+	if j < 0 {
 		return -1
 	}
+	j += from
+	if e := bytes.IndexByte(body[j:], '>'); e >= 0 {
+		return j + e + 1
+	}
+	return -1
 }
 
 // rewriteHTML 重写 HTML 文档：改写 URL 属性、重写 style、注入 hook 脚本（紧跟
@@ -43,6 +42,7 @@ func indexCloseTag(body []byte, from int, name string) int {
 func rewriteHTML(body []byte, prefix string, base *url.URL) []byte {
 	var out bytes.Buffer
 	injected := false
+	lowered := bytes.ToLower(body) // 闭合标签扫描的小写副本，整篇一次
 	i, n := 0, len(body)
 	for i < n {
 		j := bytes.IndexByte(body[i:], '<')
@@ -100,7 +100,7 @@ func rewriteHTML(body []byte, prefix string, base *url.URL) []byte {
 				injected = true
 			}
 			if name == "script" {
-				if k := indexCloseTag(body, i, "script"); k >= 0 {
+				if k := indexCloseTag(body, lowered, i, "script"); k >= 0 {
 					out.Write(body[i:k])
 					i = k
 				} else {
@@ -109,7 +109,7 @@ func rewriteHTML(body []byte, prefix string, base *url.URL) []byte {
 				}
 			} else if name == "style" {
 				end := n
-				if k := indexCloseTag(body, i, "style"); k >= 0 {
+				if k := indexCloseTag(body, lowered, i, "style"); k >= 0 {
 					end = k
 				}
 				out.Write(rewriteCSS(body[i:end], prefix, base))
