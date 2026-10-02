@@ -222,6 +222,16 @@ func watchTargets(c *cdp, pid, port int, sw *serverConf, docRef, selfBase string
 	firstSession := func() string { sessMu.Lock(); defer sessMu.Unlock(); return firstPage }
 	go normalizeLoop(c, firstSession, sw)
 	lastErrNav := time.Time{} // chrome-error 兜底防抖（事件循环单协程访问）
+	mainFrameId := ""         // 主窗口顶层 frame 的 frameId（frameRequestedNavigation 只认它，子帧导航不掺和）
+	leavePass := false        // 最近一次主帧导航请求的目标在守卫源内（SSO 形态：同源端点 302 后外出）
+	away := false             // 主帧外出转场中（登录流），回到守卫源即复位；转场内的一切外部导航放行
+	// inGuard 判定 URL 是否守卫源内（OpenOS 源或本地设置页）；origin 经 serverConf 动态取值
+	inGuard := func(u string) bool {
+		if o := sw.Origin(); o != "" && strings.HasPrefix(u, o) {
+			return true
+		}
+		return selfBase != "" && strings.HasPrefix(u, selfBase)
+	}
 	for ev := range c.Events() {
 		switch ev.Method {
 		case "Target.attachedToTarget":
@@ -259,6 +269,21 @@ func watchTargets(c *cdp, pid, port int, sw *serverConf, docRef, selfBase string
 			//（附身晚于 Chrome 完成初始导航时 frameNavigated 已错过，见 initialWatch）
 			if p.TargetInfo.TargetID == mainTarget {
 				mw.set(p.SessionID)
+				// 立即取 frame 树钉住主帧 frameId：守卫的 frameRequestedNavigation
+				// 判定依赖它，附身晚于初始导航时等 frameNavigated 补会漏掉首个
+				// SSO 跳转请求（页面脚本一加载就跳登录端点的形态），先被误回捕一次
+				if r, err := c.call("Page.getFrameTree", nil, p.SessionID); err == nil {
+					var ft struct {
+						FrameTree struct {
+							Frame struct {
+								ID string `json:"id"`
+							} `json:"frame"`
+						} `json:"frameTree"`
+					}
+					if json.Unmarshal(r, &ft) == nil && ft.FrameTree.Frame.ID != "" {
+						mainFrameId = ft.FrameTree.Frame.ID
+					}
+				}
 				if selfBase != "" {
 					go initialWatch(c, p.SessionID, sw, selfBase)
 				}
@@ -305,14 +330,29 @@ func watchTargets(c *cdp, pid, port int, sw *serverConf, docRef, selfBase string
 				close(done)
 				return
 			}
+		case "Page.frameRequestedNavigation":
+			// renderer 发起的主帧导航请求（服务端 302 重定向不触发——那由首个同源
+			// 请求代表）。SSO 登录流形态：页面 location.href = 守卫源同源端点
+			//（如 /api/v1/auth/sso/login）→ 服务端 302 到身份源再回来；framebusting
+			// 则把 top 直接拔到外部 URL。据此发/撤外出通行证（302 链中间跳无事件，
+			// 凭此证放行）。
+			var p struct {
+				FrameID string `json:"frameId"`
+				URL     string `json:"url"`
+			}
+			if json.Unmarshal(ev.Params, &p) != nil || mainFrameId == "" || p.FrameID != mainFrameId {
+				continue
+			}
+			leavePass = navRequestInGuard(p.URL, inGuard)
 		case "Page.frameNavigated":
 			// 主帧防走失（等价 webproxy 的 CatchEscape 回捕）：桌面模式下应用 iframe
 			// 不带 sandbox（美团等微前端容器需要），第三方页面理论上可 framebusting
-			// （top.location 自拔带走整个桌面）。主窗口的主帧一旦离开 OpenOS 源，
-			// 立即导航回去（桌面 SPA 状态会丢，但桌面保住）。只认主窗口——
-			// 「登录」按钮弹出的顶层窗口本就该导航到目标站，不能误伤
+			// （top.location 自拔带走整个桌面）。判定见 classifyMainNav：守卫源内放行；
+			// 同源请求发起的外出（SSO 登录）放行转场；直接拔到外部才回捕。只认主
+			// 窗口——「登录」按钮弹出的顶层窗口本就该导航到目标站，不能误伤
 			var p struct {
 				Frame struct {
+					ID       string `json:"id"`
 					ParentID string `json:"parentId"`
 					URL      string `json:"url"`
 				} `json:"frame"`
@@ -322,6 +362,9 @@ func watchTargets(c *cdp, pid, port int, sw *serverConf, docRef, selfBase string
 			}
 			if mainTarget == "" || sessTarget[ev.SessionID] != mainTarget {
 				continue
+			}
+			if p.Frame.ID != "" {
+				mainFrameId = p.Frame.ID
 			}
 			// 服务器地址打不开（DNS 失败 / 拒绝连接等）：chrome-error 页不跑任何注入
 			// 脚本、⚙ 入口也无处安放，直接转入本地设置页（带 unreachable 提示），
@@ -336,13 +379,21 @@ func watchTargets(c *cdp, pid, port int, sw *serverConf, docRef, selfBase string
 				}
 				continue
 			}
-			// 守卫目标跟随 serverConf（设置页里切换服务器后立即生效）；设置页自身
-			// （selfBase 前缀）必须豁免——它本就不在 OpenOS 源下，否则一进就被顶掉
-			if origin := sw.Origin(); origin != "" &&
-				!strings.HasPrefix(p.Frame.URL, origin) &&
-				!strings.HasPrefix(p.Frame.URL, selfBase) {
-				fmt.Printf("主帧被导航到 %s，回捕到 %s\n", p.Frame.URL, origin)
-				_, _ = c.call("Page.navigate", map[string]any{"url": origin + "/"}, ev.SessionID)
+			switch classifyMainNav(p.Frame.URL, away, leavePass, inGuard) {
+			case navHome:
+				away = false
+			case navAway:
+				// 外出转场中（身份源登录页的页内导航/表单提交），等它回来
+			case navLeave:
+				away = true
+				fmt.Printf("主帧经同源请求外出（登录跳转），放行: %s\n", p.Frame.URL)
+			case navHijack:
+				// 守卫目标跟随 serverConf（设置页里切换服务器后立即生效）；origin 未知
+				//（未配置）时不动作
+				if origin := sw.Origin(); origin != "" {
+					fmt.Printf("主帧被导航到 %s，回捕到 %s\n", p.Frame.URL, origin)
+					_, _ = c.call("Page.navigate", map[string]any{"url": origin + "/"}, ev.SessionID)
+				}
 			}
 		case "Network.responseReceived":
 			var p struct {
@@ -395,6 +446,44 @@ func watchTargets(c *cdp, pid, port int, sw *serverConf, docRef, selfBase string
 			}
 		}
 	}
+}
+
+// navDecision 主帧导航守卫决策。
+type navDecision int
+
+const (
+	navHome   navDecision = iota // 回到守卫源：复位转场态，放行
+	navAway                      // 外出转场中（SSO 登录流），放行
+	navLeave                     // 主帧以同源请求发起的外出（302 后到外部，SSO 登录形态）：放行并进入转场
+	navHijack                    // 主帧被直接拔到外部（iframe framebusting / 未知发起方）：回捕
+)
+
+// classifyMainNav 主帧文档导航守卫判定。SSO 登录流形态是「页面导航到守卫源的同源
+// 端点（如 /api/v1/auth/sso/login），服务端 302 到身份源，完成后再 302 回来」——
+// 导航请求时 URL 在源内（leavePass，见 Page.frameRequestedNavigation），提交时已在外；
+// framebusting 则把 top 直接拔到外部 URL（无通行证）。away 表示已进入外出转场，
+// 身份源登录页自身的页内导航/表单提交均放行，直到回到守卫源。
+func classifyMainNav(url string, away, leavePass bool, inGuard func(string) bool) navDecision {
+	if inGuard(url) {
+		return navHome
+	}
+	if away {
+		return navAway
+	}
+	if leavePass {
+		return navLeave
+	}
+	return navHijack
+}
+
+// navRequestInGuard 判定 renderer 发起的主帧导航请求是否指向守卫源（发给外出通行证）。
+// 相对路径必然落在守卫源内（协议字段通常给绝对 URL，双保险）；空 URL 无从判定，
+// 不发证（守卫保守侧：宁可多回捕，不可漏掉 framebusting）。
+func navRequestInGuard(u string, inGuard func(string) bool) bool {
+	if strings.HasPrefix(u, "/") && !strings.HasPrefix(u, "//") {
+		return true
+	}
+	return u != "" && inGuard(u)
 }
 
 // fetchHandler 处理请求级拦截（Fetch 域，Request 阶段）：

@@ -122,11 +122,13 @@ func (c *cdp) call(method string, params any, sessionId string) (json.RawMessage
 }
 
 // eventWanted 限定进入事件通道的方法：Target 附身/销毁 + SameSite Cookie 桥所需的
-// 两个网络事件 + 主帧导航守卫（requestWillBeenSent 等高频事件一律不转发）
+// 两个网络事件 + 主帧导航守卫（requestWillBeenSent 等高频事件一律不转发；
+// frameRequestedNavigation 每次导航仅一条，无洪峰风险）
 func eventWanted(method string) bool {
 	switch method {
 	case "Target.attachedToTarget", "Target.targetDestroyed",
 		"Runtime.executionContextCreated", "Page.frameNavigated",
+		"Page.frameRequestedNavigation",
 		"Network.responseReceived", "Network.responseReceivedExtraInfo":
 		return true
 	}
