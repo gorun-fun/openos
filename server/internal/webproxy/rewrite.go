@@ -83,11 +83,16 @@ func rewriteHTML(body []byte, prefix string, base *url.URL) []byte {
 			out.Write(rest[:end+1])
 			i = j + end + 1
 		default:
-			name, tagEnd, ok := writeTag(&out, rest, prefix, base)
+			// 先写进临时缓冲再决定是否输出：meta CSP 标签整枚丢弃（见 isCSPMeta）
+			var tmp bytes.Buffer
+			name, tagEnd, ok := writeTag(&tmp, rest, prefix, base)
 			if !ok {
 				out.Write(rest)
 				i = n
 				continue
+			}
+			if !(name == "meta" && isCSPMeta(tmp.Bytes())) {
+				out.Write(tmp.Bytes())
 			}
 			i = j + tagEnd
 			if name == "head" && !injected {
@@ -181,6 +186,54 @@ func writeTag(out *bytes.Buffer, rest []byte, prefix string, base *url.URL) (str
 		}
 	}
 	return name, n, false
+}
+
+// isCSPMeta 判断（已由 writeTag 输出的）meta 标签是否为
+// <meta http-equiv="Content-Security-Policy[-Report-Only]">。CSP 的 meta 形态与
+// 响应头形态同样拒绝代理嵌入：代理页面的脚本/样式源是 OpenOS 宿主源，目标站配置
+// 的源白名单（*.目标域）会把重写后的全部子资源拦成 status 0（美团 ebooking 工作台
+// 实测：meta 排在首个外部 script 之前，其后脚本全灭、SPA 白屏）。响应头 CSP 在
+// copyRespHeaders 剥除，meta 形态在此剥除，二者对齐。
+func isCSPMeta(tag []byte) bool {
+	lower := bytes.ToLower(tag)
+	hv := bytes.Index(lower, []byte("http-equiv"))
+	if hv < 0 {
+		return false
+	}
+	rest := lower[hv+len("http-equiv"):]
+	i := 0
+	for i < len(rest) && isSpace(rest[i]) {
+		i++
+	}
+	if i >= len(rest) || rest[i] != '=' {
+		return false
+	}
+	i++
+	for i < len(rest) && isSpace(rest[i]) {
+		i++
+	}
+	if i >= len(rest) {
+		return false
+	}
+	var v []byte
+	if rest[i] == '"' || rest[i] == '\'' {
+		q := rest[i]
+		i++
+		j := bytes.IndexByte(rest[i:], q)
+		if j < 0 {
+			return false
+		}
+		v = rest[i : i+j]
+	} else {
+		j := i
+		for j < len(rest) && !isSpace(rest[j]) && rest[j] != '>' {
+			j++
+		}
+		v = rest[i:j]
+	}
+	v = bytes.TrimSpace(v)
+	return bytes.Equal(v, []byte("content-security-policy")) ||
+		bytes.Equal(v, []byte("content-security-policy-report-only"))
 }
 
 func rewriteAttrVal(tag, attr string, val []byte, prefix string, base *url.URL) []byte {

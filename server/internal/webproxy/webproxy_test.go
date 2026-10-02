@@ -603,3 +603,33 @@ func TestEscapeTarget(t *testing.T) {
 	}
 	_ = upURL
 }
+
+func TestRewriteHTMLDropsMetaCSP(t *testing.T) {
+	base := mustURL(t, "https://t.example/")
+	// meta CSP（含 Report-Only 与大小写/引号变体）应整枚剥除；meta 排在首个外部
+	// script 之前时其后的脚本在代理源下会被 CSP 全部拦掉（美团 ebooking 实测）
+	doc := `<html><head>
+<meta http-equiv="Content-Security-Policy" content="script-src 'unsafe-eval' *.meituan.com">
+<meta http-equiv='Content-Security-Policy-Report-Only' content="script-src 'self'">
+<meta HTTP-EQUIV=Content-Security-Policy content=script-src>
+<meta charset="utf-8">
+<meta name="x" content="Content-Security-Policy">
+<script src="/a.js"></script>
+</head><body></body></html>`
+	out := string(rewriteHTML([]byte(doc), "/app/x/", base))
+	if strings.Contains(strings.ToLower(out), "http-equiv") {
+		t.Errorf("CSP meta 应被剥除（夹具中无其他 http-equiv meta），输出仍含:\n%s", out)
+	}
+	if !strings.Contains(out, `<meta charset="utf-8">`) {
+		t.Errorf("无关 meta 应保留:\n%s", out)
+	}
+	if !strings.Contains(out, `content="Content-Security-Policy"`) {
+		t.Errorf("name/content 属性提及 CSP 的普通 meta 应保留:\n%s", out)
+	}
+	if !strings.Contains(out, `src="/app/x/https/t.example/a.js"`) {
+		t.Errorf("后续脚本应保留并被改写:\n%s", out)
+	}
+	if n := strings.Count(out, `src="/app/x/hook.js"`); n != 1 {
+		t.Errorf("hook 注入次数 = %d\n%s", n, out)
+	}
+}
