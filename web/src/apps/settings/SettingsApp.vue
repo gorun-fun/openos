@@ -132,7 +132,8 @@ async function saveDisplayNameEdit() {
   try {
     await api.put(`/api/users/${row.username}`, { displayName: name })
     row.displayName = name
-    if (session.user?.username === row.username) session.user.displayName = name // 管理员改的是自己时，菜单栏即刷
+    const su = session.user
+    if (su && su.username === row.username) su.displayName = name // 管理员改的是自己时，菜单栏即刷
     dnEdit.value = null
   } catch (e: any) { alert(e.message) }
 }
