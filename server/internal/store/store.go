@@ -4,6 +4,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,6 +30,7 @@ type AppDef struct {
 	Icon     string          `json:"icon"`
 	Category string          `json:"category"`
 	Builtin  bool            `json:"builtin"`
+	Locked   bool            `json:"locked,omitempty"` // 宿主锁定应用：宿主经交换密钥注册，管理界面不可编辑/删除
 	Hidden   bool            `json:"hidden,omitempty"` // 隐藏应用：可编程打开，不出现在启动台/Dock（详情窗口类）
 	Config   json.RawMessage `json:"config,omitempty"`
 	Width    int             `json:"width"`
@@ -97,6 +99,7 @@ CREATE TABLE IF NOT EXISTS apps (
   icon TEXT NOT NULL DEFAULT '',
   category TEXT NOT NULL DEFAULT 'other',
   builtin INTEGER NOT NULL DEFAULT 0,
+  locked INTEGER NOT NULL DEFAULT 0,
   hidden INTEGER NOT NULL DEFAULT 0,
   config TEXT NOT NULL DEFAULT '',
   width INTEGER NOT NULL DEFAULT 800,
@@ -242,6 +245,7 @@ func (db *DB) migrateColumns() error {
 		{"users", "disabled", "ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0"},
 		{"files", "is_binary", "ALTER TABLE files ADD COLUMN is_binary INTEGER NOT NULL DEFAULT 0"},
 		{"apps", "hidden", "ALTER TABLE apps ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0"},
+		{"apps", "locked", "ALTER TABLE apps ADD COLUMN locked INTEGER NOT NULL DEFAULT 0"},
 	} {
 		var n int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`, c.table, c.name).Scan(&n); err != nil {
@@ -293,9 +297,9 @@ func (db *DB) seed(cfg *config) error {
 		if len(a.Config) > 0 {
 			cfgJSON = string(a.Config)
 		}
-		if _, err := db.Exec(`INSERT INTO apps(id,name,icon,category,builtin,hidden,config,width,height) VALUES(?,?,?,?,?,?,?,?,?)
+		if _, err := db.Exec(`INSERT INTO apps(id,name,icon,category,builtin,locked,hidden,config,width,height) VALUES(?,?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(id) DO UPDATE SET name=excluded.name, icon=excluded.icon, config=excluded.config, width=excluded.width, height=excluded.height`,
-			a.ID, a.Name, a.Icon, a.Category, boolInt(a.Builtin), boolInt(a.Hidden), cfgJSON, a.Width, a.Height); err != nil {
+			a.ID, a.Name, a.Icon, a.Category, boolInt(a.Builtin), boolInt(a.Locked), boolInt(a.Hidden), cfgJSON, a.Width, a.Height); err != nil {
 			return err
 		}
 		if exists == 0 {
@@ -556,7 +560,7 @@ func (db *DB) Stats(startedAt time.Time) SystemStats {
 
 // ListApps 返回全部已注册应用。
 func (db *DB) ListApps() ([]AppDef, error) {
-	rows, err := db.Query(`SELECT id,name,icon,category,builtin,hidden,config,width,height FROM apps ORDER BY builtin DESC, category, id`)
+	rows, err := db.Query(`SELECT id,name,icon,category,builtin,locked,hidden,config,width,height FROM apps ORDER BY builtin DESC, category, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -565,10 +569,11 @@ func (db *DB) ListApps() ([]AppDef, error) {
 	for rows.Next() {
 		var a AppDef
 		var cfg string
-		var hidden int
-		if err := rows.Scan(&a.ID, &a.Name, &a.Icon, &a.Category, &a.Builtin, &hidden, &cfg, &a.Width, &a.Height); err != nil {
+		var locked, hidden int
+		if err := rows.Scan(&a.ID, &a.Name, &a.Icon, &a.Category, &a.Builtin, &locked, &hidden, &cfg, &a.Width, &a.Height); err != nil {
 			return nil, err
 		}
+		a.Locked = locked != 0
 		a.Hidden = hidden != 0
 		if cfg != "" {
 			a.Config = json.RawMessage(cfg)
@@ -580,7 +585,7 @@ func (db *DB) ListApps() ([]AppDef, error) {
 
 // ListAppsForRole 返回某角色可访问的应用。
 func (db *DB) ListAppsForRole(role string) ([]AppDef, error) {
-	rows, err := db.Query(`SELECT a.id,a.name,a.icon,a.category,a.builtin,a.hidden,a.config,a.width,a.height
+	rows, err := db.Query(`SELECT a.id,a.name,a.icon,a.category,a.builtin,a.locked,a.hidden,a.config,a.width,a.height
 		FROM apps a JOIN role_apps r ON r.app_id=a.id WHERE r.role=? ORDER BY a.builtin DESC, a.category, a.id`, role)
 	if err != nil {
 		return nil, err
@@ -590,10 +595,11 @@ func (db *DB) ListAppsForRole(role string) ([]AppDef, error) {
 	for rows.Next() {
 		var a AppDef
 		var cfg string
-		var hidden int
-		if err := rows.Scan(&a.ID, &a.Name, &a.Icon, &a.Category, &a.Builtin, &hidden, &cfg, &a.Width, &a.Height); err != nil {
+		var locked, hidden int
+		if err := rows.Scan(&a.ID, &a.Name, &a.Icon, &a.Category, &a.Builtin, &locked, &hidden, &cfg, &a.Width, &a.Height); err != nil {
 			return nil, err
 		}
+		a.Locked = locked != 0
 		a.Hidden = hidden != 0
 		if cfg != "" {
 			a.Config = json.RawMessage(cfg)
@@ -607,12 +613,13 @@ func (db *DB) ListAppsForRole(role string) ([]AppDef, error) {
 func (db *DB) AppByID(id string) (AppDef, bool) {
 	var a AppDef
 	var cfg string
-	var hidden int
-	err := db.QueryRow(`SELECT id,name,icon,category,builtin,hidden,config,width,height FROM apps WHERE id=?`, id).
-		Scan(&a.ID, &a.Name, &a.Icon, &a.Category, &a.Builtin, &hidden, &cfg, &a.Width, &a.Height)
+	var locked, hidden int
+	err := db.QueryRow(`SELECT id,name,icon,category,builtin,locked,hidden,config,width,height FROM apps WHERE id=?`, id).
+		Scan(&a.ID, &a.Name, &a.Icon, &a.Category, &a.Builtin, &locked, &hidden, &cfg, &a.Width, &a.Height)
 	if err != nil {
 		return a, false
 	}
+	a.Locked = locked != 0
 	a.Hidden = hidden != 0
 	if cfg != "" {
 		a.Config = json.RawMessage(cfg)
@@ -647,21 +654,30 @@ func (db *DB) UpsertApp(a AppDef) error {
 	if a.Height <= 0 {
 		a.Height = 560
 	}
-	_, err := db.Exec(`INSERT INTO apps(id,name,icon,category,builtin,hidden,config,width,height) VALUES(?,?,?,?,?,?,?,?,?)
+	_, err := db.Exec(`INSERT INTO apps(id,name,icon,category,builtin,locked,hidden,config,width,height) VALUES(?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET name=excluded.name, icon=excluded.icon, category=excluded.category,
-		hidden=excluded.hidden, config=excluded.config, width=excluded.width, height=excluded.height`,
-		a.ID, a.Name, a.Icon, a.Category, boolInt(a.Builtin), boolInt(a.Hidden), cfg, a.Width, a.Height)
+		hidden=excluded.hidden, config=excluded.config, width=excluded.width, height=excluded.height,
+		locked=MAX(apps.locked, excluded.locked)`,
+		a.ID, a.Name, a.Icon, a.Category, boolInt(a.Builtin), boolInt(a.Locked), boolInt(a.Hidden), cfg, a.Width, a.Height)
 	return err
 }
 
-// DeleteApp 删除应用及其授权。
+// DeleteApp 删除应用及其授权。内置（builtin）与宿主锁定（locked）应用不可删；
+// 仅当应用行确实被删除时才回收授权，避免受保护应用的 role_apps 被误清空。
 func (db *DB) DeleteApp(id string) error {
-	if _, err := db.Exec(`DELETE FROM apps WHERE id=? AND builtin=0`, id); err != nil {
+	res, err := db.Exec(`DELETE FROM apps WHERE id=? AND builtin=0 AND locked=0`, id)
+	if err != nil {
 		return err
 	}
-	_, err := db.Exec(`DELETE FROM role_apps WHERE app_id=?`, id)
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrAppProtected
+	}
+	_, err = db.Exec(`DELETE FROM role_apps WHERE app_id=?`, id)
 	return err
 }
+
+// ErrAppProtected 删除目标为内置或宿主锁定的受保护应用。
+var ErrAppProtected = errors.New("app is builtin or locked")
 
 // RoleAccessMap 返回全部角色 → 应用授权矩阵。
 func (db *DB) RoleAccessMap() (map[string][]string, error) {
@@ -720,6 +736,32 @@ func (db *DB) ListRoles() ([]string, error) {
 		}
 	}
 	return out, rows.Err()
+}
+
+// roleLabelsKV 角色显示名在 system_kv 中的存储键（宿主注入，见 RoleLabels）。
+const roleLabelsKV = "role_labels"
+
+// RoleLabels 读取角色显示名映射（宿主注入：键为角色 key，值为展示名，如
+// boss → 老板/业主）。未注入或数据损坏时返回空映射，调用方回落内置文案。
+func (db *DB) RoleLabels() map[string]string {
+	raw, err := db.GetSystemKV(roleLabelsKV)
+	if raw == "" || err != nil {
+		return map[string]string{}
+	}
+	var m map[string]string
+	if json.Unmarshal([]byte(raw), &m) != nil {
+		return map[string]string{}
+	}
+	return m
+}
+
+// SetRoleLabels 全量覆盖角色显示名（传空映射即清除）。
+func (db *DB) SetRoleLabels(m map[string]string) error {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return db.SetSystemKV(roleLabelsKV, string(b))
 }
 
 // ---- 用户设置 ----

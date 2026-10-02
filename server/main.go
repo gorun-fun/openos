@@ -190,6 +190,15 @@ func main() {
 		}
 		a.ID = sanitizeID(a.ID)
 		a.Builtin = false
+		// locked（宿主锁定）只信任携带交换密钥的宿主服务调用：管理员经界面/API
+		// 注册的一律普通应用；已锁定的应用仅宿主服务可改，管理员改配置会被拒
+		if !authSvc.CheckExchangeSecret(r.Header.Get("X-Exchange-Secret")) {
+			if cur, ok := db.AppByID(a.ID); ok && cur.Locked {
+				http.Error(w, "宿主内置应用不可编辑", http.StatusForbidden)
+				return
+			}
+			a.Locked = false
+		}
 		if err := db.UpsertApp(a); err != nil {
 			http.Error(w, "注册失败", 500)
 			return
@@ -204,8 +213,12 @@ func main() {
 			http.Error(w, "需要管理员权限", http.StatusForbidden)
 			return
 		}
-		db.DeleteApp(r.PathValue("id"))
-		db.Audit(id.Username, "app.delete", r.PathValue("id"), "")
+		appID := r.PathValue("id")
+		if err := db.DeleteApp(appID); err != nil {
+			http.Error(w, "内置或宿主锁定的应用不可删除", http.StatusForbidden)
+			return
+		}
+		db.Audit(id.Username, "app.delete", appID, "")
 		hub.Publish("sys:apps-changed", nil)
 		writeJSON(w, map[string]string{"ok": "1"})
 	})
@@ -219,7 +232,33 @@ func main() {
 		if roles == nil {
 			roles = []string{"admin", "user", "guest"}
 		}
-		writeJSON(w, map[string]any{"roles": roles, "access": m})
+		// labels：宿主注入的角色显示名（未注入为空对象，前端回落内置文案）
+		writeJSON(w, map[string]any{"roles": roles, "access": m, "labels": db.RoleLabels()})
+	})
+	// 角色显示名（宿主注入，如把集成系统的角色 key 映射为中文展示名）：全量覆盖
+	// 语义，宿主在启动/角色变更时整体推送，与 role_apps 同样由宿主侧维护。
+	authed.HandleFunc("PUT /api/apps/role-labels", func(w http.ResponseWriter, r *http.Request) {
+		id := auth.FromContext(r)
+		if id.Role != "admin" {
+			http.Error(w, "需要管理员权限", http.StatusForbidden)
+			return
+		}
+		var req struct {
+			Labels map[string]string `json:"labels"`
+		}
+		if json.NewDecoder(r.Body).Decode(&req) != nil {
+			http.Error(w, "参数错误", 400)
+			return
+		}
+		if req.Labels == nil {
+			req.Labels = map[string]string{}
+		}
+		if err := db.SetRoleLabels(req.Labels); err != nil {
+			http.Error(w, "保存失败", 500)
+			return
+		}
+		db.Audit(id.Username, "apps.role-labels", fmt.Sprintf("%d 项", len(req.Labels)), "")
+		writeJSON(w, map[string]string{"ok": "1"})
 	})
 	authed.HandleFunc("PUT /api/apps/access", func(w http.ResponseWriter, r *http.Request) {
 		id := auth.FromContext(r)

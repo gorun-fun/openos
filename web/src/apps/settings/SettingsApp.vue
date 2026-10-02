@@ -18,9 +18,11 @@ const desktop = useDesktop()
 const apps = useApps()
 const isAdmin = session.user?.role === 'admin'
 
-// 角色名中文显示（内置角色映射；宿主注入的自定义角色保留原名，悬停可见英文）
+// 角色名中文显示：优先宿主注入的显示名（GET /api/apps/access 的 labels，随
+// loadAccess 加载），再回落内置角色映射，最后原样显示角色 key
 const ROLE_LABELS: Record<string, string> = { admin: '管理员', user: '用户', guest: '访客' }
-function roleLabel(r: string) { return ROLE_LABELS[r] || r }
+const roleLabels = ref<Record<string, string>>({})
+function roleLabel(r: string) { return roleLabels.value[r] || ROLE_LABELS[r] || r }
 
 const tab = ref('appearance')
 // 桌面客户端专属：服务器设置（OpenOS 兼容端连接）。标记对象带 settingsUrl =
@@ -99,9 +101,10 @@ const accessRole = ref('user')
 const accessDirty = ref(false)
 
 async function loadAccess() {
-  const data = await api.get<{ roles: string[]; access: Record<string, string[]> }>('/api/apps/access')
+  const data = await api.get<{ roles: string[]; access: Record<string, string[]>; labels?: Record<string, string> }>('/api/apps/access')
   roles.value = data.roles
   access.value = data.access
+  roleLabels.value = data.labels || {}
   accessRole.value = data.roles.includes(accessRole.value) ? accessRole.value : data.roles[1] || data.roles[0]
   allApps.value = await api.get<AppDef[]>('/api/apps?all=1')
 }
@@ -458,14 +461,14 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
         <div v-for="a in registryApps" :key="a.id" class="reg-item">
           <AppIcon :app="a.id" :icon="a.icon" :size="34" />
           <div class="reg-meta">
-            <span class="an">{{ a.name }}<em v-if="a.builtin" class="builtin-badge">内置</em></span>
+            <span class="an">{{ a.name }}<em v-if="a.builtin || a.locked" class="builtin-badge">内置</em></span>
             <span class="aid">{{ a.id }} · {{ appType(a) }}</span>
           </div>
           <span class="grow" />
           <OsButton size="sm" @click="bus.emit('sys:open', { app: a.id })">打开</OsButton>
-          <!-- 内置应用配置随版本发布，不可编辑/删除 -->
-          <OsButton v-if="!a.builtin" size="sm" @click="isWebApp(a) ? openEditWeb(a) : openEditSchema(a)">编辑</OsButton>
-          <OsButton v-if="!a.builtin" size="sm" variant="danger" @click="removeApp(a.id)">删除</OsButton>
+          <!-- 内置应用配置随版本发布、宿主锁定（locked）应用由宿主种子维护，均不可编辑/删除 -->
+          <OsButton v-if="!a.builtin && !a.locked" size="sm" @click="isWebApp(a) ? openEditWeb(a) : openEditSchema(a)">编辑</OsButton>
+          <OsButton v-if="!a.builtin && !a.locked" size="sm" variant="danger" @click="removeApp(a.id)">删除</OsButton>
         </div>
       </OsPanel>
       <OsEmpty v-else text="还没有第三方应用，点右上角按钮添加" />
