@@ -186,10 +186,10 @@ defineExpose({ closeMenu })
         {{ desktop.dark ? '🌙' : '☀️' }}
       </button>
       <span class="mb user">{{ session.user?.displayName || session.user?.username }}</span>
-      <!-- 时钟即通知中心入口（macOS 习惯）：点击唤出右侧通知面板，未读时显小红点 -->
+      <!-- 时钟即通知中心入口（macOS 习惯）：点击唤出右侧通知面板，未读时显数字角标 -->
       <button class="mb time" data-os-nc-clock title="通知中心" @click="notifications.togglePanel()">
         {{ timeText }}
-        <i v-if="notifications.unread" class="nc-dot" />
+        <span v-if="notifications.unread" class="nc-badge">{{ notifications.unread > 99 ? '99+' : notifications.unread }}</span>
       </button>
     </nav>
 
@@ -230,9 +230,14 @@ button.mb { cursor: pointer; }
 .chip.icon { background: transparent; border-color: transparent; padding: 1px 8px; }
 .user { color: var(--os-text-secondary); }
 .time { font-variant-numeric: tabular-nums; position: relative; padding: 2px 8px; }
-.nc-dot {
-  position: absolute; top: 1px; right: 1px; width: 5px; height: 5px;
-  border-radius: 50%; background: #ff5f57; box-shadow: 0 0 0 1.5px rgba(0, 0, 0, .18);
+/* 通知未读数角标：时钟右上角红色小胶囊，>99 截断为 99+ */
+.nc-badge {
+  position: absolute; top: -4px; right: -3px; min-width: 15px; height: 15px;
+  padding: 0 4px; border-radius: 999px;
+  background: #ff5f57; color: #fff;
+  font-size: 10px; font-weight: 650; line-height: 15px; text-align: center;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 0 0 1.5px rgba(0, 0, 0, .18);
 }
 
 .menu-anchor { position: relative; display: flex; }
