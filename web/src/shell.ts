@@ -9,6 +9,8 @@ export interface ShellBrand {
   logo: string
   /** 副标题（登录页） */
   sub: string
+  /** 宿主产品版本（可选，构建期注入，如 git tag）：设置「关于」与菜单栏关于弹窗展示；缺省不显示版本 */
+  version?: string
 }
 
 export type ShellLogin =

@@ -6,6 +6,7 @@ import { useDesktop } from '../../stores/desktop'
 import { useApps } from '../../stores/apps'
 import { api, type AppDef } from '../../api/client'
 import { bus } from '../../bus/bus'
+import { shell } from '../../shell'
 import {
   OsButton, OsInput, OsSelect, OsToggle, OsPanel, OsTable, OsLayout, OsTabs, OsModal,
   OsEmpty, AppIcon,
@@ -354,6 +355,17 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
           :style="{ background: w }" :title="`壁纸 ${i + 1}`" @click="desktop.setWallpaper(i)"
         ><span v-if="desktop.wallpaper === i" class="wall-check">✓</span></button>
       </div>
+      <h2 class="sec">关于</h2>
+      <div class="card">
+        <div class="group">
+          <div class="g-text">
+            <div class="g-title">{{ shell.brand.logo }} {{ shell.brand.name }}</div>
+            <div class="g-sub">{{ shell.brand.sub }}</div>
+          </div>
+          <!-- 宿主注入的产品版本（brand.version，独立部署时缺省不显示） -->
+          <span v-if="shell.brand.version" class="ver">{{ shell.brand.version }}</span>
+        </div>
+      </div>
     </template>
 
     <!-- 账户 -->
@@ -660,6 +672,8 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
   position: absolute; right: 6px; bottom: 5px; width: 20px; height: 20px; border-radius: 50%;
   background: var(--os-accent); color: #fff; font-size: 12px; line-height: 20px; text-align: center;
 }
+/* 关于卡片右侧的版本号（宿主 brand.version 注入） */
+.ver { font-family: var(--os-mono); font-size: 12px; color: var(--os-text-secondary); white-space: nowrap; }
 .row { display: flex; gap: 20px; align-items: center; }
 .form { display: flex; flex-direction: column; gap: 8px; }
 .form label { font-size: 12px; color: var(--os-text-secondary); display: flex; gap: 8px; align-items: center; }
