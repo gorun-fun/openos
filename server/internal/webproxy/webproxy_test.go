@@ -469,7 +469,7 @@ func TestServeHTTPProxy(t *testing.T) {
 	// 配置请求头：认证头随转发附加；配置 Cookie 与保留的目标站会话合并，
 	// OpenOS 会话依旧不外泄
 	w = do(upCompact+"/echo-hdr", map[string]string{"Cookie": "openos_token=SECRET; sid=7"})
-	if s := w.Body.String(); s != "Auth:Bearer tk|Key:k1|CK:gate=fixed; sid=7" {
+	if s := w.Body.String(); s != "Auth:Bearer tk|Key:k1|CK:sid=7; gate=fixed" {
 		t.Errorf("配置请求头应用不符合预期：%s", s)
 	}
 
@@ -631,5 +631,19 @@ func TestRewriteHTMLDropsMetaCSP(t *testing.T) {
 	}
 	if n := strings.Count(out, `src="/app/x/hook.js"`); n != 1 {
 		t.Errorf("hook 注入次数 = %d\n%s", n, out)
+	}
+}
+
+func TestMergeCookies(t *testing.T) {
+	// 同名：jar（目标站 Set-Cookie 轮换值）优先；配置独有名字兜底附加
+	got := mergeCookies("a=1; b=2; c=3", "b=fresh; d=4")
+	if got != "b=fresh; d=4; a=1; c=3" {
+		t.Errorf("mergeCookies = %q", got)
+	}
+	if got := mergeCookies("a=1", ""); got != "a=1" {
+		t.Errorf("空 jar 应保留全部配置: %q", got)
+	}
+	if got := mergeCookies("", "a=1"); got != "a=1" {
+		t.Errorf("空配置应保留 jar: %q", got)
 	}
 }

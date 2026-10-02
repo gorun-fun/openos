@@ -707,18 +707,50 @@ func sanitizeOutRequest(out, orig *http.Request, id string, cfg *proxyConfig) {
 }
 
 // applyCfgHeaders 把管理员配置的自定义请求头应用到上游请求（在 sanitize 之后，
-// 配置优先级最高）；Cookie 特殊处理为合并——配置值在前、保留的目标站会话在后，
-// 避免固定认证 Cookie 顶掉用户在目标站的登录态。
+// 配置优先级最高）；Cookie 特殊处理为合并——同名时保留浏览器侧（代理路径下）的
+// 目标站会话值：目标站经 Set-Cookie 主动轮换过的会话更新鲜，配置里的静态值
+// 若排在前会顶掉轮换后的会话（美团 ebooking 等按首现取值的栈会反复掉登录）；
+// 目标站从未下发过的名字仍附上配置值兜底（首次注入会话的主用例）。
 func applyCfgHeaders(h http.Header, cfg map[string]string) {
 	for k, v := range cfg {
 		if strings.EqualFold(k, "Cookie") {
 			if old := h.Get("Cookie"); old != "" {
-				h.Set("Cookie", v+"; "+old)
+				h.Set("Cookie", mergeCookies(v, old))
 				continue
 			}
 		}
 		h.Set(k, v)
 	}
+}
+
+// mergeCookies 合并配置 Cookie 与浏览器侧会话：jar 在前（同名取 jar 值），
+// 配置中未被 jar 覆盖的名字追加在后。两侧均按分号拆分并修剪空白。
+func mergeCookies(cfg, jar string) string {
+	seen := map[string]bool{}
+	jarParts := make([]string, 0, 8)
+	for _, part := range strings.Split(jar, ";") {
+		p := strings.TrimSpace(part)
+		if p == "" {
+			continue
+		}
+		jarParts = append(jarParts, p)
+		name := strings.SplitN(p, "=", 2)[0]
+		if name != "" {
+			seen[name] = true
+		}
+	}
+	for _, part := range strings.Split(cfg, ";") {
+		p := strings.TrimSpace(part)
+		if p == "" {
+			continue
+		}
+		name := strings.SplitN(p, "=", 2)[0]
+		if name != "" && seen[name] {
+			continue
+		}
+		jarParts = append(jarParts, p)
+	}
+	return strings.Join(jarParts, "; ")
 }
 
 // keepCookies 剥掉 OpenOS 自身会话 Cookie（openos_token 与 openos_* 系列）。
