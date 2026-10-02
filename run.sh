@@ -15,9 +15,11 @@
 #                              客户端再执行，完成后保持停止状态，./run.sh start 全新启动）
 #   ./run.sh build [desktop|server|all]
 #                              交叉编译 Linux/Windows 二进制（linux/windows × amd64/arm64）
-#                              到 release/（Windows 产物带 .exe）：desktop=桌面客户端
-#                              （默认，Windows 下 GUI 子系统+应用图标，双击无 cmd 黑框）、
-#                              server=服务端（注入版本号）、all=两者全部
+#                              按平台分目录输出到 release/<os>-<arch>/，目录内可执行文件
+#                              直接叫 openos（桌面客户端）/ openos-server（Windows 带
+#                              .exe）：desktop=桌面客户端（默认，Windows 下 GUI 子系统+
+#                              应用图标，双击无 cmd 黑框）、server=服务端（注入版本号）、
+#                              all=两者全部
 #
 # 说明：
 #   - 服务端工作目录固定为 server/，与开发模式一致：数据落在 server/data/
@@ -183,20 +185,23 @@ build() {
 }
 
 # 交叉编译 Linux/Windows 发布二进制（build 子命令）：linux/windows × amd64/arm64，
-# 输出到 release/（Windows 带 .exe 后缀）。target：desktop=桌面客户端（默认）、
+# 按平台分目录输出到 release/<goos>-<goarch>/，目录内可执行文件直接以平台无关名字
+# 命名：桌面客户端 = openos（与 make release 的 openos 命名一致），服务端 =
+# openos-server（Windows 带 .exe 后缀）。target：desktop=桌面客户端（默认）、
 # server=服务端（注入版本号，与 make release 同款 ldflags；纯二进制不含前端产物，
 # 运行时需 OPENOS_DIST 指向 web/dist）、all=两者全部
 build_cross() {
-  local target="$1" goos goarch ext version
-  mkdir -p "${ROOT}/release"
+  local target="$1" goos goarch ext dir version
   version="$(git -C "${ROOT}" describe --tags --exact-match 2>/dev/null \
     || git -C "${ROOT}" describe --tags 2>/dev/null || echo dev)"
   for goos in linux windows; do
     for goarch in amd64 arm64; do
       ext=""
       if [ "${goos}" = "windows" ]; then ext=".exe"; fi
+      dir="${ROOT}/release/${goos}-${goarch}"
+      mkdir -p "${dir}"
       if [ "${target}" = "desktop" ] || [ "${target}" = "all" ]; then
-        echo "→ 构建 release/openos-desktop-${goos}-${goarch}${ext}"
+        echo "→ 构建 release/${goos}-${goarch}/openos${ext}"
         # Windows 用 GUI 子系统（-H windowsgui）：双击启动不弹 cmd 黑框；从终端
         # 启动时的输出/输入由二进制内 AttachConsole 挂回父终端（console_windows.go），
         # 启动失败（无终端可挂）弹系统错误框。图标经 desktop/ 下 rsrc_windows_*.syso
@@ -204,21 +209,21 @@ build_cross() {
         if [ "${goos}" = "windows" ]; then
           (cd "${ROOT}/desktop" && CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
             go build -trimpath -ldflags "-s -w -H windowsgui" \
-            -o "${ROOT}/release/openos-desktop-${goos}-${goarch}${ext}" .)
+            -o "${dir}/openos${ext}" .)
         else
           (cd "${ROOT}/desktop" && CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
-            go build -trimpath -o "${ROOT}/release/openos-desktop-${goos}-${goarch}${ext}" .)
+            go build -trimpath -o "${dir}/openos${ext}" .)
         fi
       fi
       if [ "${target}" = "server" ] || [ "${target}" = "all" ]; then
-        echo "→ 构建 release/openos-server-${goos}-${goarch}${ext}"
+        echo "→ 构建 release/${goos}-${goarch}/openos-server${ext}"
         (cd "${SERVER_DIR}" && CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
           go build -trimpath -ldflags "-s -w -X openos/server/internal/store.Version=${version}" \
-          -o "${ROOT}/release/openos-server-${goos}-${goarch}${ext}" .)
+          -o "${dir}/openos-server${ext}" .)
       fi
     done
   done
-  echo "✓ 完成：${ROOT}/release/（版本 ${version}）"
+  echo "✓ 完成：${ROOT}/release/<goos>-<goarch>/（版本 ${version}）"
 }
 
 # 确保桌面客户端二进制存在：有 Go 就构建（增量，秒级）；构建失败但二进制可用则沿用
@@ -392,9 +397,10 @@ usage() {
   stop     停止（默认 target = desktop）
   restart   重启（默认 target = desktop，同样包含构建）
   reset     清空桌面客户端全部本地数据（仅 target = desktop）
-  build     交叉编译 Linux/Windows 二进制（linux/windows × amd64/arm64 → release/，
-            Windows 产物带 .exe；默认 target = desktop，server / all 可选；桌面端
-            Windows 构建为 GUI 子系统并带应用图标，双击启动无 cmd 黑框）
+  build     交叉编译 Linux/Windows 二进制（linux/windows × amd64/arm64，按平台分
+            目录 release/<os>-<arch>/，目录内可执行文件直接叫 openos /
+            openos-server，Windows 带 .exe；默认 target = desktop，server / all
+            可选；桌面端 Windows 构建为 GUI 子系统并带应用图标，双击启动无 cmd 黑框）
 
 target:
   desktop   整套 = 桌面客户端 + 服务端：
@@ -415,8 +421,8 @@ target:
   ./run.sh stop desktop       # 仅停桌面客户端（服务端继续运行）
   ./run.sh restart            # 整套重建并重启
   ./run.sh reset              # 清空桌面客户端数据（登录态/站点数据/服务器配置）
-  ./run.sh build              # 交叉编译桌面客户端：release/openos-desktop-{linux,windows}-{amd64,arm64}[.exe]
-  ./run.sh build server       # 交叉编译服务端（注入版本号）
+  ./run.sh build              # 交叉编译桌面客户端：release/{linux,windows}-{amd64,arm64}/openos[.exe]
+  ./run.sh build server       # 交叉编译服务端：release/<平台>/openos-server[.exe]（注入版本号）
   ./run.sh build all          # 桌面客户端 + 服务端全部二进制
 
 环境变量原样透传给服务端（OPENOS_ADDR / OPENOS_DATA / OPENOS_JWT_SECRET / OPENOS_AI_* 等）；
