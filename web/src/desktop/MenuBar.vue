@@ -195,7 +195,7 @@ defineExpose({ closeMenu })
 
     <OsModal v-if="showAbout" title="关于 OpenOS" okText="好" :cancelText="''" @ok="showAbout = false" @cancel="showAbout = false">
       <p style="line-height:1.9">
-        <b>{{ shell.brand.name }}</b><template v-if="shell.brand.version"> v{{ shell.brand.version }}</template>（OpenOS v{{ version || '1.1' }}）<br />
+        <b>{{ shell.brand.name }}</b><template v-if="shell.brand.version"> {{ shell.brand.version }}</template>（OpenOS v{{ version || '1.1' }}）<br />
         Go + Vite (Vue 3) · 事件总线通信 · SQLite 存储<br />
         已运行：{{ uptimeText }} · 在线：{{ online.length }} 人<br />
         快捷键：⌘/Alt+Space 聚焦搜索 · F4 启动台 · Alt+W 关闭 · Alt+M 最小化 · Alt+↩ 缩放 · Alt+` 切换窗口
