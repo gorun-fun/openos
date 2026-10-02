@@ -17,6 +17,11 @@ const session = useSession()
 const desktop = useDesktop()
 const apps = useApps()
 const isAdmin = session.user?.role === 'admin'
+// SSO 模式（宿主组壳注入 login.mode='sso'）：身份与密码托管于宿主统一身份系统
+const ssoLogin = computed(() => (shell.login.mode === 'sso' ? shell.login : null))
+function openSsoPassword() {
+  if (ssoLogin.value?.passwordUrl) window.open(ssoLogin.value.passwordUrl, '_blank', 'noopener')
+}
 
 // 角色名中文显示：优先宿主注入的显示名（GET /api/apps/access 的 labels，随
 // loadAccess 加载），再回落内置角色映射，最后原样显示角色 key
@@ -438,7 +443,20 @@ watch(tab, (t) => {
         </div>
       </div>
       <h2 class="sec">登录与安全</h2>
-      <div class="card">
+      <!-- SSO 模式：密码托管于统一身份系统，本地改密表单不渲染；宿主可注入
+           passwordUrl 提供「前往统一身份改密」跳转（新开页签，桌面不丢状态） -->
+      <div v-if="ssoLogin" class="card">
+        <div class="group">
+          <div class="g-text">
+            <div class="g-title">密码由统一身份系统管理</div>
+            <div class="g-sub">登录身份来自单点登录，修改密码请在统一身份系统的账户页操作，对所有接入应用生效。</div>
+          </div>
+          <OsButton v-if="ssoLogin.passwordUrl" variant="primary" @click="openSsoPassword">
+            {{ ssoLogin.passwordLabel || '前往统一身份修改密码' }}
+          </OsButton>
+        </div>
+      </div>
+      <div v-else class="card">
         <div class="group pwd">
           <div class="g-text"><div class="g-title">原密码</div></div>
           <OsInput v-model="oldPwd" type="password" placeholder="原密码" />
@@ -481,10 +499,12 @@ watch(tab, (t) => {
             :model-value="row.role" :options="roleOptions" style="padding:3px 6px;font-size:12px"
             @update:model-value="(v: any) => setRole(row, String(v))"
           />
-          <OsButton size="sm" :variant="row.disabled ? 'primary' : 'plain'" :disabled="row.username === 'admin'" @click="setDisabled(row, !row.disabled)">
+          <!-- 按角色保护（宿主体系下管理员用户名多为 UUID，字面量 'admin' 判定会漏保护
+               服务账号）；服务端另有「最后一名管理员」兜底 -->
+          <OsButton size="sm" :variant="row.disabled ? 'primary' : 'plain'" :disabled="row.role === 'admin'" @click="setDisabled(row, !row.disabled)">
             {{ row.disabled ? '启用' : '禁用' }}
           </OsButton>
-          <OsButton size="sm" variant="danger" :disabled="row.username === 'admin'" @click="removeUser(row)">删除</OsButton>
+          <OsButton size="sm" variant="danger" :disabled="row.role === 'admin'" @click="removeUser(row)">删除</OsButton>
         </template>
       </OsTable>
       <p class="hint">提示：禁用即时生效（在线会话被踢下线）；删除会连带清理其文件、设置与磁盘数据。</p>
@@ -494,6 +514,17 @@ watch(tab, (t) => {
         <div class="dlg-form">
           <div><label>用户</label><div class="dlg-ro">{{ dnEdit.row.displayName || shortUN(dnEdit.row.username) }}（{{ shortUN(dnEdit.row.username) }}）</div></div>
           <div><label>新显示名</label><OsInput v-model="dnEditVal" placeholder="展示在菜单栏与用户管理" @keyup.enter="saveDisplayNameEdit" /></div>
+        </div>
+      </OsModal>
+
+      <!-- 弹窗：新建用户（SSO 模式下密码留空 → 服务端分配随机值，登录统一走宿主交换） -->
+      <OsModal v-if="showCreate" title="新建用户" ok-text="创建" @ok="createUser" @cancel="showCreate = false">
+        <div class="dlg-form">
+          <div><label>用户名</label><OsInput v-model="nu.username" placeholder="zhangsan" mono /></div>
+          <div><label>显示名（可选）</label><OsInput v-model="nu.displayName" placeholder="张三" /></div>
+          <div><label>角色</label><OsSelect v-model="nu.role" :options="roleOptions" /></div>
+          <div v-if="!ssoLogin"><label>密码</label><OsInput v-model="nu.password" type="password" placeholder="至少 8 位，需含字母与数字" /></div>
+          <p v-else class="hint">统一身份模式下用户由宿主经令牌交换开通；密码留空即可，本地登录通道不开放。</p>
         </div>
       </OsModal>
     </template>

@@ -49,6 +49,9 @@ type Service struct {
 	// exchangeRoles 非空时限制 exchange 可指定的角色（白名单，逗号分隔），
 	// 防止共享密钥泄露后被用于铸造 admin。
 	exchangeRoles map[string]bool
+	// externalAuth 外部身份模式（OPENOS_AUTH_MODE=external）：身份托管于宿主/IdP，
+	// 账密登录与本地自助改密整体下线、演示账号种子跳过；用户只能经 exchange 开通。
+	externalAuth bool
 
 	// 用户态缓存（角色/token_version/禁用态），TTL 10s
 	cacheMu sync.Mutex
@@ -101,6 +104,12 @@ func New(db *store.DB, secret string) *Service {
 	}
 	s.secret = []byte(secret)
 	return s
+}
+
+// SetAuthMode 配置认证模式：external = 外部身份（宿主 SSO / IdP）托管，
+// 本地账密通道整体下线；其余值（含空、local）为默认本地账密模式。
+func (s *Service) SetAuthMode(mode string) {
+	s.externalAuth = strings.EqualFold(strings.TrimSpace(mode), "external")
 }
 
 // SetExchangeSecret 配置令牌交换密钥（宿主应用服务端持有，用于换取 OpenOS 身份）；
@@ -371,6 +380,10 @@ func FromContext(r *http.Request) *Identity {
 
 // Login POST /api/auth/login
 func (s *Service) Login(w http.ResponseWriter, r *http.Request) {
+	if s.externalAuth {
+		jsonError(w, http.StatusForbidden, "本地登录已禁用（OPENOS_AUTH_MODE=external），请经统一身份登录")
+		return
+	}
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -584,6 +597,10 @@ func (s *Service) Me(w http.ResponseWriter, r *http.Request) {
 
 // ChangePassword PUT /api/users/password
 func (s *Service) ChangePassword(w http.ResponseWriter, r *http.Request) {
+	if s.externalAuth {
+		jsonError(w, http.StatusForbidden, "密码由统一身份系统管理（OPENOS_AUTH_MODE=external），本地改密已停用")
+		return
+	}
 	id := FromContext(r)
 	var req struct{ Old, New string }
 	jsonDecode(r, &req)
@@ -659,6 +676,10 @@ func (s *Service) CreateUser(w http.ResponseWriter, r *http.Request) {
 	if err := jsonDecode(r, &req); err != nil || req.Username == "" {
 		jsonError(w, 400, "参数错误")
 		return
+	}
+	// 外部身份模式下 admin 可建占位用户（密码留空 → 随机值，本地登录通道本就已下线）
+	if s.externalAuth && req.Password == "" {
+		req.Password = randomHex(24)
 	}
 	if WeakPassword(req.Password) {
 		jsonError(w, 400, "密码至少 8 位，且需同时包含字母与数字")
@@ -852,10 +873,10 @@ func (s *Service) DeleteUser(w http.ResponseWriter, r *http.Request) {
 }
 
 // SeedDefaults 创建默认演示账号（仅当用户表为空且 OPENOS_SEED_DEMO 未关闭；
-// 宿主集成场景应设 OPENOS_SEED_DEMO=0，账号体系完全交由集成方）。
-// 产品部署后请立即修改密码。
+// 宿主集成场景应设 OPENOS_SEED_DEMO=0 或 OPENOS_AUTH_MODE=external，账号体系
+// 完全交由集成方）。产品部署后请立即修改密码。
 func (s *Service) SeedDefaults() error {
-	if os.Getenv("OPENOS_SEED_DEMO") == "0" {
+	if s.externalAuth || os.Getenv("OPENOS_SEED_DEMO") == "0" {
 		return nil
 	}
 	var n int

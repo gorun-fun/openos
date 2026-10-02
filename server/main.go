@@ -57,6 +57,7 @@ func main() {
 	}
 
 	authSvc := auth.New(db, os.Getenv("OPENOS_JWT_SECRET"))
+	authSvc.SetAuthMode(os.Getenv("OPENOS_AUTH_MODE"))
 	authSvc.SetExchangeSecret(os.Getenv("OPENOS_EXCHANGE_SECRET"))
 	authSvc.SetExchangeRoleWhitelist(os.Getenv("OPENOS_EXCHANGE_ROLES"))
 	if err := authSvc.SeedDefaults(); err != nil {

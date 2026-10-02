@@ -15,7 +15,9 @@ export interface ShellBrand {
 
 export type ShellLogin =
   | { mode: 'local' } // OpenOS 自带账密登录
-  | { mode: 'sso'; url: string; label?: string } // 跳转宿主单点登录（url 为宿主登录入口）
+  // 跳转宿主单点登录（url 为宿主登录入口）。passwordUrl = 统一身份系统的账户/
+  // 改密自助页：设置-账户「登录与安全」由此改为跳转按钮（本地改密表单仅 local 模式渲染）
+  | { mode: 'sso'; url: string; label?: string; passwordUrl?: string; passwordLabel?: string }
 
 /** 应用菜单项（菜单栏「当前应用」下拉里的动作，run 接收窗口参数）。 */
 export interface AppMenuItem {
@@ -36,6 +38,12 @@ export const shell = reactive<{
   wallpapers: string[] | null
   /** 宿主注册的应用菜单项（按 appId），与内置应用菜单合并（宿主可覆盖内置应用菜单） */
   appMenus: Record<string, AppMenuItem[]>
+  /**
+   * 宿主全屏浮层组件（如访客引导/待审批遮罩）：渲染在桌面最顶层（菜单栏/窗口/
+   * 通知中心之上），常驻挂载、由组件内部自行决定显隐（v-if）。与 menubarExtras
+   * 同理是宿主业务向壳内注入 UI 的扩展点，只是占据整屏层。
+   */
+  overlay: Component | Component[] | null
 }>({
   brand: { name: 'OpenOS', logo: '🖥️', sub: '仿 macOS 网页桌面 · 多用户 · 事件总线' },
   login: { mode: 'local' },
@@ -44,4 +52,5 @@ export const shell = reactive<{
   dockOrder: [],
   wallpapers: null,
   appMenus: {},
+  overlay: null,
 })

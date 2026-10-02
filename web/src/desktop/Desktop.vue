@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useSession } from '../stores/session'
 import { useDesktop } from '../stores/desktop'
 import { useApps } from '../stores/apps'
@@ -23,6 +23,8 @@ import { useMenu, menuPos } from '../ui/menu'
 import { widgetDefs, widgetDef } from './widgetRegistry'
 import { appForPath } from '../apps/openWith'
 import { installAgentBridge } from './agentBridge'
+import { shell } from '../shell'
+import type { Component } from 'vue'
 
 const session = useSession()
 const desktop = useDesktop()
@@ -30,6 +32,12 @@ const apps = useApps()
 const windows = useWindows()
 const notifications = useNotifications()
 const cal = useCalendar()
+
+// 宿主注入的全屏浮层（createOpenOS overlay 选项）：单个或数组统一为数组渲染
+const overlayList = computed(() => {
+  const o = shell.overlay as Component | Component[] | null
+  return o ? (Array.isArray(o) ? o : [o]) : []
+})
 
 // ---- 全局事件总线路由：任何入口（终端 / goder / 其他窗口）都可操控桌面 ----
 const offs: (() => void)[] = []
@@ -297,6 +305,10 @@ function ctxCycleNoteColor() {
 
     <!-- 跨应用弹窗宿主：registerDialog/openDialog 的系统级模态浮层（见 ui/dialogService.ts） -->
     <DialogHost />
+
+    <!-- 宿主全屏浮层（shell.overlay，如访客引导遮罩）：常驻挂载、组件内部 v-if
+         决定显隐；渲染在一切桌面元素之上（组件自带 z-index，建议 ≥ 30000） -->
+    <component :is="c" v-for="(c, i) in overlayList" :key="i" />
 
     <!-- 窗口吸附预览（桌面层渲染，避免被窗口裁剪） -->
     <div v-if="snapPreview" class="snap-preview" :style="{

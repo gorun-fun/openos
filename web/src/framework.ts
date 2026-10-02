@@ -41,8 +41,8 @@ export interface CreateOpenOSOptions {
   apps?: Record<string, () => Promise<any>>
   /** 注册（或覆盖）应用图标，键为 appId；见 desktop/icons.ts 的 IconDef */
   icons?: Record<string, IconDef>
-  /** 登录模式：sso = 登录页跳转宿主单点登录入口 */
-  login?: { mode: 'sso'; url: string; label?: string }
+  /** 登录模式：sso = 登录页跳转宿主单点登录入口；passwordUrl = 统一身份改密自助页 */
+  login?: { mode: 'sso'; url: string; label?: string; passwordUrl?: string; passwordLabel?: string }
   /** 品牌覆盖（登录页 / 菜单栏关于） */
   brand?: Partial<ShellBrand>
   /** 菜单栏右侧扩展组件（如业务上下文切换器），渲染在状态 chip 之前；可传数组多槽 */
@@ -78,6 +78,12 @@ export interface CreateOpenOSOptions {
    * dialogs 选项同义，供编译期注册。
    */
   dialogs?: Record<string, DialogDef>
+  /**
+   * 宿主全屏浮层组件（如访客引导遮罩）：常驻渲染在桌面最顶层，组件内部自行
+   * 决定显隐（v-if）。替代「宿主自建第二个 Vue 实例叠在 body 上」的旧做法，
+   * 浮层与桌面壳共享同一应用上下文（总线/组件库/主题）。
+   */
+  overlay?: Component | Component[]
 }
 
 /** 应用主题强调色：设置 --os-accent 及其派生令牌（选中/焦点/渐变），立即生效。 */
@@ -115,6 +121,7 @@ export function createOpenOS(opts: CreateOpenOSOptions = {}): VueApp | null {
   if (opts.dockOrder) shell.dockOrder = opts.dockOrder
   if (opts.wallpapers) shell.wallpapers = opts.wallpapers
   if (opts.appMenus) shell.appMenus = opts.appMenus
+  shell.overlay = opts.overlay || null
   if (opts.widgets) {
     for (const [type, def] of Object.entries(opts.widgets)) {
       registerWidget({ type, ...def })
