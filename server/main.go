@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -121,6 +122,33 @@ func main() {
 	mux.HandleFunc("GET /api/auth/logout", authSvc.Logout)
 	// 宿主应用令牌交换（仅 OPENOS_EXCHANGE_SECRET 配置后可用）
 	mux.HandleFunc("POST /api/auth/exchange", authSvc.Exchange)
+	// 宿主定向事件推送（与令牌交换共用 X-Exchange-Secret）：
+	// {users: ["用户名", ...], topic: "sys:notify", payload: {...}} → 逐用户
+	// hub.PublishTo。典型用途：宿主业务事件（如加入申请待审批）即时送达桌面
+	// 通知中心（sys:notify 主题前端默认订阅）。不在线的用户自然无投递，
+	// 送达语义由宿主侧的兜底（列表角标/轮询）承担。
+	mux.HandleFunc("POST /api/hub/publish", func(w http.ResponseWriter, r *http.Request) {
+		if !authSvc.CheckExchangeSecret(r.Header.Get("X-Exchange-Secret")) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		var req struct {
+			Users   []string       `json:"users"`
+			Topic   string         `json:"topic"`
+			Payload map[string]any `json:"payload"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil ||
+			req.Topic == "" || len(req.Users) == 0 {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		for _, u := range req.Users {
+			if u != "" {
+				hub.PublishTo(u, req.Topic, req.Payload)
+			}
+		}
+		writeJSON(w, map[string]any{"ok": true, "users": len(req.Users)})
+	})
 
 	// ---- WebSocket 事件总线（token 走查询参数；升级时全量校验用户态，与 REST 同一套判定） ----
 	mux.HandleFunc("GET /ws", func(w http.ResponseWriter, r *http.Request) {

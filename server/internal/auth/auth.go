@@ -106,6 +106,13 @@ func New(db *store.DB, secret string) *Service {
 // 为空（默认）时交换端点返回 503，保持独立部署的安全面不变。
 func (s *Service) SetExchangeSecret(v string) { s.exchangeSecret = v }
 
+// CheckExchangeSecret 校验宿主间调用密钥（与令牌交换共用 OPENOS_EXCHANGE_SECRET，
+// 恒定时间比对；未启用时一律拒绝）。供宿主侧的其它服务端到服务端接口复用，
+// 如事件总线定向推送（POST /api/hub/publish）。
+func (s *Service) CheckExchangeSecret(v string) bool {
+	return s.exchangeSecret != "" && subtle.ConstantTimeCompare([]byte(v), []byte(s.exchangeSecret)) == 1
+}
+
 // SetExchangeRoleWhitelist 配置 exchange 可指定的角色白名单（逗号分隔，空 = 不限制）。
 func (s *Service) SetExchangeRoleWhitelist(v string) {
 	if v == "" {
