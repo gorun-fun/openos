@@ -60,6 +60,32 @@ async function changePwd() {
   } catch (e: any) { pwdMsg.value = e.message }
 }
 
+// 用户名形如 UUID（宿主 SSO 体系以身份源 uid 自动开户）时，界面主位置只展示
+// 显示名；UUID 仅在用户管理保留截断形式（悬停 title 看全量）
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+function shortUN(u?: string) { return u && UUID_RE.test(u) ? u.slice(0, 8) + '…' : (u || '') }
+
+// 显示名自助编辑（PUT /api/users/display-name），保存后同步 session 供菜单栏等即刷
+const displayName = ref(''), dnMsg = ref('')
+const accountSub = computed(() => {
+  const u = session.user
+  if (!u) return ''
+  const who = UUID_RE.test(u.username)
+    ? [u.displayName || shortUN(u.username)]
+    : [u.username, u.displayName].filter(Boolean)
+  return who.concat(`角色 ${roleLabel(u.role)}`).join(' · ')
+})
+async function saveDisplayName() {
+  dnMsg.value = ''
+  const name = displayName.value.trim()
+  if (!name) { dnMsg.value = '显示名不能为空'; return }
+  try {
+    await api.put('/api/users/display-name', { displayName: name })
+    if (session.user) session.user.displayName = name
+    dnMsg.value = '✓ 已保存'
+  } catch (e: any) { dnMsg.value = e.message }
+}
+
 // ---- 用户管理 ----
 interface UserRow { id: number; username: string; displayName: string; role: string; disabled: boolean; createdAt: string }
 const users = ref<UserRow[]>([])
@@ -89,8 +115,26 @@ async function setDisabled(row: any, disabled: boolean) {
   } catch (e: any) { alert(e.message) }
 }
 async function removeUser(row: any) {
-  if (!confirm(`删除用户 ${row.username}？其文件、设置与磁盘数据将被清理。`)) return
+  if (!confirm(`删除用户 ${row.displayName || row.username}？其文件、设置与磁盘数据将被清理。`)) return
   try { await api.del(`/api/users/${row.username}`); loadUsers() } catch (e: any) { alert(e.message) }
+}
+// 管理员在用户管理直接改显示名（与账户页自助接口互为补充，走 admin 通道）
+const dnEdit = ref<{ row: any } | null>(null)
+const dnEditVal = ref('')
+function editDisplayName(row: any) {
+  dnEdit.value = { row }
+  dnEditVal.value = row.displayName || ''
+}
+async function saveDisplayNameEdit() {
+  const name = dnEditVal.value.trim()
+  if (!name) { alert('显示名不能为空'); return }
+  const row = dnEdit.value!.row
+  try {
+    await api.put(`/api/users/${row.username}`, { displayName: name })
+    row.displayName = name
+    if (session.user?.username === row.username) session.user.displayName = name // 管理员改的是自己时，菜单栏即刷
+    dnEdit.value = null
+  } catch (e: any) { alert(e.message) }
 }
 
 // ---- 应用授权矩阵 ----
@@ -326,7 +370,11 @@ onMounted(() => {
   loadAI()
   if (isAdmin) { loadUsers(); loadAccess() }
 })
-watch(tab, (t) => { if (t === 'system') loadSystem() })
+watch(tab, (t) => {
+  if (t === 'system') loadSystem()
+  if (t === 'account') displayName.value = session.user?.displayName || ''
+  if (t === 'users') loadUsers() // 账户页/别处改名后切回本页即时同步
+})
 </script>
 
 <template>
@@ -373,11 +421,23 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
 
     <!-- 账户 -->
     <template v-else-if="tab === 'account'">
-      <h2 class="sec">登录与安全</h2>
+      <h2 class="sec">个人资料</h2>
       <div class="card">
         <div class="group">
-          <div class="g-text"><div class="g-title">账户</div><div class="g-sub">{{ session.user?.username }} · {{ session.user?.displayName }} · 角色 {{ roleLabel(session.user?.role || '') }}</div></div>
+          <div class="g-text"><div class="g-title">账户</div><div class="g-sub">{{ accountSub }}</div></div>
         </div>
+        <div class="group pwd">
+          <div class="g-text"><div class="g-title">显示名</div></div>
+          <OsInput v-model="displayName" placeholder="展示在菜单栏与用户管理" @keyup.enter="saveDisplayName" />
+        </div>
+        <div class="group">
+          <div class="g-text" />
+          <OsButton variant="primary" @click="saveDisplayName">保存显示名</OsButton>
+          <span v-if="dnMsg" class="msg">{{ dnMsg }}</span>
+        </div>
+      </div>
+      <h2 class="sec">登录与安全</h2>
+      <div class="card">
         <div class="group pwd">
           <div class="g-text"><div class="g-title">原密码</div></div>
           <OsInput v-model="oldPwd" type="password" placeholder="原密码" />
@@ -400,11 +460,18 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
         <OsButton variant="primary" size="sm" @click="showCreate = true">＋ 新建用户</OsButton>
       </div>
       <OsTable :columns="[
-        { key: 'username', label: '用户名', width: '20%' },
-        { key: 'displayName', label: '显示名', width: '20%' },
+        { key: 'displayName', label: '显示名', width: '24%' },
+        { key: 'username', label: '用户名', width: '14%' },
         { key: 'disabled', label: '状态', width: '12%' },
-        { key: 'createdAt', label: '创建时间', width: '24%' },
+        { key: 'createdAt', label: '创建时间', width: '22%' },
       ]" :rows="users">
+        <template #cell-displayName="{ row }">
+          <span class="dname" :class="{ unset: !row.displayName }">{{ row.displayName || '未设置' }}</span>
+          <button class="mini-edit" title="修改显示名" @click="editDisplayName(row)">✎</button>
+        </template>
+        <template #cell-username="{ value }">
+          <span class="umono" :title="value">{{ shortUN(value) }}</span>
+        </template>
         <template #cell-disabled="{ value }">
           <span class="ustate" :class="{ off: value }">{{ value ? '已禁用' : '正常' }}</span>
         </template>
@@ -420,6 +487,14 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
         </template>
       </OsTable>
       <p class="hint">提示：禁用即时生效（在线会话被踢下线）；删除会连带清理其文件、设置与磁盘数据。</p>
+
+      <!-- 弹窗：修改显示名（管理员通道，用户自己走账户页自助） -->
+      <OsModal v-if="dnEdit" title="修改显示名" ok-text="保存" @ok="saveDisplayNameEdit" @cancel="dnEdit = null">
+        <div class="dlg-form">
+          <div><label>用户</label><div class="dlg-ro">{{ dnEdit.row.displayName || shortUN(dnEdit.row.username) }}（{{ shortUN(dnEdit.row.username) }}）</div></div>
+          <div><label>新显示名</label><OsInput v-model="dnEditVal" placeholder="展示在菜单栏与用户管理" @keyup.enter="saveDisplayNameEdit" /></div>
+        </div>
+      </OsModal>
     </template>
 
     <!-- 应用授权 -->
@@ -689,6 +764,15 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
   display: inline-block; font-size: 12px; padding: 1px 10px; border-radius: 999px;
   color: #1d8a3e; background: rgba(48,209,88,.12);
 }
+/* 用户管理：显示名 + 行内改名小按钮；用户名列等宽字体（UUID 截断形态） */
+.dname.unset { color: var(--os-text-secondary); }
+.mini-edit {
+  margin-left: 6px; padding: 0 5px; border: none; background: transparent;
+  color: var(--os-text-secondary); font-size: 12px; line-height: 18px;
+  border-radius: 4px; cursor: pointer;
+}
+.mini-edit:hover { color: var(--os-accent, #2563eb); background: rgba(37,99,235,.08); }
+.umono { font-family: var(--os-mono); font-size: 12px; }
 .ustate.off { color: #b25b00; background: rgba(255,159,10,.14); }
 .panel-actions { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
 .grow { flex: 1; }
@@ -728,6 +812,7 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
 .dlg-form .hdr-row > :first-child { flex: 2; }
 .dlg-form .hdr-row > :nth-child(2) { flex: 3; }
 .dlg-form .schema { max-height: 32vh; }
+.dlg-form .dlg-ro { font-size: 13px; padding: 7px 0 1px; }
 
 .ai-status { font-size: 13px; color: #b25b00; background: rgba(255,159,10,.12); padding: 8px 12px; border-radius: 8px; }
 .ai-status.on { color: #1d8a3e; background: rgba(48,209,88,.12); }

@@ -166,6 +166,7 @@ func main() {
 	authed.HandleFunc("GET /api/auth/me", authSvc.Me)
 	authed.HandleFunc("GET /api/auth/refresh", authSvc.Refresh)
 	authed.HandleFunc("PUT /api/users/password", authSvc.ChangePassword)
+	authed.HandleFunc("PUT /api/users/display-name", authSvc.SetDisplayName)
 
 	authed.HandleFunc("GET /api/apps", func(w http.ResponseWriter, r *http.Request) {
 		id := auth.FromContext(r)

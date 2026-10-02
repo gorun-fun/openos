@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"openos/server/internal/store"
 )
@@ -438,8 +439,10 @@ func (s *Service) Logout(w http.ResponseWriter, r *http.Request) {
 // 调用本端点为该用户换取 OpenOS 身份（浏览器无需再过 OpenOS 登录）。
 //   - 请求头 X-Exchange-Secret 与 OPENOS_EXCHANGE_SECRET 恒定时间比对；
 //   - 配置 OPENOS_EXCHANGE_ROLES 白名单后，共享密钥泄露也无法铸造白名单外角色（如 admin）；
-//   - 用户不存在时自动开通（随机不可登录密码，登录只能经宿主）；
-//   - 角色变化时同步并 Bump 旧令牌；显示名变化时同步（留审计）；
+//   - 用户不存在时自动开通（随机不可登录密码，登录只能经宿主，displayName 作为
+//     初始显示名写入）；
+//   - 角色变化时同步并 Bump 旧令牌；已有用户的显示名不随 exchange 覆盖（登录
+//     通道不做展示名管理，改名走 SyncUsers / UpdateUser / 账户页自助接口）；
 //   - 响应与登录一致：{token, user}，并种同源 Cookie 供嵌入组件使用。
 func (s *Service) Exchange(w http.ResponseWriter, r *http.Request) {
 	ip := s.clientIP(r)
@@ -503,10 +506,6 @@ func (s *Service) Exchange(w http.ResponseWriter, r *http.Request) {
 			s.db.BumpTokenVersion(req.Username) // 角色变化：旧 OpenOS 令牌即时失效
 			s.InvalidateCache(req.Username)
 			s.db.Audit(req.Username, "user.role", "exchange → "+req.Role, ip)
-		}
-		if req.DisplayName != "" && req.DisplayName != info.DisplayName {
-			s.db.Exec(`UPDATE users SET display_name=? WHERE username=?`, req.DisplayName, req.Username)
-			s.db.Audit(req.Username, "user.displayname", "exchange → "+req.DisplayName, ip)
 		}
 	}
 
@@ -602,6 +601,32 @@ func (s *Service) ChangePassword(w http.ResponseWriter, r *http.Request) {
 	s.db.BumpTokenVersion(id.Username) // 旧设备全部下线
 	s.InvalidateCache(id.Username)
 	s.db.Audit(id.Username, "user.password", "self", s.clientIP(r))
+	writeJSON(w, ok())
+}
+
+// SetDisplayName PUT /api/users/display-name —— 账户页自助修改显示名。
+//
+// 显示名是展示层字段（不进 JWT、不涉权限），改后无需吊销令牌；审计留痕。
+func (s *Service) SetDisplayName(w http.ResponseWriter, r *http.Request) {
+	id := FromContext(r)
+	var req struct {
+		DisplayName string `json:"displayName"`
+	}
+	if err := jsonDecode(r, &req); err != nil {
+		jsonError(w, 400, "参数错误")
+		return
+	}
+	name := strings.TrimSpace(req.DisplayName)
+	if name == "" {
+		jsonError(w, 400, "显示名不能为空")
+		return
+	}
+	if utf8.RuneCountInString(name) > 64 {
+		jsonError(w, 400, "显示名过长（最多 64 个字符）")
+		return
+	}
+	s.db.Exec(`UPDATE users SET display_name=? WHERE username=?`, name, id.Username)
+	s.db.Audit(id.Username, "user.displayname", "self → "+name, s.clientIP(r))
 	writeJSON(w, ok())
 }
 
