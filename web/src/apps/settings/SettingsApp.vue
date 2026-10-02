@@ -378,11 +378,11 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
         <div class="group">
           <div class="g-text"><div class="g-title">账户</div><div class="g-sub">{{ session.user?.username }} · {{ session.user?.displayName }} · 角色 {{ roleLabel(session.user?.role || '') }}</div></div>
         </div>
-        <div class="group">
+        <div class="group pwd">
           <div class="g-text"><div class="g-title">原密码</div></div>
           <OsInput v-model="oldPwd" type="password" placeholder="原密码" />
         </div>
-        <div class="group">
+        <div class="group pwd">
           <div class="g-text"><div class="g-title">新密码</div></div>
           <OsInput v-model="newPwd" type="password" placeholder="至少 6 位" />
         </div>
@@ -642,6 +642,9 @@ watch(tab, (t) => { if (t === 'system') loadSystem() })
 .card .group { display: flex; align-items: center; gap: 14px; padding: 11px 14px; min-height: 44px; }
 .card .group + .group { border-top: 1px solid var(--os-border); }
 .g-text { flex: 1; min-width: 0; }
+/* 表单行：label 不参与收缩（防中文逐字竖排），输入框占剩余空间并限宽 */
+.card .group.pwd .g-text { flex: none; white-space: nowrap; }
+.card .group.pwd .os-input { flex: 1; max-width: 300px; }
 .g-title { font-size: 13px; }
 .g-sub { font-size: 11.5px; color: var(--os-text-secondary); margin-top: 1px; }
 .g-sub.g-code { font-family: var(--os-mono); word-break: break-all; }
