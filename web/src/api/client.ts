@@ -60,6 +60,7 @@ export interface AppDef {
   icon: string
   category: string
   builtin: boolean
+  locked?: boolean
   hidden?: boolean
   config?: string
   width: number
