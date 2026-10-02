@@ -46,4 +46,5 @@ export const icons: Record<string, string> = {
   // 网页应用容器（WebApp）
   refresh: s('<path d="M13.7 10a6 6 0 1 1-1.4-6.2L15.3 6.7"/><path d="M15.3 2.7v4h-4"/>'),
   link: s('<path d="M12 8.7v4a1.3 1.3 0 0 1-1.3 1.3H3.3A1.3 1.3 0 0 1 2 12.7V5.3A1.3 1.3 0 0 1 3.3 4h4"/><path d="M10 2h4v4"/><path d="M6.7 9.3 14 2"/>'),
+  user: s('<circle cx="8" cy="5.4" r="2.6"/><path d="M2.9 13.4a5.1 5.1 0 0 1 10.2 0"/>'),
 }

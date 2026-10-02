@@ -34,11 +34,38 @@ const host = computed(() => { try { return new URL(url.value).host } catch { ret
 // 不写 :// —— 含 // 的路径会被 Go ServeMux 的 cleanPath 折叠成 307 清洗重定向）；
 // 入口也可直接用 /app/<id>/ 由服务端重定向到配置目标
 const pxCompact = (u: string) => u.replace(/^([a-zA-Z][a-zA-Z0-9+.-]*):\/\//, (_m, s: string) => `${s}/`)
+// 桌面端形态（openos-desktop 经 CDP 在每个新文档注入只读标记）：代理应用不经
+// 服务端反代、iframe 直连真实地址——Chrome 以 --disable-web-security + 关闭站点
+// 隔离启动，跨源 iframe 不被同源策略/X-Frame-Options/CSP frame-ancestors 拦截，
+// 且携带真实浏览器登录态，跨域问题随之消解。惰性读取，晚注入也能生效
+const desktopMode = () => !!(window as any).__OPENOS_DESKTOP__
 const src = computed(() => {
   if (!url.value) return ''
-  if (dynCfg.value.kind === 'proxy') return `/app/${props.win.appId}/${pxCompact(url.value)}`
+  if (dynCfg.value.kind === 'proxy' && !desktopMode()) return `/app/${props.win.appId}/${pxCompact(url.value)}`
   return url.value
 })
+
+// 桌面端形态的 iframe 不加 sandbox：美团等微前端容器（WebShell/new-workbench）会在
+// sandbox 语境下判定环境异常，上报「目标路由不合法」整页 404（实测摘掉即恢复）。
+// framebusting（top.location 自拔）防走失由桌面客户端监听主帧导航兜底回捕
+const sandboxAttr = computed(() =>
+  desktopMode() ? undefined : 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads')
+
+// ---- 桌面端专用：美团系 ME 微前端的父容器握手应答。子页向父容器发
+// {eventType:"hotel-query-container", signature:"ME_IFRAME_…"} 探测，3s 无应答则按
+// 环境异常处理（菜单不初始化等）。应答须以目标站自身 origin 发送才能过其
+// isValidHost 校验——SOP 已关，经 e.source.eval 在对方 realm 里 window.postMessage
+// 给自己即可让 event.origin 变成目标站；origin 字段填 OpenOS 源（其后续
+// postMessageToParentWindow 的 targetOrigin 用）----
+function onDeskHandshake(e: MessageEvent) {
+  if (!desktopMode()) return
+  const d: any = e.data
+  if (!d || d.eventType !== 'hotel-query-container' || !d.signature) return
+  try {
+    const resp = { eventType: 'hotel-container-response', iframeInSystem: 'me', origin: location.origin, signature: d.signature }
+    ;(e.source as any).eval(`window.postMessage(${JSON.stringify(resp)},"*")`)
+  } catch { /* 跨 realm eval 失败则放弃（页面可能已跳转） */ }
+}
 
 // ---- 标签页：单 tab 即原形态；代理模式下页面 window.open / target=_blank 由
 // hook.js 拦截，经窗体根元素上的 __openosPxHost 收进新 tab（不弹真浏览器窗口）----
@@ -65,10 +92,12 @@ function resetTabs() {
   armLoadFallback()
 }
 watch(src, resetTabs, { immediate: true })
-onBeforeUnmount(() => clearTimeout(loadTimer))
+onBeforeUnmount(() => { clearTimeout(loadTimer); clearInterval(anchorTimer); window.removeEventListener('message', onDeskHandshake) })
 
 onMounted(() => {
   if (url.value) windows.setTitle(props.win.id, title.value)
+  window.addEventListener('message', onDeskHandshake)
+  anchorTimer = window.setInterval(checkAnchorNow, 1500)
   // 宿主标签页 API：挂在窗体根元素上（hook.js 经 frameElement.closest 认领，
   // 多个代理窗口互不干扰）。openTab 同步返回一个惰性转发到新 tab 真实
   // contentWindow 的 Proxy，页面对返回值调 close()/postMessage()/document 照常工作
@@ -129,6 +158,63 @@ function closeByWindow(w: Window) {
   if (t) closeTab(t.id)
 }
 
+// ---- 桌面端防「子 iframe 顶掉容器」：美团等微前端的子页会经 parent.location（或
+// pushState 改父地址——不触发 load 事件）把带菜单的容器页整个替换成内层页面（菜单
+// 消失、只剩内容区）。锚定规则：本窗体成功加载过与配置地址同源的页面（稳态）后，
+// 一旦发现帧文档落在其他源，自动导航回配置地址。触发两路：iframe load 事件 +
+// 1.5s 周期巡检（捕获无 load 事件的地址篡改）；冷却 5s 防抖。登录/SSO 的跨源跳转
+// 发生在达到稳态之前，不受影响 ----
+const anchorHost = computed(() => { try { return new URL(url.value).host } catch { return '' } })
+let anchorArmed = false
+let lastRestore = 0
+let anchorTimer = 0
+function restoreAnchor() {
+  const now = Date.now()
+  if (now - lastRestore < 5000) return
+  lastRestore = now
+  // 注意：接管只改帧的 location，tab.url 仍是容器地址——seq++ 强制重建 iframe
+  const tab = tabs.value.find(x => x.id === activeId.value)
+  if (!tab) return
+  tab.url = src.value
+  tab.seq++
+  tab.loaded = false
+  tab.title = '加载中…'
+  loading.value = true
+  armLoadFallback()
+}
+function checkAnchorNow() {
+  if (!desktopMode() || !anchorHost.value || !src.value) return
+  // 身份全局桥自愈：注入 shim 捕获到该站新的身份全局（partnerId 等）时置脏，
+  // 刷新一次本窗让依赖它的初始化（美团菜单 saga 等）拿到数据
+  const G = (window as any).__OSD_GLOBALS__
+  if (G && G.__dirty === anchorHost.value && Date.now() - lastRestore >= 5000) {
+    G.__dirty = null
+    lastRestore = Date.now()
+    const tab = tabs.value.find(x => x.id === activeId.value)
+    if (tab) {
+      tab.seq++
+      tab.loaded = false
+      tab.title = '加载中…'
+      loading.value = true
+      armLoadFallback()
+    }
+    return
+  }
+  if (!anchorArmed) return
+  const f = rootEl.value?.querySelector<HTMLIFrameElement>('iframe.frame')
+  if (!f) return
+  let host = ''
+  try { host = new URL(f.contentWindow!.location.href).host } catch { return }
+  if (host !== anchorHost.value) restoreAnchor()
+}
+function checkAnchor(ev: Event) {
+  if (!desktopMode() || !anchorHost.value) return
+  let host = ''
+  try { host = new URL((ev.target as HTMLIFrameElement).contentWindow!.location.href).host } catch { return }
+  if (host === anchorHost.value) { anchorArmed = true; return }
+  if (anchorArmed) checkAnchorNow()
+}
+
 function fallbackTitle(t: Tab): string {
   // 代理路径 /app/<id>/<scheme>/<host>/… 取目标 host；普通 URL 直接取 host
   const parts = t.url.split('/')
@@ -137,6 +223,7 @@ function fallbackTitle(t: Tab): string {
 }
 function onTabLoad(t: Tab, ev: Event) {
   t.loaded = true
+  checkAnchor(ev)
   try {
     const d = (ev.target as HTMLIFrameElement).contentDocument
     if (d?.title) t.title = d.title
@@ -169,6 +256,31 @@ function refresh() {
 }
 // 代理模式经反代打开（新标签同源携带登录态）；普通模式直开目标站
 function openExternal() { if (activeTab.value) window.open(activeTab.value.url, '_blank', 'noopener') }
+
+// ---- 桌面端登录辅助：跨站会话 Cookie（未标注 SameSite）在第三方 iframe 上下文里
+// 无法落地/携带，站内登录常常卡在 settoken 一类环节。桌面端改在顶层独立窗口（第一方
+// 上下文）完成登录/SSO/设 Cookie——桌面客户端会把 jar 统一归一为 SameSite=None，登录
+// 完成回到窗体内刷新即恢复会话 ----
+const loginAvailable = computed(() => desktopMode() && dynCfg.value.kind === 'proxy' && !!url.value)
+function desktopLogin() {
+  if (!url.value) return
+  const w = window.open(url.value, '_blank')
+  if (!w) return
+  let settle = 0
+  const timer = window.setInterval(() => {
+    let done = false
+    try {
+      done = w.closed || (settle = /\/(login|settoken|passport|oauth|signin)/i.test(w.location.href) ? 0 : settle + 1) >= 4
+    } catch { /* 跨源跳转完成前可能读不到，继续等 */ }
+    if (!done) return
+    window.clearInterval(timer)
+    // 留出 settoken 收尾时间再关窗并刷新页内标签
+    window.setTimeout(() => { try { if (!w.closed) w.close() } catch { /* 忽略 */ } }, 1500)
+    refresh()
+  }, 800)
+  // 5 分钟兜底停检（用户可能未完成登录）
+  window.setTimeout(() => window.clearInterval(timer), 5 * 60 * 1000)
+}
 </script>
 
 <template>
@@ -179,6 +291,7 @@ function openExternal() { if (activeTab.value) window.open(activeTab.value.url, 
         <div class="os-tb-title">{{ title }}</div>
         <span v-if="host" class="host">{{ host }}</span>
         <span class="grow" />
+        <button v-if="loginAvailable" class="os-tb-btn" title="登录（在独立窗口完成，成功后自动回到本页）" v-html="icons.user" @click="desktopLogin" />
         <button class="os-tb-btn" title="刷新" v-html="icons.refresh" @click="refresh" />
         <button class="os-tb-btn" title="在浏览器中打开" v-html="icons.link" @click="openExternal" />
       </div>
@@ -202,7 +315,7 @@ function openExternal() { if (activeTab.value) window.open(activeTab.value.url, 
           title="网页应用"
           allow="clipboard-read; clipboard-write"
           referrerpolicy="strict-origin-when-cross-origin"
-          sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads"
+          :sandbox="sandboxAttr"
           @load="onTabLoad(t, $event)"
         />
       </div>

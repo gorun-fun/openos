@@ -1,7 +1,7 @@
 # 版本号：优先当前提交的精确 tag，其次最近 tag+提交数，均无则 dev（注入系统信息/健康检查）
 VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null || git describe --tags 2>/dev/null || echo dev)
 
-.PHONY: dev server web build release docker test goder clean
+.PHONY: dev server web build release docker test goder desktop clean
 
 # 准备 goder 组件：源码自动拉取自远端仓库，构建 goder-serve 网关 + 嵌入式 goder.js。
 #   GODER_REPO 源码仓库地址；GODER_SRC 本地克隆目录（可改指已有克隆，免拉取）
@@ -63,5 +63,10 @@ release: build
 docker:
 	docker build -t openos:latest .
 
+# 桌面客户端：CDP 驱动 Chrome 以 app 模式打开 OpenOS（关闭同源策略与站点隔离，
+# 网页应用 iframe 直连真实站点），解决网页应用的跨域问题
+desktop:
+	cd desktop && CGO_ENABLED=0 go build -trimpath -o ../openos-desktop .
+
 clean:
-	rm -rf web/dist server/openos-server release
+	rm -rf web/dist server/openos-server release openos-desktop

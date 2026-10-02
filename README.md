@@ -528,6 +528,42 @@ Go ServeMux 的 cleanPath 折叠成 307 清洗重定向）。三层地址覆盖�
 | `{ "cmd": "wallpaper", "arg": "3" }` | 切换壁纸（1-6） |
 | `{ "cmd": "dark", "arg": "on" }` | 深色模式开关 |
 
+## 桌面客户端（openos-desktop）
+
+反代（应用代理）之外的另一条网页应用接入路线：**本机 Chrome 以 app 模式直开 OpenOS，
+iframe 直连真实站点**。适合反代难平的场景（目标站 SSO/风控/Cookie 轮换复杂，如美团
+ebooking），代价是依赖客户端环境（需本机 Chrome）。
+
+```bash
+make desktop                     # 构建 → ./openos-desktop
+./openos-desktop                 # 打开 http://127.0.0.1:8081
+./openos-desktop -url http://localhost:5173   # 开发模式（vite 只监听 IPv6 localhost）
+```
+
+**原理**：CDP 驱动 Chrome 以 `--app=<url>` + 专用 profile（`~/.openos-desktop`，登录态
+持久化）启动，`--disable-web-security` + 关闭站点隔离——跨源 iframe 不再被同源策略 /
+X-Frame-Options / CSP frame-ancestors 拦截，网页应用（kind=proxy）经注入标记
+`window.__OPENOS_DESKTOP__` 检测后直连 `config.url` 真实地址而非 `/app/<id>/` 反代。
+
+**SameSite 三层桥**（跨站登录的命门，Chrome 154 实测）：跨源 iframe 属第三方上下文，
+目标站未标注 SameSite 的会话 Cookie 按 Lax 语义被整体拒收（Set-Cookie 与
+document.cookie 双落空，`--disable-features` 关不掉）：
+
+1. **注入 shim**——`document.cookie` 写入自动补 `SameSite=None`（https 帧补 Secure）；
+   主帧走 `addScriptToEvaluateOnNewDocument`，跨源子帧由 `Runtime.contextCreated`
+   即时补丁 + 周期 walker（contentWindow.eval 跨 realm）兜底；
+2. **响应桥**——被拒的 Set-Cookie（`responseReceivedExtraInfo.blockedCookies`）经
+   `Network.setCookie` 直写 Cookie jar；
+3. **jar 归一化**——周期把非 None Cookie（本地域除外）改写 `SameSite=None; Secure`，
+   修复「顶层第一方登录后、iframe 第三方请求不带 Cookie」的发送侧。
+
+前端桌面模式另有**「登录」按钮**（网页应用工具栏）：`window.open` 在顶层第一方窗口完成
+登录/SSO（原生语义零损耗），检测到离开登录页后自动关窗并刷新页内标签。
+
+**安全边界**：`--disable-web-security` 意味着窗口内跨源脚本可互访，专用 profile 仅用于
+打开 OpenOS；CDP 端口只绑 127.0.0.1；窗口内等于本机真实浏览器会话，勿指向不可信的
+OpenOS 实例。无站点隔离下桌面页与嵌入应用共享渲染进程，重应用可能拖慢整页。
+
 ## 项目结构
 
 ```
@@ -552,6 +588,7 @@ openos/
 │       ├── bus/  api/       # 事件总线客户端 / REST 客户端（401 全局处理）
 │       ├── stores/          # Pinia：session / desktop / apps / windows
 │       └── apps/            # terminal files calculator notes settings docs sheets slides pdf goder welcome
+├── desktop/                 # openos-desktop 桌面客户端（独立 Go module：CDP 驱动 Chrome app 模式 + SameSite Cookie 桥）
 ├── Dockerfile               # 多阶段构建（node→go→alpine），非 root 运行
 ├── docker-compose.yml       # 数据卷持久化
 └── Makefile                 # dev/build/release/docker/test

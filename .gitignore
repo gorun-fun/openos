@@ -8,3 +8,4 @@ server/openos-server
 .goder-src/
 .zcode/
 .playwright-cli/
+openos-desktop
