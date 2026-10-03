@@ -16,6 +16,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"openos/server/internal/ai"
+	"openos/server/internal/attach"
 	"openos/server/internal/auth"
 	"openos/server/internal/bus"
 	"openos/server/internal/calendar"
@@ -111,8 +113,13 @@ func main() {
 	})
 	osmcpMgr.Start()
 	hub.Handle("agent:resp", osmcpMgr.OnBridgeResp)
+	// 系统附件存储（聊天附件 / bundle 应用文件分享；目录 <data>/attachments）
+	attachStore, err := attach.New(filepath.Join(dataDir, "attachments"), db)
+	if err != nil {
+		log.Fatalf("附件存储初始化失败: %v", err)
+	}
 	// 数据保留期（防无限增长；0 = 永久保留）：启动清理一次，此后每天一次
-	go scheduleRetention(db)
+	go scheduleRetention(db, attachStore)
 
 	mux := http.NewServeMux()
 
@@ -172,6 +179,46 @@ func main() {
 	// 当前在线用户快照（增量事件走总线 sys:presence 主题；聊天等应用启动时取一次基线）
 	authed.HandleFunc("GET /api/presence", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"online": hub.OnlineUsers()})
+	})
+	// 附件上传（multipart 字段 file，单文件 ≤10MB；Content-Type 边界由浏览器生成，
+	// 此处不可预置 json）——MaxBytesReader 硬限请求体（10MB 文件 + multipart 开销）
+	authed.HandleFunc("POST /api/attachments", func(w http.ResponseWriter, r *http.Request) {
+		id := auth.FromContext(r)
+		r.Body = http.MaxBytesReader(w, r.Body, attach.MaxSize+(1<<20))
+		m, err := attachStore.Save(id.Username, r)
+		if err != nil {
+			log.Printf("attach: 上传失败 user=%s: %v", id.Username, err)
+			http.Error(w, "上传失败："+err.Error(), 400)
+			return
+		}
+		db.Audit(id.Username, "attach.upload", m.Name, "")
+		writeJSON(w, m)
+	})
+	// 附件下载：<img>/<a> 标签带不了 Authorization header，鉴权走查询参数 token
+	//（与 /ws、bundle 取件同例）。图片白名单内联显示，其余（含 SVG/HTML，可携带
+	// 脚本）一律 octet-stream 下载——附件服务不可变成 HTML 注入源。
+	mux.HandleFunc("GET /api/attachments/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if _, err := authSvc.VerifySession(r.URL.Query().Get("token")); err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		m, ok := attachStore.Get(r.PathValue("id"))
+		if !ok {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		// RFC 5987：中文文件名
+		disposition := "attachment; filename=\"" + sanitizeFilenameASCII(m.Name) + "\"; filename*=UTF-8''" + url.PathEscape(m.Name)
+		w.Header().Set("Content-Disposition", disposition)
+		if attach.Inline(m.MIME) {
+			w.Header().Set("Content-Type", m.MIME)
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+		} else {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+		}
+		w.Header().Set("Cache-Control", "private, max-age=3600")
+		http.ServeFile(w, r, attachStore.FilePath(m.ID))
 	})
 	authed.HandleFunc("GET /api/auth/me", authSvc.Me)
 	authed.HandleFunc("GET /api/auth/refresh", authSvc.Refresh)
@@ -716,7 +763,7 @@ func clientIP(r *http.Request) string {
 // scheduleRetention 数据保留期清理：审计日志与 AI 对话历史（含终端伪用户 __term__
 // 的孤儿数据）按天数删除。OPENOS_AUDIT_RETENTION_DAYS / OPENOS_CHAT_RETENTION_DAYS
 // 控制（默认 90 天，0 = 永久保留）。启动即清理一次，此后每天一次。
-func scheduleRetention(db *store.DB) {
+func scheduleRetention(db *store.DB, attachStore *attach.Store) {
 	run := func() {
 		if d := envDays("OPENOS_AUDIT_RETENTION_DAYS", 90); d > 0 {
 			if n, err := db.PruneAuditBefore(time.Now().AddDate(0, 0, -d)); err == nil && n > 0 {
@@ -728,6 +775,11 @@ func scheduleRetention(db *store.DB) {
 				log.Printf("保留期清理：chat_messages 删除 %d 行（%d 天前）", n, d)
 			}
 		}
+		if d := envDays("OPENOS_ATTACH_RETENTION_DAYS", 30); d > 0 {
+			if n := attachStore.Prune(time.Now().AddDate(0, 0, -d)); n > 0 {
+				log.Printf("保留期清理：attachments 删除 %d 个（%d 天前）", n, d)
+			}
+		}
 	}
 	run()
 	t := time.NewTicker(24 * time.Hour)
@@ -735,6 +787,22 @@ func scheduleRetention(db *store.DB) {
 	for range t.C {
 		run()
 	}
+}
+
+// sanitizeFilenameASCII Content-Disposition 的 filename= 回退段只留 ASCII 安全字符
+//（中文与特殊字符走 filename*=UTF-8'' 段；双引号/分号等会破坏头结构）。
+func sanitizeFilenameASCII(name string) string {
+	var b strings.Builder
+	for _, c := range name {
+		if c >= 0x20 && c < 0x7f && c != '"' && c != '\\' && c != ';' {
+			b.WriteRune(c)
+		}
+	}
+	out := strings.TrimSpace(b.String())
+	if out == "" {
+		return "file"
+	}
+	return out
 }
 
 func envDays(key string, def int) int {

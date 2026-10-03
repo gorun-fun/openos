@@ -110,7 +110,12 @@ export OPENOS_AI_MODEL=glm-4-flash
 { "topic": "app:calc", "payload": {...}, "from": "alice", "ts": 1760000000 }
 ```
 
-**内置主题**：`sys:open` · `sys:cmd`（goder 指令）· `sys:apps-changed` · `sys:presence` · `sys:notify`（系统通知：前端 `notify({broadcast:true})` 广播 / 服务端 `PublishTo` 定向）· `sys:agent`（goder 桌面控制插件下行，PublishTo 定向到用户）· `agent:resp`（前端桥应答，服务端处理器接住）· `fs:changed` · `term:<user>` · `chat:goder`
+**内置主题**：`sys:open` · `sys:cmd`（goder 指令）· `sys:apps-changed` · `sys:presence`（连接上下线事件，连接粒度——同用户多标签页多条连接）· `sys:notify`（系统通知：前端 `notify({broadcast:true})` 广播 / 服务端 `PublishTo` 定向）· `sys:agent`（goder 桌面控制插件下行，PublishTo 定向到用户）· `agent:resp`（前端桥应答，服务端处理器接住）· `fs:changed` · `term:<user>` · `chat:goder` · `chat:room`（聊天室应用，全员默认订阅）
+
+### 在线用户与系统附件
+
+- **在线用户**：`GET /api/presence` 返回当前在线用户名快照（登录可用）；增量走 `sys:presence` 主题事件 `{user, online}`。同一用户多标签页 = 多条连接，应用侧应按连接计数（在线名单以快照纠偏为准）。
+- **系统附件**（`server/internal/attach`）：平台级文件分享能力，聊天附件等共用——`POST /api/attachments`（multipart 字段 `file`，单文件 ≤10MB，登录）上传返回 `{id,name,mime,size}`（id 为 128bit 随机不可枚举，mime 以内容嗅探为准）；`GET /api/attachments/{id}?token=<jwt>` 下载（`<img>/<a>` 标签带不了 Authorization header，鉴权走查询参数同 `/ws`；`api.upload()` 客户端方法自动携带登录态）。**安全边界**：Content-Type 只对图片白名单（png/jpeg/gif/webp/bmp/avif）内联，其余（含 SVG/HTML——可携带脚本）一律 `application/octet-stream` 下载 + `nosniff`，附件服务不可变成 HTML 注入源；保留期清理 `OPENOS_ATTACH_RETENTION_DAYS`（默认 30 天，0=永久），文件存 `<data>/attachments/`。
 
 ### 前端总线 API
 
@@ -225,7 +230,7 @@ notify({ title: '系统公告', body: '今晚 22:00 例行维护', broadcast: tr
 内置「应用商店」应用（`web/src/apps/store/` + 服务端 `internal/market`）：浏览目录 → 详情（权限说明/版本日志）→ 管理员安装/更新/卸载，安装时一次性选择授权角色（admin 恒有授权），安装/卸载经 `sys:apps-changed` 总线广播实时出现在 Dock/启动台。
 
 - **目录（多源）**：远程清单**并发拉取合并**（启动即拉、此后每 10 分钟，单源限 2MB/15s 超时）——**自定义源**（管理员在「商店 → 设置」添加，最多 10 个，`GET/PUT /api/market/sources`，持久化 system_kv `market_sources`）排在**官方默认源** `OPENOS_MARKET_URL`（默认 `https://download.gorun.fun/openos/market/catalog.json`）之前，同 id 条目**首见优先**（自定义源可遮蔽官方）；任一源成功即以成功源合并结果为生效目录，全部失败沿用现行，初始兜底 = 随二进制发布的内置清单 `internal/market/catalog.json`（go:embed）。保存自定义源后服务端立即拉取（响应带成功源数与条目数）。`OPENOS_MARKET_URL=off` 只关官方默认源，自定义源仍可用（纯内置则还需清空自定义源）。更新货架只改远端 JSON，无需发版；宿主也可把默认源指向私有清单。内置与远程共用同一套条目校验（`TestCatalogValid`/`parseCatalog`，坏条目跳过记日志）。收录形态三档：**网页应用**（`type:web`，iframe 直嵌允许被嵌的站点，渲染走 WebApp 容器）、**声明式应用**（`type:schema`，config 即 SchemaApp schema，无代码执行）与**组件应用**（`type:bundle`，见下条）；`type:proxy` 预留（webproxy 反代，安装即放行其目标主机）。web/proxy 条目收录前用 `curl -sIL` 核对目标站无 `X-Frame-Options`/`frame-ancestors` 拒嵌头。
-- **组件应用（bundle 档）**：单文件 ES 模块（≤2MB，地址强制 https），**默认导出 Vue 组件定义**（`{ template, setup }`，template 由主程序完整版 Vue 运行时编译），不 import 任何依赖，能力经 `window.OpenOS` 注入（`vue`/`bus`/`api`/`me()`/`ui`/`toast` 等，见 `web/src/sdk/index.ts`）。安装时服务端从目录地址**下载落盘** `<data>/market/bundles/<id>-<version>.js`（下载失败即安装失败；升级换代自动清理旧版本文件，卸载即删），运行期经 `GET /api/market/bundle/{id}?v=&token=` 提供（ESM import 无法带 Authorization header，鉴权走查询参数 token 同 `/ws`；逐请求校验登录态 + `source=market` + 角色授权），前端 `BundleApp` 容器动态 import 渲染——**代码只在管理员安装那一刻取一次远端，运行期不依赖外部源**；与内置应用同级信任，宿主只应收录可信来源的目录。货架源文件在仓库 `market/` 目录（远端镜像 + bundles + icons，上传方法见其 README）。首个 bundle 应用：**聊天室**（`chat`，消息走总线 `chat:room` 主题实时推送、在线状态走 `sys:presence` 事件 + `GET /api/presence` 快照）。
+- **组件应用（bundle 档）**：单文件 ES 模块（≤2MB，地址强制 https），**默认导出 Vue 组件定义**（`{ template, setup }`，template 由主程序完整版 Vue 运行时编译），不 import 任何依赖，能力经 `window.OpenOS` 注入（`vue`/`bus`/`api`/`me()`/`ui`/`toast` 等，见 `web/src/sdk/index.ts`）。安装时服务端从目录地址**下载落盘** `<data>/market/bundles/<id>-<version>.js`（下载失败即安装失败；升级换代自动清理旧版本文件，卸载即删），运行期经 `GET /api/market/bundle/{id}?v=&token=` 提供（ESM import 无法带 Authorization header，鉴权走查询参数 token 同 `/ws`；逐请求校验登录态 + `source=market` + 角色授权），前端 `BundleApp` 容器动态 import 渲染——**代码只在管理员安装那一刻取一次远端，运行期不依赖外部源**；与内置应用同级信任，宿主只应收录可信来源的目录。货架源文件在仓库 `market/` 目录（远端镜像 + bundles + icons，上传方法见其 README）。首个 bundle 应用：**聊天室**（`chat`，消息走总线 `chat:room` 主题实时推送、在线状态走 `sys:presence` 事件 + `GET /api/presence` 快照；v1.1.0 起支持图片/文件附件——先传系统附件服务再随消息发引用，应用没打开时新消息由桌面壳常驻监听（`desktop/appNotifier.ts` 规则驱动）经通知中心提醒）。
 - **安装模型**：`POST /api/market/install {id, roles}`（admin）= `UpsertApp`（`builtin=0/locked=0`）+ `SetAppRoles` 整组覆盖该应用的角色授权；未知角色忽略（防 role_apps 幽灵行），审计 `market.install`。卸载走既有 `DELETE /api/apps/{id}`（受 builtin/locked 保护规则约束）。
 - **版本与升级**：apps 表 `version`/`source` 列标记商店安装（`source=market`）；`GET /api/market/apps` 聚合本机状态返回 `installed/upgradable/managed/conflict/protected`。UpsertApp 对 version/source **空值不覆盖**——管理员经设置页编辑商店应用不断开升级链。目录版本较新时详情页出现「更新」。
 - **边界**：与内置/宿主锁定（builtin/locked）应用撞 id 的条目拒绝安装（`protected` 状态 + HTTP 403）；同 id 手工注册应用存在时标记 `conflict`，重装覆盖其配置。普通用户可浏览目录与打开已装应用，安装/更新仅管理员。
@@ -273,7 +278,9 @@ notify({ title: '系统公告', body: '今晚 22:00 例行维护', broadcast: tr
 
 ```js
 // OpenOS.registerApp(id, { name, width, height, component })
-// 可用：OpenOS.bus / OpenOS.ui（基础组件库）/ OpenOS.api（带登录态）/ OpenOS.open/close / OpenOS.toast
+// 可用：OpenOS.bus / OpenOS.ui（基础组件库）/ OpenOS.api（带登录态，含 api.upload 文件上传）
+//      / OpenOS.open/close / OpenOS.toast / OpenOS.notify / OpenOS.me() / OpenOS.authToken()
+//      / OpenOS.vue（Vue 具名导出，商店 bundle 应用写组件逻辑用）
 OpenOS.registerApp('todo', {
   name: '待办', width: 420, height: 400,
   component: {

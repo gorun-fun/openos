@@ -34,6 +34,7 @@ import { setToken } from './api/client'
 import { registerWidget, type WidgetDef } from './desktop/widgetRegistry'
 import { installMenuGuard } from './ui/menu'
 import { installTooltip } from './ui/tooltip'
+import { installAppNotifiers } from './desktop/appNotifier'
 import { registerDialog, type DialogDef } from './ui/dialogService'
 
 export interface CreateOpenOSOptions {
@@ -105,6 +106,8 @@ export function createOpenOS(opts: CreateOpenOSOptions = {}): VueApp | null {
   installMenuGuard()
   // 全局快速 tooltip：接管原生 title 的悬停提示（约 400ms 弹出，见 ui/tooltip.ts）
   installTooltip()
+  // 后台应用通知：应用未打开时的消息提醒（聊天等，见 desktop/appNotifier.ts）
+  installAppNotifiers()
 
   // 1. 宿主应用组件与图标注册
   Object.assign(builtinComponents, opts.apps || {})

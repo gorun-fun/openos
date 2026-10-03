@@ -14,17 +14,7 @@ export class ApiError extends Error {
   constructor(status: number, msg: string) { super(msg); this.status = status }
 }
 
-async function request<T>(method: string, path: string, body?: unknown, headers?: Record<string, string>): Promise<T> {
-  const h: Record<string, string> = { ...headers }
-  if (body !== undefined) h['Content-Type'] = 'application/json'
-  const t = getToken()
-  if (t) h['Authorization'] = 'Bearer ' + t
-  let resp: Response
-  try {
-    resp = await fetch(path, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body) })
-  } catch {
-    throw new ApiError(0, '网络不可达，请检查服务是否运行')
-  }
+async function handleResp<T>(resp: Response, path: string): Promise<T> {
   if (resp.status === 401) {
     // 登录过期 / 凭证被吊销：清理并回到登录页（登录接口本身除外）
     if (!path.includes('/api/auth/login')) {
@@ -44,11 +34,40 @@ async function request<T>(method: string, path: string, body?: unknown, headers?
   return resp.json() as Promise<T>
 }
 
+async function request<T>(method: string, path: string, body?: unknown, headers?: Record<string, string>): Promise<T> {
+  const h: Record<string, string> = { ...headers }
+  if (body !== undefined) h['Content-Type'] = 'application/json'
+  const t = getToken()
+  if (t) h['Authorization'] = 'Bearer ' + t
+  let resp: Response
+  try {
+    resp = await fetch(path, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body) })
+  } catch {
+    throw new ApiError(0, '网络不可达，请检查服务是否运行')
+  }
+  return handleResp<T>(resp, path)
+}
+
 export const api = {
   get: <T>(path: string, headers?: Record<string, string>) => request<T>('GET', path, undefined, headers),
   post: <T>(path: string, body?: unknown, headers?: Record<string, string>) => request<T>('POST', path, body, headers),
   put: <T>(path: string, body?: unknown, headers?: Record<string, string>) => request<T>('PUT', path, body, headers),
   del: <T>(path: string) => request<T>('DELETE', path),
+  /** 文件上传（multipart，字段名默认 file）：不设 Content-Type，边界由浏览器生成。 */
+  upload: async <T>(path: string, file: File, field = 'file'): Promise<T> => {
+    const fd = new FormData()
+    fd.append(field, file)
+    const h: Record<string, string> = {}
+    const t = getToken()
+    if (t) h['Authorization'] = 'Bearer ' + t
+    let resp: Response
+    try {
+      resp = await fetch(path, { method: 'POST', headers: h, body: fd })
+    } catch {
+      throw new ApiError(0, '网络不可达，请检查服务是否运行')
+    }
+    return handleResp<T>(resp, path)
+  },
 }
 
 // ---- 类型 ----
