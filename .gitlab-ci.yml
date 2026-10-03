@@ -73,7 +73,7 @@ push-image:
   rules:
     - if: '$CI_COMMIT_TAG'
 
-# 发布到 DEPLOY_HOSTS 各主机（bridge 网络映射 8081 端口），复用项目 docker-compose.yml，
+# 发布到 DEPLOY_HOSTS 各主机（bridge 网络映射宿主 8091 → 容器 8081），复用项目 docker-compose.yml，
 # 从内网仓库拉取镜像（服务器上已有同名镜像，compose 不会触发本地 build）
 deploy:
   stage: deploy

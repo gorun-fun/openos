@@ -14,7 +14,7 @@ make release      # 多平台发布包（darwin/linux × amd64/arm64，CGO_ENABL
 make goder        # 构建 goder 组件（源码自动克隆自 git.gorun.fun/share/goder.git，需 go/npm/git；运行期另需 PATH 上有 gh）
 make desktop      # 构建 openos-desktop 桌面客户端（desktop/ → 仓库根 ./openos-desktop，CDP 驱动 Chrome app 模式解决网页应用跨域）
 ./run.sh start|stop|restart|reset [server|desktop]  # 进程管理，默认 target=desktop；reset 仅 desktop=清空客户端全部本地数据（start 先确保服务端再拉客户端；stop 先客户端后服务端；客户端打开地址 = OPENOS_DESKTOP_URL 显式 > 系统设置「服务器」分区保存的 config.json > 本地默认，配置指向远程时跳过本地服务端）
-docker compose up -d --build   # 容器部署 → http://localhost:8081
+docker compose up -d --build   # 容器部署 → http://localhost:8091（宿主映射 8091→容器 8081）
 
 cd web && npm run typecheck    # vue-tsc --noEmit（仓库无 ESLint/Prettier，类型检查是唯一的静态校验）
 ```

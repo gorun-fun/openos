@@ -7,7 +7,9 @@ services:
     image: ${OPENOS_REGISTRY:-10.8.0.6:5000}/openos:${OPENOS_TAG:-latest}
     container_name: openos
     ports:
-      - "8081:8081"
+      # 宿主 8091：10.8.0.6 上 8081 被 auto-web(Auto Studio) 占用、8090 是 grf-bridge；
+      # 容器内仍是 8081（OPENOS_ADDR 不变）
+      - "8091:8081"
     volumes:
       # 运行时数据（openos.db、homes/ 用户沙箱）持久化到宿主机目录：
       # 服务器默认 /app/docker/openos；本地开发请设 OPENOS_DATA_DIR=./data（macOS 默认不共享 /app）
