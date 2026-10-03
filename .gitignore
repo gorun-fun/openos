@@ -12,3 +12,6 @@ openos-desktop
 release/
 desktop/desktop
 desktop/probe/
+
+# web/node_modules 本地是符号链接（指向共享依赖目录），node_modules/ 带斜杠只匹配真目录不匹配链接
+web/node_modules

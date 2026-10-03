@@ -20,7 +20,7 @@ variables:
   # 此处显式声明，防将来基础镜像版本回退
   DOCKER_BUILDKIT: "1"
   # 发布目标主机（内网，通过 SSH 登录），多台以空格分隔
-  DEPLOY_HOSTS: 10.8.0.5
+  DEPLOY_HOSTS: 10.8.0.6
   # 发布机拉取镜像的仓库地址（与构建/推送为同一仓库）
   DEPLOY_REGISTRY: ${REGISTRY}
   # 发布机上的应用工作目录
@@ -34,10 +34,27 @@ stages:
   - deploy
 
 # 多阶段 Dockerfile 内已完成：前端构建（Vite/Vue3）-> 后端编译（Go 纯静态）-> 精简运行镜像打包
+# goder 源码与 gh 发行版在构建前取进上下文（.run/，Dockerfile 以 COPY 消费）：
+# 不能在镜像层内 clone/下载——RUN 层缓存键只认命令字符串，上游 goder/gh 前进
+# 而缓存不失效，会锁死旧快照（grf-hotel v0.0.8/v0.0.9 的教训，同款处理）
 build-image:
   stage: build
   tags:
     - docker
+  before_script:
+    - sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
+    - apk add --no-cache git curl
+    - mkdir -p .run
+    - git clone --depth 1 https://git.gorun.fun/share/goder.git .run/goder-src
+    # gh：取 grf-harness 最新发布版（目录结构 {平台}/{版本}/gh；CI 容器架构
+    # 与构建平台同为 runner 宿主机，uname 即目标架构）
+    - |
+      PLAT=$([ "$(uname -m)" = aarch64 ] && echo linux-arm64 || echo linux)
+      VER=$(curl -sL "https://download.gorun.fun/grf-harness/${PLAT}/" \
+          | grep -o 'href="[0-9][^"]*/"' | sed 's/href="//;s|/"||' | sort -V | tail -1)
+      echo "下载 gh ${VER} (${PLAT})"
+      curl -fsSL -o .run/gh "https://download.gorun.fun/grf-harness/${PLAT}/${VER}/gh"
+      chmod +x .run/gh && .run/gh --version
   script:
     - docker info
     # APP_VERSION 注入服务端版本号（系统信息/健康检查显示 git tag）

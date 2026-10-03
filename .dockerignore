@@ -1,0 +1,31 @@
+# Docker 构建上下文瘦身：与镜像无关的本地目录全部排除（原无 .dockerignore，
+# .git/桌面端产物等全量随上下文上传）。CI 构建前会把 goder 源码 clone 到
+# .run/goder-src、gh 下载到 .run/gh（Dockerfile COPY 消费），须放行；
+# goder-src 内部再剔除重活（.git 历史与前端构建产物）。
+# 注意：目录本体不能整目录排除（如直接写 .run），否则 ! 再包含会失效，
+# 须用 .run/* 逐项排除后再放行
+.git
+.goder-src
+.zcode
+.playwright-cli
+desktop
+openos-desktop
+release
+docs
+**/node_modules
+web/dist
+server/data
+**/*.log
+*.pid
+.DS_Store
+README.md
+AGENTS.md
+Makefile
+run.sh
+.run/*
+!.run/goder-src
+!.run/gh
+.run/goder-src/.git
+.run/goder-src/**/node_modules
+.run/goder-src/frontend/dist
+.run/goder-src/frontend/dist-embed

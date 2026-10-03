@@ -1,12 +1,11 @@
 # OpenOS 生产镜像：前端构建 → Go 静态编译 → 最小运行镜像
 # goder 组件（goder-serve 网关 + goder.js 嵌入库 + gh）随镜像分发，部署即可用
 
-# ---- goder 源码（克隆自官方仓库，GODER_REPO 可覆盖/锁定）----
+# ---- goder 源码（构建方随上下文提供 .run/goder-src，CI 构建前 clone 最新版；
+# 不能在镜像层内 clone——RUN 层缓存键只认命令字符串，上游 goder 前进而缓存
+# 不失效，镜像会锁死旧快照，见 grf-hotel 同款教训）----
 FROM alpine:3.20 AS goder-src
-ARG GODER_REPO=https://git.gorun.fun/share/goder.git
-RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories \
-    && apk add --no-cache git \
-    && git clone --depth 1 ${GODER_REPO} /goder
+COPY .run/goder-src /goder
 
 # ---- goder 嵌入库 goder.js（与上游 ./build.sh embed 同款两步构建）----
 FROM node:22-alpine AS goder-web
@@ -14,7 +13,13 @@ FROM node:22-alpine AS goder-web
 ENV npm_config_registry=https://registry.npmmirror.com
 COPY --from=goder-src /goder /goder
 WORKDIR /goder/frontend
-RUN npm ci --no-audit --no-fund && npm run build && npm run build:embed
+# BuildKit 缓存挂载：npm 下载缓存 + vite 依赖预构建缓存。goder 源码每次随上游
+# 变化（COPY 内容寻址），层缓存必然穿透，缓存挂载是此处唯一的复用手段；
+# id=goder-* 与 grf-play/grf-hotel 的 goder 阶段共享——同一份源码，依赖下载
+# 与编译结果跨项目复用
+RUN --mount=type=cache,id=goder-npm,target=/root/.npm \
+    --mount=type=cache,id=goder-vite,target=/goder/frontend/node_modules/.vite \
+    npm ci --no-audit --no-fund && npm run build && npm run build:embed
 
 # ---- goder-serve 网关（纯 Go 无 CGO，静态编译）----
 FROM golang:1.26-alpine AS goder-serve
@@ -22,19 +27,16 @@ FROM golang:1.26-alpine AS goder-serve
 ENV GOPROXY=https://goproxy.cn,direct
 COPY --from=goder-src /goder /goder
 WORKDIR /goder
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/goder-serve ./cmd/goder-serve
+# 缓存挂载：模块缓存 + 编译缓存（id 与 grf-play/grf-hotel 的 goder 阶段共享），
+# 上游小改动时增量编译，依赖包与标准库不再重编
+RUN --mount=type=cache,id=goder-gomod,target=/go/pkg/mod \
+    --mount=type=cache,id=goder-gobuild,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/goder-serve ./cmd/goder-serve
 
-# ---- gh（grf-harness 发行版，按目标架构取最新版；目录结构 {平台}/{版本}/gh）----
+# ---- gh（grf-harness 发行版，构建方随上下文提供 .run/gh，CI 构建前取最新版；
+# 同样不能在镜像层内下载，层缓存会锁死旧版 gh）----
 FROM alpine:3.20 AS gh
-ARG TARGETARCH
-RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories \
-    && apk add --no-cache curl \
-    && PLAT=$([ "$TARGETARCH" = "arm64" ] && echo linux-arm64 || echo linux) \
-    && VER=$(curl -sL "https://download.gorun.fun/grf-harness/${PLAT}/" \
-        | grep -o 'href="[0-9][^"]*/"' | sed 's/href="//;s|/"||' | sort -V | tail -1) \
-    && echo "下载 gh ${VER} (${PLAT})" \
-    && curl -sL -o /gh "https://download.gorun.fun/grf-harness/${PLAT}/${VER}/gh" \
-    && chmod +x /gh && /gh --version
+COPY --chmod=755 .run/gh /gh
 
 # ---- OpenOS 前端 ----
 FROM node:22-alpine AS web
@@ -42,9 +44,12 @@ FROM node:22-alpine AS web
 ENV npm_config_registry=https://registry.npmmirror.com
 WORKDIR /build/web
 COPY web/package.json web/package-lock.json ./
-RUN npm ci --no-audit --no-fund
+# BuildKit 缓存挂载：npm 下载缓存跨构建复用；依赖未变时层缓存命中本层跳过，
+# 依赖变更重装也只走缓存不走网络。id= 按项目隔离，避免与其他项目相互污染
+RUN --mount=type=cache,id=openos-npm,target=/root/.npm npm ci --no-audit --no-fund
 COPY web/ ./
-RUN npm run build
+# 挂载 vite 依赖预构建缓存（node_modules/.vite），依赖未变时跳过重新预打包
+RUN --mount=type=cache,id=openos-vite,target=/build/web/node_modules/.vite npm run build
 
 # ---- OpenOS 服务端 ----
 FROM golang:1.26-alpine AS server
@@ -54,9 +59,12 @@ ARG APP_VERSION=dev
 ENV GOPROXY=https://goproxy.cn,direct
 WORKDIR /build/server
 COPY server/go.mod server/go.sum ./
-RUN go mod download
+RUN --mount=type=cache,id=openos-gomod,target=/go/pkg/mod go mod download
 COPY server/ ./
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
+# 缓存挂载：模块缓存 + 编译缓存，源码变更时增量编译
+RUN --mount=type=cache,id=openos-gomod,target=/go/pkg/mod \
+    --mount=type=cache,id=openos-gobuild,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath \
     -ldflags="-s -w -X openos/server/internal/store.Version=${APP_VERSION}" -o /openos .
 
 # ---- 运行镜像 ----
