@@ -13,13 +13,17 @@ FROM node:22-alpine AS goder-web
 ENV npm_config_registry=https://registry.npmmirror.com
 COPY --from=goder-src /goder /goder
 WORKDIR /goder/frontend
-# BuildKit 缓存挂载：npm 下载缓存 + vite 依赖预构建缓存。goder 源码每次随上游
-# 变化（COPY 内容寻址），层缓存必然穿透，缓存挂载是此处唯一的复用手段；
-# id=goder-* 与 grf-play/grf-hotel 的 goder 阶段共享——同一份源码，依赖下载
-# 与编译结果跨项目复用
-RUN --mount=type=cache,id=goder-npm,target=/root/.npm \
-    --mount=type=cache,id=goder-vite,target=/goder/frontend/node_modules/.vite \
-    npm ci --no-audit --no-fund && npm run build && npm run build:embed
+# BuildKit 缓存挂载：npm 下载缓存。goder 源码每次随上游变化（COPY 内容寻址），
+# 层缓存必然穿透，缓存挂载是此处唯一的复用手段；id=goder-* 与 grf-play/grf-hotel
+# 的 goder 阶段共享——同一份源码，依赖下载与编译结果跨项目复用。
+# 硬约束：npm ci 必须单独成层——npm ci 会先整删 node_modules，若同层把 vite
+# 缓存挂进 node_modules/.vite，挂载点 rmdir 必报 EBUSY（挂载即自动创建挂载点
+# 目录，首次构建也失败；v0.0.18 CI 构建失败的根因）
+RUN --mount=type=cache,id=goder-npm,target=/root/.npm npm ci --no-audit --no-fund
+# vite 依赖预构建缓存与下方 web 阶段同款：本层只跑构建、不增删 node_modules，
+# 挂进 node_modules/.vite 才安全
+RUN --mount=type=cache,id=goder-vite,target=/goder/frontend/node_modules/.vite \
+    npm run build && npm run build:embed
 
 # ---- goder-serve 网关（纯 Go 无 CGO，静态编译）----
 FROM golang:1.26-alpine AS goder-serve
