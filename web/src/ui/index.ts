@@ -31,6 +31,8 @@ export type { FileDialogRequest } from './fileDialog'
 export { registerDialog, unregisterDialog, openDialog, dialogRegistry, dialogStack } from './dialogService'
 export type { DialogDef, DialogOpenOpts } from './dialogService'
 export { default as DialogHost } from './DialogHost.vue'
+export { osConfirm } from './confirm'
+export type { ConfirmOpts } from './confirm'
 export { icons } from './icons'
 // OsTable 列定义类型：宿主应用以强类型声明列（export type 不产生运行时代码）
 export type { TableColumn } from './OsTable.vue'

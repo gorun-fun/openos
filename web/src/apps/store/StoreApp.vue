@@ -9,7 +9,7 @@ import { api } from '../../api/client'
 import { useSession } from '../../stores/session'
 import { useApps } from '../../stores/apps'
 import { useWindows } from '../../stores/windows'
-import { AppIcon, OsEmpty, toast, icons } from '../../ui'
+import { AppIcon, OsEmpty, osConfirm, toast, icons } from '../../ui'
 
 defineProps<{ win: WinState }>()
 
@@ -58,6 +58,22 @@ async function load() {
     toast(e.message, { type: 'error' })
   } finally {
     loading.value = false
+  }
+}
+
+// 「刷新」按钮：先让服务端立即拉取远程目录源（不等 10 分钟周期），再重读货架。
+// 全部源拉取失败时服务端沿用现行目录，按钮仍算成功（货架可正常重读）。
+const refreshing = ref(false)
+async function refresh() {
+  if (refreshing.value) return
+  refreshing.value = true
+  try {
+    await api.post('/api/market/refresh')
+    await load()
+  } catch (e: any) {
+    toast(e.message, { type: 'error' })
+  } finally {
+    refreshing.value = false
   }
 }
 async function loadRoles() {
@@ -119,7 +135,7 @@ async function install(s: MarketState) {
   }
 }
 async function uninstall(s: MarketState) {
-  if (!confirm(`卸载 ${s.name}？其授权将一并回收。`)) return
+  if (!(await osConfirm({ title: '卸载应用', body: `确定卸载「${s.name}」？其授权将一并回收。`, danger: true, confirmText: '卸载' }))) return
   busy.value = true
   try {
     await api.del(`/api/apps/${s.id}`)
@@ -201,7 +217,7 @@ const icoGear = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fil
         <input v-model="keyword" placeholder="搜索应用" spellcheck="false" />
       </div>
       <button v-if="isAdmin" class="os-tb-btn" title="商店设置（目录源）" v-html="icoGear" @click="openSettings" />
-      <button class="os-tb-btn" title="刷新" v-html="icons.refresh" @click="load" />
+      <button class="os-tb-btn" :class="{ spin: refreshing }" :disabled="refreshing" title="刷新" v-html="icons.refresh" @click="refresh" />
     </div>
 
     <!-- 目录列表 -->

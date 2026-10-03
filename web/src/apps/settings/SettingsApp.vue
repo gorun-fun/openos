@@ -7,6 +7,7 @@ import { useApps } from '../../stores/apps'
 import { api, type AppDef } from '../../api/client'
 import { bus } from '../../bus/bus'
 import { shell } from '../../shell'
+import { osConfirm, toast } from '../../ui'
 import {
   OsButton, OsInput, OsSelect, OsToggle, OsPanel, OsTable, OsLayout, OsTabs, OsModal,
   OsEmpty, AppIcon,
@@ -107,7 +108,7 @@ async function createUser() {
     showCreate.value = false
     nu.value = { username: '', password: '', role: 'user', displayName: '' }
     loadUsers()
-  } catch (e: any) { alert(e.message) }
+  } catch (e: any) { toast(e.message, { type: 'error' }) }
 }
 async function setRole(row: any, role: string) {
   await api.put(`/api/users/${row.username}`, { role })
@@ -117,11 +118,11 @@ async function setDisabled(row: any, disabled: boolean) {
   try {
     await api.put(`/api/users/${row.username}`, { disabled })
     loadUsers()
-  } catch (e: any) { alert(e.message) }
+  } catch (e: any) { toast(e.message, { type: 'error' }) }
 }
 async function removeUser(row: any) {
-  if (!confirm(`删除用户 ${row.displayName || row.username}？其文件、设置与磁盘数据将被清理。`)) return
-  try { await api.del(`/api/users/${row.username}`); loadUsers() } catch (e: any) { alert(e.message) }
+  if (!(await osConfirm({ title: '删除用户', body: `确定删除 ${row.displayName || row.username}？其文件、设置与磁盘数据将被清理。`, danger: true, confirmText: '删除' }))) return
+  try { await api.del(`/api/users/${row.username}`); loadUsers() } catch (e: any) { toast(e.message, { type: 'error' }) }
 }
 // 管理员在用户管理直接改显示名（与账户页自助接口互为补充，走 admin 通道）
 const dnEdit = ref<{ row: any } | null>(null)
@@ -132,7 +133,7 @@ function editDisplayName(row: any) {
 }
 async function saveDisplayNameEdit() {
   const name = dnEditVal.value.trim()
-  if (!name) { alert('显示名不能为空'); return }
+  if (!name) { toast('显示名不能为空', { type: 'error' }); return }
   const row = dnEdit.value!.row
   try {
     await api.put(`/api/users/${row.username}`, { displayName: name })
@@ -140,7 +141,7 @@ async function saveDisplayNameEdit() {
     const su = session.user
     if (su && su.username === row.username) su.displayName = name // 管理员改的是自己时，菜单栏即刷
     dnEdit.value = null
-  } catch (e: any) { alert(e.message) }
+  } catch (e: any) { toast(e.message, { type: 'error' }) }
 }
 
 // ---- 应用授权矩阵 ----
@@ -273,7 +274,7 @@ async function registerApp() {
   } catch (e: any) { regMsg.value = '保存失败：' + e.message }
 }
 async function removeApp(id: string) {
-  if (!confirm(`删除第三方应用 ${id}？`)) return
+  if (!(await osConfirm({ title: '删除应用', body: `确定删除第三方应用 ${id}？`, danger: true, confirmText: '删除' }))) return
   await api.del(`/api/apps/${id}`)
   loadAccess()
 }

@@ -345,6 +345,12 @@ func main() {
 			okN, total := market.RefreshNow() // 保存即拉取，管理端保存后货架即时更新
 			writeJSON(w, map[string]any{"ok": "1", "custom": clean, "sourcesOk": okN, "entries": total})
 		})
+		// 商店「刷新」按钮：立即并发拉取全部远程目录源（与周期循环经 refreshMu 串行）。
+		// 全员可用——拉取目标只来自管理员配置的源集合与环境变量默认源，不引入新输入。
+		authed.HandleFunc("POST /api/market/refresh", func(w http.ResponseWriter, r *http.Request) {
+			okN, total := market.RefreshNow()
+			writeJSON(w, map[string]any{"sourcesOk": okN, "entries": total})
+		})
 		authed.HandleFunc("GET /api/market/apps", func(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, market.List(db))
 		})

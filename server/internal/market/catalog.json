@@ -58,16 +58,16 @@
       "height": 760
     },
     {
-      "id": "osm-map",
-      "name": "世界地图",
-      "description": "基于 OpenStreetMap 的在线地图（官方嵌入组件），缩放浏览全球路网。",
+      "id": "amap",
+      "name": "高德地图",
+      "description": "高德地图网页版：地点搜索、公交驾车步行路线规划、实时路况与周边查询。",
       "category": "工具",
-      "icon": "https://www.openstreetmap.org/favicon.ico",
+      "icon": "https://www.amap.com/favicon.ico",
       "type": "web",
-      "config": { "kind": "web", "url": "https://www.openstreetmap.org/export/embed.html?bbox=60%2C5%2C150%2C58&layer=mapnik" },
+      "config": { "kind": "web", "url": "https://www.amap.com/" },
       "version": "1.0.0",
       "changelog": "初始版本",
-      "perms": ["在窗口内加载 www.openstreetmap.org"],
+      "perms": ["在窗口内加载 www.amap.com"],
       "width": 1000,
       "height": 720
     },

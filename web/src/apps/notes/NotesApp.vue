@@ -7,7 +7,7 @@ import type { WinState } from '../../stores/windows'
 import { useWindows } from '../../stores/windows'
 import { useNotes, NOTE_COLORS } from '../../stores/notes'
 import { bus } from '../../bus/bus'
-import { OsEmpty, icons } from '../../ui'
+import { OsEmpty, osConfirm, icons } from '../../ui'
 
 const props = defineProps<{ win: WinState }>()
 const windows = useWindows()
@@ -37,8 +37,8 @@ function addNote() {
   notes.create()
 }
 
-function delNote(id: string) {
-  if (!confirm('删除这张便签？')) return
+async function delNote(id: string) {
+  if (!(await osConfirm({ body: '删除这张便签？', danger: true, confirmText: '删除' }))) return
   if (onDesk(id)) bus.emit('notes:pin', { id, on: false }, { remote: false }) // 同步撤下桌面
   notes.remove(id)
 }

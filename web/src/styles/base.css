@@ -147,6 +147,9 @@ button { font-family: inherit; }
 .os-tb-btn:disabled { opacity: .35; cursor: default; }
 .os-tb-btn:not(:disabled):hover { background: var(--os-hover); }
 .os-tb-btn svg { width: 14px; height: 14px; }
+/* 加载中转圈（svg 经 v-html 注入，须全局样式命中；按钮自身加 .spin 类） */
+.os-tb-btn.spin svg { animation: os-spin .9s linear infinite; }
+@keyframes os-spin { to { transform: rotate(360deg); } }
 .os-tb-btn.danger:not(:disabled):hover { border-color: #e5484d; color: #e5484d; }
 .os-tb-title {
   font-size: 13.5px; font-weight: 600; white-space: nowrap;
