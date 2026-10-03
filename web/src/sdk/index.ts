@@ -27,6 +27,7 @@ import { api, fsApi, getToken, type SessionUser } from '../api/client'
 import { notify } from '../stores/notifications'
 import { useCalendar, todayStr, REMIND_OPTIONS, type CalMark, type RemindOffset } from '../stores/calendar'
 import { registerDialog, unregisterDialog, openDialog, dialogRegistry, type DialogDef } from '../ui/dialogService'
+import { openPath } from '../apps/openWith'
 
 export interface RegisterOptions {
   name: string
@@ -83,6 +84,11 @@ export const OpenOS = {
   /** 打开一个应用窗口（可携带 props，如文件路径）。 */
   open(appId: string, props?: any) {
     return useWindows().open(appId, props)
+  },
+  /** 打开一个 VFS 文件：按扩展名分发到对应应用（md/txt→文档、csv→表格、
+   *  html→幻灯片、pdf→PDF、图片→文件应用快速预览），映射与文件应用一致。 */
+  openFile(path: string): string | null {
+    return openPath(path)
   },
   /** 注册跨应用弹窗（id 建议 `appId:业务名`）；registerApp 的 dialogs 选项是其应用内等价物。 */
   registerDialog,

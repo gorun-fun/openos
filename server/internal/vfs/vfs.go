@@ -112,6 +112,67 @@ func (f *FS) DeleteHome(user string) {
 	_ = os.RemoveAll(filepath.Join(f.homesDir, filepath.Base(user)))
 }
 
+// SaveToDocs 把字节以 name 存进用户「文档」目录（聊天附件归档等系统侧写入用）：
+// 内容级幂等——目标路径已存在且内容相同直接返回现路径（重复保存同一附件不堆积）；
+// 同名不同内容则按「名 (2).ext」递增重命名落盘。配额满返回错误。
+// 返回落盘的 VFS 路径，并广播 fs:changed 让文件应用即时刷新。
+func (f *FS) SaveToDocs(user, name string, data []byte) (string, error) {
+	if f.disabled {
+		return "", fmt.Errorf("文件系统未启用")
+	}
+	name = path.Base(strings.ReplaceAll(name, "\\", "/"))
+	if name == "" || name == "." || name == "/" {
+		name = "file"
+	}
+	if len(name) > 200 {
+		ext := path.Ext(name)
+		stem := strings.TrimSuffix(name, ext)
+		name = stem[len(stem)-(200-len(ext)):] + ext
+	}
+	dir := homeOf(user) + "/文档"
+	if _, err := clean(user, dir); err != nil {
+		return "", err
+	}
+
+	text := isTextExt(name)
+	content := string(data)
+	isBin := 0
+	if !text {
+		isBin = 1
+		content = base64.StdEncoding.EncodeToString(data)
+	}
+
+	// 幂等：同路径同内容视为已保存
+	target := path.Join(dir, name)
+	var existing string
+	if err := f.db.QueryRow(`SELECT content FROM files WHERE owner=? AND path=? AND is_dir=0`, user, target).Scan(&existing); err == nil {
+		if existing == content {
+			return target, nil
+		}
+	}
+	// 同名不同内容：名 (2).ext 递增
+	for i := 2; ; i++ {
+		var n int
+		f.db.QueryRow(`SELECT COUNT(*) FROM files WHERE owner=? AND path=?`, user, target).Scan(&n)
+		if n == 0 {
+			break
+		}
+		ext := path.Ext(name)
+		target = path.Join(dir, strings.TrimSuffix(name, ext)+" ("+strconv.Itoa(i)+")"+ext)
+	}
+
+	if f.quotaUsed(user)+int64(len(content)) > store.StorageQuota {
+		return "", fmt.Errorf("个人空间已满（配额 %dMB），请清理后重试", store.StorageQuota>>20)
+	}
+	f.ensureDirs(user, target)
+	if _, err := f.db.Exec(`INSERT INTO files(owner,path,is_dir,is_binary,content,updated_at) VALUES(?,?,0,?,?,datetime('now'))`,
+		user, target, isBin, content); err != nil {
+		return "", err
+	}
+	f.hub.PublishTo(user, "fs:changed", map[string]any{"path": target, "kind": "save"})
+	return target, nil
+}
+
 // ---- 路径 ----
 
 func homeOf(user string) string { return "/home/" + user }

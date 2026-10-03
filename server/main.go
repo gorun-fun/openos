@@ -231,6 +231,33 @@ func main() {
 		}
 		writeJSON(w, map[string]any{"messages": msgs})
 	})
+	// 聊天附件归档到当前用户「文档」目录（幂等）：发送方上传后自动存、接收方点击
+	// 时存自己那份，随后前端经 openFile 用对应应用打开（图片→文件应用预览）。
+	authed.HandleFunc("POST /api/chat/attach/save", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID string `json:"id"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil || req.ID == "" {
+			http.Error(w, "参数错误：需要 id", 400)
+			return
+		}
+		m, ok := attachStore.Get(req.ID)
+		if !ok {
+			http.Error(w, "附件不存在", http.StatusNotFound)
+			return
+		}
+		data, err := os.ReadFile(attachStore.FilePath(m.ID))
+		if err != nil {
+			http.Error(w, "附件文件已被清理（保留期 30 天）", http.StatusNotFound)
+			return
+		}
+		p, err := fs.SaveToDocs(auth.FromContext(r).Username, m.Name, data)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": "1", "path": p})
+	})
 	// 附件上传（multipart 字段 file，单文件 ≤10MB；Content-Type 边界由浏览器生成，
 	// 此处不可预置 json）——MaxBytesReader 硬限请求体（10MB 文件 + multipart 开销）
 	authed.HandleFunc("POST /api/attachments", func(w http.ResponseWriter, r *http.Request) {

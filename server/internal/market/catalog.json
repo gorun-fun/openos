@@ -250,10 +250,10 @@
       "type": "bundle",
       "config": {
         "kind": "bundle",
-        "url": "https://download.gorun.fun/openos/market/bundles/chat-1.2.0.js"
+        "url": "https://download.gorun.fun/openos/market/bundles/chat-1.3.0.js"
       },
-      "version": "1.2.0",
-      "changelog": "新增历史消息：打开自动加载最近 50 条，上滑分页翻看更早",
+      "version": "1.3.0",
+      "changelog": "发送的文件自动归档「文档」目录；点击附件用对应应用打开（文档/表格/PDF/图片预览），不再下载",
       "perms": [
         "经事件总线收发 chat:room 消息（实时推送）",
         "读取在线用户列表",
