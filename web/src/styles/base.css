@@ -196,4 +196,32 @@ button { font-family: inherit; }
   /* iOS Safari：输入控件字号 <16px 聚焦会强制放大整页（contenteditable 不受影响） */
   input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
   textarea, select { font-size: max(16px, 1em); }
+
+  /* —— 左侧导航抽屉化约定（配合 ui/MobileNavToggle.vue）：手写侧栏的应用，
+     侧栏元素加 .os-side + 展开态 .os-side-open，侧栏所在的定位容器加 .os-has-side，
+     并在容器内挂 <MobileNavToggle v-model="open" />。覆盖应用自带侧栏宽度故用
+     !important（约定类仅在移动形态生效）。 —— */
+  .os-has-side { position: relative; }
+  .os-side {
+    position: absolute !important; z-index: 30; left: 0; top: 0; bottom: 0;
+    width: min(76vw, 300px) !important; max-width: min(76vw, 300px) !important;
+    flex: none !important;
+    transform: translateX(-103%);
+    transition: transform .24s var(--os-ease-out);
+  }
+  .os-side.os-side-open { transform: none; box-shadow: var(--os-shadow); }
+  .os-side-mask {
+    position: absolute; inset: 0; z-index: 25; background: rgba(0, 0, 0, .32);
+    animation: os-fade-in .14s ease;
+  }
+  .os-nav-fab {
+    position: absolute; z-index: 40; left: 12px; top: 10px;
+    width: 40px; height: 40px; border-radius: 50%; border: 1px solid var(--os-border);
+    background: var(--os-panel); color: var(--os-text); cursor: pointer;
+    backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: var(--os-shadow-sm);
+  }
+  /* 融合窗体工具栏：移动形态无红绿灯，去掉 84px 悬浮位 */
+  .os-tb { padding-left: 12px; }
 }

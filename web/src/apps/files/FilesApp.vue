@@ -8,7 +8,7 @@ import { useApps } from '../../stores/apps'
 import { useSession } from '../../stores/session'
 import { fsApi, downloadFile, fetchRawBlob, type VFile } from '../../api/client'
 import { bus } from '../../bus/bus'
-import { OsInput, OsButton, OsEmpty, OsModal, toast, useMenu, menuPos, icons, resolveFileDialog, type FileDialogRequest } from '../../ui'
+import { OsInput, OsButton, OsEmpty, OsModal, MobileNavToggle, toast, useMenu, menuPos, icons, resolveFileDialog, type FileDialogRequest } from '../../ui'
 import { openPath, openWithApps, isImage, fileEmoji, kindOf, extOf, fmtSize, IMAGE_EXTS, parentOf } from '../openWith'
 import { renderMarkdown } from '../../lib/md'
 import { parseCSV } from '../sheets/engine'
@@ -18,6 +18,8 @@ const props = defineProps<{ win: WinState }>()
 const windows = useWindows()
 const apps = useApps()
 const session = useSession()
+// 移动形态：侧栏抽屉展开态（os-side 约定 + MobileNavToggle，桌面形态不参与）
+const navOpen = ref(false)
 const home = `/home/${session.user!.username}`
 const trashPath = home + '/.Trash'
 
@@ -785,9 +787,11 @@ watch(() => columnPaths.value.length, async () => {
       </div>
     </div>
 
-    <div class="body">
-      <!-- 侧栏：收藏 / 位置 / 废纸篓 -->
-      <aside class="sidebar">
+    <div class="body os-has-side">
+      <!-- 移动形态：侧栏抽屉开关（汉堡 + 遮罩；桌面隐藏） -->
+      <MobileNavToggle v-model:open="navOpen" />
+      <!-- 侧栏：收藏 / 位置 / 废纸篓（移动形态经 os-side 约定收为抽屉） -->
+      <aside class="sidebar os-side" :class="{ 'os-side-open': navOpen }">
         <div class="side-head">收藏</div>
         <button class="side-item" :class="{ active: isActive(home), drop: dragOverDir === home }" @click="enter(home)"
           @dragover="onSideDragOver($event, home)" @dragleave="dragOverDir = ''" @drop="onSideDrop($event, home)">

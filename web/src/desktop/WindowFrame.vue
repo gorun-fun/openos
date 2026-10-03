@@ -287,8 +287,14 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
 }
 .window.dragging { transition: none; }
 .window.minimized { opacity: 0; transform: scale(.06) translateY(70vh); pointer-events: none; }
-/* 移动形态：应用从底部滑入全屏（手机范式），过渡用上滑淡出与胶囊节奏一致 */
-.window.mobile { animation: os-app-slide-up .28s var(--os-ease-out); border-radius: 0; border: none; }
+/* 移动形态：应用从底部滑入全屏（手机范式），过渡用上滑淡出与胶囊节奏一致。
+   padding 顶部避让刘海（安全区），底部给悬浮胶囊让位（否则滚动列表末段被盖住），
+   上下均由窗口自身背景填充，视觉仍是全屏沉浸。 */
+.window.mobile {
+  animation: os-app-slide-up .28s var(--os-ease-out); border-radius: 0; border: none;
+  padding-top: var(--os-safe-t);
+  padding-bottom: calc(68px + var(--os-safe-b));
+}
 .window.mobile.minimized { transform: translateY(8vh) scale(.94); opacity: 0; }
 @keyframes os-app-slide-up {
   from { transform: translateY(100%); }

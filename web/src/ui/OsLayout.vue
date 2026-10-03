@@ -1,6 +1,10 @@
 <script setup lang="ts">
 // OsLayout：应用通用骨架——侧栏 + 内容区 + 可选底部状态栏。
+// 移动形态（isMobile）：侧栏退为左上角汉堡唤出的抽屉，竖屏内容占满；
+// 选中导航项自动收起。桌面形态结构不变。
+import { ref } from 'vue'
 import type { WinState } from '../stores/windows'
+import { isMobile } from './formfactor'
 
 defineProps<{
   win: WinState
@@ -9,17 +13,28 @@ defineProps<{
   status?: string
 }>()
 const emit = defineEmits<{ select: [key: string] }>()
+
+const drawer = ref(false)
+function onSelect(key: string) {
+  emit('select', key)
+  drawer.value = false
+}
 </script>
 
 <template>
-  <div class="os-layout">
-    <aside class="os-sidebar">
+  <div class="os-layout" :class="{ mobile: isMobile }">
+    <!-- 移动形态：左上角汉堡开关（浮于内容之上）+ 抽屉遮罩 -->
+    <button v-if="isMobile" class="nav-fab" :class="{ on: drawer }" title="导航" @click="drawer = !drawer">
+      <svg viewBox="0 0 20 20" width="18" height="18"><path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
+    </button>
+    <div v-if="isMobile && drawer" class="nav-mask" @click="drawer = false" />
+    <aside class="os-sidebar" :class="{ open: isMobile && drawer }">
       <div class="win-badge">{{ win.title }}</div>
       <button
         v-for="it in items" :key="it.key"
         :data-key="it.key"
         :class="{ active: active === it.key }"
-        @click="emit('select', it.key)"
+        @click="onSelect(it.key)"
       >
         <span v-if="it.icon" class="ic">{{ it.icon }}</span>{{ it.label }}
       </button>
@@ -63,4 +78,25 @@ const emit = defineEmits<{ select: [key: string] }>()
   border-top: 1px solid var(--os-border); font-size: 11.5px; color: var(--os-text-secondary);
   background: var(--os-sidebar);
 }
+
+/* —— 移动形态：侧栏退为抽屉（左滑入 + 遮罩），汉堡浮钮在内容左上 —— */
+.os-layout.mobile { position: relative; }
+.os-layout.mobile .os-sidebar {
+  position: absolute; z-index: 30; left: 0; top: 0; bottom: 0;
+  width: min(76vw, 300px); flex: none;
+  transform: translateX(-103%); transition: transform .24s var(--os-ease-out);
+}
+.os-layout.mobile .os-sidebar.open { transform: none; box-shadow: var(--os-shadow); }
+.os-layout.mobile .os-sidebar button { padding: 11px 12px; font-size: 14px; }
+.nav-fab {
+  position: absolute; z-index: 40; left: 12px; top: 10px;
+  width: 40px; height: 40px; border-radius: 50%; border: 1px solid var(--os-border);
+  background: var(--os-panel); color: var(--os-text); cursor: pointer;
+  backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: var(--os-shadow-sm);
+}
+.nav-mask { position: absolute; inset: 0; z-index: 25; background: rgba(0, 0, 0, .32); animation: os-fade-in .14s ease; }
+/* 移动内容区给浮钮留出视觉空间（内容从钮下穿过，标题不被压字） */
+.os-layout.mobile .os-content { padding: 54px 16px 16px; }
 </style>

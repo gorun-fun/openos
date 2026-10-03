@@ -8,12 +8,13 @@
 // 工作卡头部）作为标题栏 —— WindowFrame 经 composedPath 穿透 shadow DOM
 // 委托拖拽；sideTop 注入 72px 占位把折叠侧栏按钮推到红绿灯右侧
 // （对应 goder 桌面态 lights 模式的 80px 留位）。
-import { nextTick, onMounted, ref } from 'vue'
+import { nextTick, onMounted, ref, watch } from 'vue'
 import type { WinState } from '../../stores/windows'
 import { useWindows } from '../../stores/windows'
 import { useSession } from '../../stores/session'
 import { api } from '../../api/client'
-import { OsButton } from '../../ui'
+import { OsButton, MobileNavToggle } from '../../ui'
+import { injectShadowNavCss } from '../../ui/shadowNav'
 
 const props = defineProps<{ win: WinState }>()
 const windows = useWindows()
@@ -23,6 +24,10 @@ const loading = ref(true)
 const error = ref('')
 const unavailable = ref(false)
 const hostEl = ref<HTMLElement>()
+// 移动形态：左栏（会话导航）抽屉展开态——goder 是 shadow DOM web component，
+// .os-side 约定样式经 shadowNav 注入其 shadowRoot（见 init 第 5 步）
+const navOpen = ref(false)
+const shellReady = ref(false)
 
 onMounted(() => { void init() })
 
@@ -94,7 +99,39 @@ async function init() {
   shell.setAttribute('panels', 'sessions,chat,sidebar,console')
   shell.style.cssText = 'width:100%;height:100%'
   hostEl.value!.append(shell)
+
+  // 5. 移动形态抽屉化：goder 左栏（shadow 内 <div class="left">，inline width 248px）
+  //    收为汉堡唤出的抽屉。注入的 CSS 带媒体查询（桌面零生效）；类一次加好，
+  //    展开态类经下方 watch(navOpen) 手动同步——Vue 模板绑定够不到 shadow 内部。
+  //    Lit 首次渲染是挂载后的微任务，轮询等待 .left 出现。
+  void (async () => {
+    for (let i = 0; i < 40; i++) {
+      const root = shell.shadowRoot
+      const left = root?.querySelector<HTMLElement>('.left')
+      if (root && left) {
+        injectShadowNavCss(root)
+        // goder 特定补充：左栏抽屉化后拖宽把手悬空失义，移动形态隐藏
+        if (!root.querySelector('style[data-os-nav-goder]')) {
+          const s = document.createElement('style')
+          s.setAttribute('data-os-nav-goder', '1')
+          s.textContent = '@media (max-width: 767px) { .gutter-v { display: none !important; } }'
+          root.append(s)
+        }
+        left.classList.add('os-side')
+        left.classList.toggle('os-side-open', navOpen.value)
+        shellReady.value = true
+        return
+      }
+      await new Promise((r) => setTimeout(r, 50))
+    }
+  })()
 }
+
+// 抽屉开合同步进 shadow DOM（composedPath 委托的自动收起改 navOpen，由这里落到元素）
+watch(navOpen, (v) => {
+  const left = hostEl.value?.querySelector('goder-app-shell')?.shadowRoot?.querySelector('.left')
+  left?.classList.toggle('os-side-open', v)
+})
 
 function retry() {
   error.value = ''
@@ -104,8 +141,11 @@ function retry() {
 </script>
 
 <template>
-  <!-- data-os-drag="top"：仅顶部一行（goder 自绘顶栏）可拖动窗口，见 WindowFrame -->
-  <div class="goder-studio" data-os-drag="top">
+  <!-- data-os-drag="top"：仅顶部一行（goder 自绘顶栏）可拖动窗口，见 WindowFrame。
+       os-has-side：移动形态定位容器约定（汉堡/遮罩锚定，桌面形态无样式生效） -->
+  <div class="goder-studio os-has-side" data-os-drag="top">
+    <!-- 移动形态：左栏抽屉开关（shell 挂载成功后才出现；桌面隐藏） -->
+    <MobileNavToggle v-if="shellReady" v-model:open="navOpen" />
     <div v-if="loading" class="state">正在连接 goder 工作台…</div>
 
     <div v-else-if="unavailable" class="state guide">
