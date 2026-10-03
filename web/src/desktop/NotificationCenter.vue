@@ -236,4 +236,16 @@ function fmtTime(ts: number) {
   padding: 34px 16px; text-align: center; font-size: 13px; color: var(--os-text-secondary); line-height: 1.8;
 }
 .nc-empty small { font-size: 11px; opacity: .7; }
+
+/* —— 手机形态：横幅与面板贴安全区全宽（面板入口在 Home 时钟） —— */
+@media (max-width: 767px) {
+  .nc-toasts {
+    top: calc(env(safe-area-inset-top, 0px) + 8px); left: 10px; right: 10px; width: auto;
+  }
+  .nc-panel {
+    top: calc(env(safe-area-inset-top, 0px) + 8px); left: 8px; right: 8px; width: auto;
+    max-height: 72vh; transform-origin: top center;
+  }
+  .nc-x { opacity: 1; } /* 触屏无 hover，删除按钮常显 */
+}
 </style>

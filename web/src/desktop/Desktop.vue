@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useSession } from '../stores/session'
 import { useDesktop } from '../stores/desktop'
 import { useApps } from '../stores/apps'
-import { useWindows } from '../stores/windows'
+import { useWindows, viewport } from '../stores/windows'
 import { useNotifications } from '../stores/notifications'
 import { useCalendar } from '../stores/calendar'
 import { bus } from '../bus/bus'
@@ -24,6 +24,9 @@ import { widgetDefs, widgetDef } from './widgetRegistry'
 import { appForPath } from '../apps/openWith'
 import { installAgentBridge } from './agentBridge'
 import { shell } from '../shell'
+import { isMobile } from '../ui/formfactor'
+import MobileHome from './mobile/MobileHome.vue'
+import MobilePill from './mobile/MobilePill.vue'
 import type { Component } from 'vue'
 
 const session = useSession()
@@ -77,18 +80,79 @@ onMounted(async () => {
 
   window.addEventListener('resize', onResize)
   window.addEventListener('keydown', onShortcut)
+  // iOS 软键盘弹出不改 innerHeight 也不触发 window resize：visualViewport 跟随
+  // （移动形态下全屏窗口收缩到键盘上方，桌面形态回调直接返回）
+  window.visualViewport?.addEventListener('resize', onVVChange)
+  window.visualViewport?.addEventListener('scroll', onVVChange)
+  // Android 系统返回键 = history.back()：SPA 无路由历史会直接退出页面，
+  // 虚拟历史条目把返回键接管为「回桌面」（见 goHome/watch(showHome)）
+  window.addEventListener('popstate', onPopState)
 })
 
 onBeforeUnmount(() => {
   offs.forEach((off) => off())
   window.removeEventListener('resize', onResize)
   window.removeEventListener('keydown', onShortcut)
+  window.visualViewport?.removeEventListener('resize', onVVChange)
+  window.visualViewport?.removeEventListener('scroll', onVVChange)
+  window.removeEventListener('popstate', onPopState)
 })
 
 function onResize() {
   windows.onViewportResize()
   widgetsRef.value?.relayout()
   shortcutsRef.value?.relayout()
+}
+
+let vvRaf = 0
+function onVVChange() {
+  if (!isMobile.value) return
+  if (vvRaf) return
+  vvRaf = requestAnimationFrame(() => { vvRaf = 0; windows.onViewportResize() })
+}
+
+// ---- 移动形态：Home / 返回键 ----
+// Home = 全部窗口最小化挂后台；进入应用时压一条虚拟历史，返回键（含胶囊「回桌面」）
+// 统一走 history.back() → popstate 里最小化，历史栈不残留多余条目。
+const showHome = computed(() => isMobile.value && windows.list.every((w) => w.minimized))
+let backPushed = false
+watch(showHome, (home) => {
+  if (isMobile.value && !home && !backPushed) {
+    history.pushState({ osApp: true }, '')
+    backPushed = true
+  }
+})
+// 跨形态切换的窗口几何适配：移动形态的 maximized 是形态强制（open 时写入）而非
+// 用户选择，带回桌面会意外触发全屏形态/「最大化自动隐藏 Dock」；反向切换时桌面
+// 几何窗口在窄屏也无法全屏。进移动=一律全屏化；回桌面=还原 prev，无 prev（移动
+// 形态开的窗口，或 prev 已被窄屏 clamp 污染——window resize 先于 mq change 执行，
+// 快照必迟到）则给桌面默认几何居中，不追求还原旧位置。
+watch(isMobile, (mobile) => {
+  const vp = viewport()
+  for (const w of windows.list) {
+    if (mobile) {
+      Object.assign(w, { x: 0, y: 0, w: vp.w, h: vp.h, maximized: true })
+    } else if (w.maximized) {
+      if (w.prev) {
+        Object.assign(w, w.prev, { maximized: false, prev: undefined })
+      } else {
+        w.maximized = false
+        w.w = Math.min(900, vp.w - 40)
+        w.h = Math.min(600, vp.h - 40)
+        w.x = Math.max(8, Math.round((vp.w - w.w) / 2))
+        w.y = Math.max(vp.y + 8, Math.round((vp.h - w.h) / 2))
+      }
+    }
+  }
+})
+function onPopState() {
+  backPushed = false
+  if (isMobile.value && !showHome.value) windows.goHomeAll()
+}
+/** 回桌面（胶囊/操作面板入口）：优先 back() 复用虚拟历史，与系统返回键同路径。 */
+function goHome() {
+  if (backPushed) history.back()
+  else windows.goHomeAll()
 }
 
 // 「最大化自动隐藏 Dock」开/关、或最大化窗口出现/消失时，可用区域变化 → 重排窗口
@@ -203,9 +267,17 @@ function restoreWindows(): boolean {
     if (!raw) return false
     const saved: { appId: string; props?: any; title?: string }[] = JSON.parse(raw)
     const allowed = new Set(apps.apps.map((a) => a.id))
+    const valid = saved.filter((s) => allowed.has(s.appId)) // 权限变化后不再恢复
+    // 移动形态：只恢复最近 1 个窗口并挂后台（回到桌面，多任务卡片中可见）
+    if (isMobile.value) {
+      const last = valid.slice(-1)[0]
+      if (!last) return false
+      const id = windows.open(last.appId, last.props, last.title)
+      if (id) windows.minimize(id)
+      return true
+    }
     let n = 0
-    for (const s of saved) {
-      if (!allowed.has(s.appId)) continue // 权限变化后不再恢复
+    for (const s of valid) {
       windows.open(s.appId, s.props, s.title)
       n++
     }
@@ -286,21 +358,29 @@ function ctxCycleNoteColor() {
 
 <template>
   <div class="desktop" :style="{ background: desktop.wallpapers[desktop.wallpaper] }" @contextmenu="onContext" @dragover.prevent @drop="onDrop">
-    <MenuBar @launchpad="launchpadOpen = true" @spotlight="spotOpen = true" />
+    <!-- 形态分支用「单组件独立 v-if」：结构扁平、两形态共用组件（如通知中心）只挂一份。
+         （曾用 <template v-if> 包多组件，跨断点切换时暴露出 Shortcuts 的 TDZ 崩溃
+         会中断整个 Fragment patch 的连锁问题，见 Shortcuts.vue 的 stopSeed 注释） -->
+    <MenuBar v-if="!isMobile" @launchpad="launchpadOpen = true" @spotlight="spotOpen = true" />
 
-    <!-- 通知中心（横幅栈 + 右侧面板，入口在菜单栏时钟） -->
+    <!-- 通知中心（横幅栈 + 面板）：两形态共用，桌面入口在菜单栏时钟、移动入口在 Home 时钟 -->
     <NotificationCenter />
 
-    <Widgets ref="widgetsRef" />
-    <Shortcuts ref="shortcutsRef" />
+    <Widgets v-if="!isMobile" ref="widgetsRef" />
+    <Shortcuts v-if="!isMobile" ref="shortcutsRef" />
+
+    <!-- 移动形态桌面：单层应用网格（全部窗口最小化时展示） -->
+    <MobileHome v-if="isMobile && showHome" @spotlight="spotOpen = true" />
 
     <div class="windows-layer">
       <WindowFrame v-for="w in windows.list" :key="w.id" :win="w" />
     </div>
 
-    <Dock @launchpad="launchpadOpen = true" />
+    <Dock v-if="!isMobile" @launchpad="launchpadOpen = true" />
+    <Launchpad v-if="!isMobile && launchpadOpen" @close="launchpadOpen = false" />
+    <!-- 移动形态悬浮胶囊（系统导航：回桌面/多任务/更多，可拖成悬浮球） -->
+    <MobilePill v-if="isMobile && !showHome" @home="goHome" />
 
-    <Launchpad v-if="launchpadOpen" @close="launchpadOpen = false" />
     <Spotlight v-if="spotOpen" @close="spotOpen = false" />
 
     <!-- 跨应用弹窗宿主：registerDialog/openDialog 的系统级模态浮层（见 ui/dialogService.ts） -->

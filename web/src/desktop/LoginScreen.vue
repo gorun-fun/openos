@@ -157,4 +157,13 @@ button:disabled { opacity: .6; cursor: default; }
 }
 .hint span:hover { background: rgba(255,255,255,.16); text-decoration: none; }
 .sso-hint { margin-top: 12px; font-size: 11px; opacity: .7; }
+
+/* —— 手机形态：卡片自适应屏宽（348px 固定宽在 320/375px 屏会顶满溢出），键盘弹起可滚动 —— */
+@media (max-width: 767px) {
+  .login {
+    height: 100dvh; overflow-y: auto; align-items: safe center;
+    padding: calc(env(safe-area-inset-top, 0px) + 20px) 0 calc(env(safe-area-inset-bottom, 0px) + 20px);
+  }
+  .login-card { width: auto; max-width: 348px; margin: 0 16px; padding: 34px 24px 22px; }
+}
 </style>

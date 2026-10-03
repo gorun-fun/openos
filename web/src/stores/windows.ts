@@ -2,6 +2,7 @@
 import { defineStore } from 'pinia'
 import { useApps } from './apps'
 import { useDesktop } from './desktop'
+import { isMobile, mobileViewportH } from '../ui/formfactor'
 
 export interface WinState {
   id: string
@@ -27,7 +28,12 @@ export const DOCK_H = 84
 // 桌面可用区域（菜单栏与 Dock 之间）。
 // 开启「最大化自动隐藏 Dock」且存在最大化窗口时不为 Dock 预留高度，
 // 窗口占满全高，Dock 以悬浮方式从底部滑出（见 Dock.vue）。
+// 移动形态：无菜单栏/Dock 常驻，高度跟 visualViewport——软键盘弹出时
+// 全屏窗口收缩到键盘上方，底部胶囊同步让位。
 export function viewport() {
+  if (isMobile.value) {
+    return { x: 0, y: 0, w: window.innerWidth, h: mobileViewportH() }
+  }
   let dockH = DOCK_H
   try {
     const desktop = useDesktop()
@@ -62,6 +68,18 @@ export const useWindows = defineStore('windows', {
         return dup.id
       }
       const vp = viewport()
+      // 移动形态：单窗口全屏（无自由几何/吸附概念），minimized 挂后台、
+      // 多任务卡片恢复即 focus（下方 dup 分支天然支持）
+      if (isMobile.value) {
+        const id = `win-${++seq}`
+        this.list.push({
+          id, appId, title: title || app.name,
+          x: 0, y: 0, w: vp.w, h: vp.h,
+          z: ++topZ, minimized: false, maximized: true, props,
+        })
+        this.activeId = id
+        return id
+      }
       const w = Math.min(size?.w || app.width || 800, vp.w - 40)
       const h = Math.min(size?.h || app.height || 560, vp.h - 30)
       const n = this.list.length
@@ -104,6 +122,7 @@ export const useWindows = defineStore('windows', {
       }
     },
     toggleMaximize(id: string) {
+      if (isMobile.value) return // 移动形态恒全屏，无最大化语义
       const w = this.list.find((v) => v.id === id)
       if (!w) return
       const vp = viewport()
@@ -116,6 +135,7 @@ export const useWindows = defineStore('windows', {
     },
     /** 半屏吸附（左/右）。 */
     snap(id: string, zone: SnapZone) {
+      if (isMobile.value) return
       const w = this.list.find((v) => v.id === id)
       if (!w || !zone) return
       const vp = viewport()
@@ -164,12 +184,18 @@ export const useWindows = defineStore('windows', {
     },
     /** 按 z 序循环切换窗口（Alt+`）。 */
     cycle() {
+      if (isMobile.value) return
       const vis = [...this.list].filter((w) => !w.minimized).sort((a, b) => b.z - a.z)
       if (vis.length < 2) {
         if (vis[0]) this.focus(vis[0].id)
         return
       }
       this.focus(vis[vis.length - 1].id) // 切换到最底层的窗口
+    },
+    /** 移动形态：回桌面 = 全部窗口最小化挂后台（多任务卡片中可恢复，任务不中断）。 */
+    goHomeAll() {
+      for (const w of this.list) w.minimized = true
+      this.activeId = ''
     },
   },
 })

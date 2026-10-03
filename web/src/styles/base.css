@@ -1,6 +1,9 @@
 /* OpenOS 全局样式与设计令牌（macOS 风格） */
 :root {
   --os-accent: #0a84ff;
+  /* 安全区 inset（刘海屏/Home 指示条）：供 JS（悬浮胶囊让位）与组件统一读取 */
+  --os-safe-b: env(safe-area-inset-bottom, 0px);
+  --os-safe-t: env(safe-area-inset-top, 0px);
   --os-radius: 12px;
   --os-radius-sm: 8px;
   --os-font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
@@ -182,3 +185,15 @@ button { font-family: inherit; }
 .os-menu .grp { padding: 5px 10px 3px; font-size: 11px; font-weight: 600; color: var(--os-text-secondary); }
 .os-menu .hint { margin-left: auto; font-size: 11px; color: var(--os-text-secondary); }
 .os-menu button:hover:not(:disabled) .hint { color: rgba(255, 255, 255, .75); }
+
+/* —— 移动端（手机形态）通用适配：仅窄屏生效，桌面形态零影响 —— */
+@media (max-width: 767px) {
+  /* 桌面是 overflow:hidden 的固定画布，禁橡皮筋与滚动链防整页被拖走 */
+  html, body { overscroll-behavior: none; }
+  body { -webkit-tap-highlight-color: transparent; }
+  /* 消除双击缩放延迟（manipulation 保留平移与捏合缩放，只禁双击缩放） */
+  button, [role="button"], a, .os-menu button { touch-action: manipulation; }
+  /* iOS Safari：输入控件字号 <16px 聚焦会强制放大整页（contenteditable 不受影响） */
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  textarea, select { font-size: max(16px, 1em); }
+}

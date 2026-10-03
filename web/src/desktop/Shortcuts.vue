@@ -52,10 +52,14 @@ onMounted(() => {
 // 子组件挂载早于 Desktop 的 apps.refresh 完成，故 watch 等列表就绪再种；
 // 未授权角色（如 guest）的 /api/apps 不含 goder，byId 为空自动跳过；
 // 以 localStorage 标记保证只种一次——用户主动移除后不会自动恢复。
+// 注意 stopSeed 用 let + 可选调用：immediate 回调同步执行时若 apps 已就绪（如
+// 移动↔桌面形态切换后的二次挂载）会立刻走到自停逻辑，const 赋值尚未完成会触发
+// TDZ ReferenceError 中断整个 Desktop 的 patch。
 const SEEDED_KEY = () => `openos_desktop_goder_seeded_${session.user!.username}`
-const stopSeed = watch(() => apps.apps.length, (n) => {
+let stopSeed: (() => void) | undefined
+stopSeed = watch(() => apps.apps.length, (n) => {
   if (!n) return
-  stopSeed()
+  stopSeed?.()
   if (localStorage.getItem(SEEDED_KEY())) return
   localStorage.setItem(SEEDED_KEY(), '1')
   const app = apps.byId('goder')

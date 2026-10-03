@@ -241,6 +241,13 @@ function onKey(e: KeyboardEvent) {
   max-height: 46vh; overflow-y: auto; border-top: 1px solid var(--os-border);
   padding: 6px; overscroll-behavior: contain;
 }
+
+/* —— 手机形态：贴顶部安全区、结果区占更高（软键盘占去下半屏） —— */
+@media (max-width: 767px) {
+  .spot { margin: calc(env(safe-area-inset-top, 0px) + 7vh) auto 0; width: 94vw; }
+  .spot.with-preview { width: 94vw; }
+  .spot-results { max-height: 56vh; }
+}
 .spot-grp { padding: 8px 12px 3px; font-size: 11px; font-weight: 700; color: var(--os-text-secondary); }
 .spot-row {
   display: flex; align-items: center; gap: 10px; width: 100%;

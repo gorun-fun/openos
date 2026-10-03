@@ -5,6 +5,7 @@ import { MENUBAR_H, useWindows, viewport, type SnapZone } from '../stores/window
 import { builtinComponents, runtimeComponents, appChrome, useApps } from '../stores/apps'
 import SchemaApp from '../sdk/SchemaApp.vue'
 import { snapPreview } from './snapState'
+import { isMobile } from '../ui/formfactor'
 
 const props = defineProps<{ win: WinState }>()
 const store = useWindows()
@@ -165,10 +166,11 @@ function draggableTarget(e: PointerEvent | MouseEvent): boolean {
 }
 function onWinPointerDown(e: PointerEvent) {
   store.focus(props.win.id)
-  if (merged.value && draggableTarget(e)) onTitlePointerDown(e)
+  if (!isMobile.value && merged.value && draggableTarget(e)) onTitlePointerDown(e)
 }
-// 双击工具栏标题区最大化（与标准标题栏双击行为一致）
+// 双击工具栏标题区最大化（与标准标题栏双击行为一致）；移动形态恒全屏不响应
 function onWinDblClick(e: MouseEvent) {
+  if (isMobile.value) return
   if (merged.value && draggableTarget(e)) store.toggleMaximize(props.win.id)
 }
 
@@ -231,7 +233,7 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
 <template>
   <section
     class="window"
-    :class="{ focused, minimized: win.minimized, maximized: win.maximized }"
+    :class="{ focused, minimized: win.minimized, maximized: win.maximized, mobile: isMobile }"
     :data-app="win.appId"
     :style="{
       left: win.x + 'px', top: win.y + 'px', width: win.w + 'px', height: win.h + 'px', zIndex: win.z,
@@ -239,7 +241,9 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
     }"
     @pointerdown="onWinPointerDown" @dblclick="onWinDblClick"
   >
+    <!-- 移动形态：恒全屏沉浸，无标题栏/缩放手柄，系统导航归悬浮胶囊 -->
     <header
+      v-if="!isMobile"
       class="titlebar" :class="{ merged }"
       @pointerdown="onTitlePointerDown" @dblclick="store.toggleMaximize(win.id)"
     >
@@ -257,11 +261,13 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
       <ErrorPanel v-if="crashed" />
       <component :is="comp" :win="win" :key="reloadSeq" v-else-if="comp" />
     </div>
-    <div
-      v-for="d in resizeDirs" :key="d"
-      class="resize" :data-dir="d"
-      @pointerdown="onResizePointerDown($event, d)"
-    />
+    <template v-if="!isMobile">
+      <div
+        v-for="d in resizeDirs" :key="d"
+        class="resize" :data-dir="d"
+        @pointerdown="onResizePointerDown($event, d)"
+      />
+    </template>
   </section>
 </template>
 
@@ -281,6 +287,13 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
 }
 .window.dragging { transition: none; }
 .window.minimized { opacity: 0; transform: scale(.06) translateY(70vh); pointer-events: none; }
+/* 移动形态：应用从底部滑入全屏（手机范式），过渡用上滑淡出与胶囊节奏一致 */
+.window.mobile { animation: os-app-slide-up .28s var(--os-ease-out); border-radius: 0; border: none; }
+.window.mobile.minimized { transform: translateY(8vh) scale(.94); opacity: 0; }
+@keyframes os-app-slide-up {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
 .window:not(.focused) { box-shadow: 0 10px 34px rgba(0,0,0,.2); }
 /* 最大化 = macOS 全屏形态：直角、无边框 */
 .window.maximized { border-radius: 0; border: none; }
