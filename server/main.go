@@ -291,8 +291,60 @@ func main() {
 	})
 
 	// ---- 应用商店（OPENOS_MARKET=off 时路由不注册，商店应用也不入种子）----
-	// 目录对所有登录用户可浏览（安装按钮仅管理员）；安装 = 写 apps 表 + 按所选角色授权
+	// 目录对所有登录用户可浏览（安装按钮仅管理员）；安装 = 写 apps 表 + 按所选角色授权。
+	// 目录源多级：自定义源（管理员经商店设置维护，system_kv 持久化）+ 官方默认源
+	// （OPENOS_MARKET_URL，=off 只关默认源、自定义源仍可用）并发拉取合并（自定义源
+	// 排前可遮蔽同 id 条目），任一源成功即生效、全部失败沿用现行，初始兜底 = 随
+	// 二进制发布的内置清单。更新货架只改远端 JSON 无需发版。
 	if envOr("OPENOS_MARKET", "") != "off" {
+		marketDefault := envOr("OPENOS_MARKET_URL", "https://download.gorun.fun/openos/market/catalog.json")
+		if marketDefault == "off" {
+			marketDefault = ""
+		}
+		// 先恢复持久化的自定义源（system_kv market_sources，JSON 数组）再启动拉取循环：
+		// StartRemote 的 goroutine 启动即 RefreshNow，顺序颠倒会让首次拉取漏掉自定义源
+		if raw, _ := db.GetSystemKV("market_sources"); raw != "" {
+			var urls []string
+			if json.Unmarshal([]byte(raw), &urls) == nil {
+				market.SetCustomSources(urls)
+			}
+		}
+		market.StartRemote(marketDefault)
+		// 目录源管理（admin）：GET 查看默认/自定义源；PUT 全量覆盖自定义源并立即拉取
+		authed.HandleFunc("GET /api/market/sources", func(w http.ResponseWriter, r *http.Request) {
+			if auth.FromContext(r).Role != "admin" {
+				http.Error(w, "需要管理员权限", http.StatusForbidden)
+				return
+			}
+			writeJSON(w, map[string]any{"default": market.DefaultURL(), "custom": market.CustomSources()})
+		})
+		authed.HandleFunc("PUT /api/market/sources", func(w http.ResponseWriter, r *http.Request) {
+			id := auth.FromContext(r)
+			if id.Role != "admin" {
+				http.Error(w, "需要管理员权限", http.StatusForbidden)
+				return
+			}
+			var req struct {
+				Urls []string `json:"urls"`
+			}
+			if json.NewDecoder(r.Body).Decode(&req) != nil {
+				http.Error(w, "参数错误", 400)
+				return
+			}
+			clean, err := market.SetCustomSources(req.Urls)
+			if err != nil {
+				http.Error(w, err.Error(), 400)
+				return
+			}
+			b, _ := json.Marshal(clean)
+			if err := db.SetSystemKV("market_sources", string(b)); err != nil {
+				http.Error(w, "保存失败", 500)
+				return
+			}
+			db.Audit(id.Username, "market.sources", fmt.Sprintf("%d 个自定义源", len(clean)), "")
+			okN, total := market.RefreshNow() // 保存即拉取，管理端保存后货架即时更新
+			writeJSON(w, map[string]any{"ok": "1", "custom": clean, "sourcesOk": okN, "entries": total})
+		})
 		authed.HandleFunc("GET /api/market/apps", func(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, market.List(db))
 		})

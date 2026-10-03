@@ -88,6 +88,7 @@ function typeLabel(t: string) {
 }
 
 function openDetail(s: MarketState) {
+  settingsOpen.value = false
   detail.value = s
   // 已装应用预选当前已授权角色；未安装默认 admin + user
   const granted = Object.keys(accessMap.value).filter((r) => accessMap.value[r]?.includes(s.id))
@@ -136,27 +137,75 @@ function openApp(s: MarketState) {
   else toast('当前角色未获授权，请联系管理员', { type: 'error' })
 }
 
+// ---- 商店设置：目录源管理（admin）——默认官方源不可删，自定义源可添加多个，
+//      排在前面可遮蔽官方同 id 条目；保存后服务端立即拉取全部源合并生效 ----
+const settingsOpen = ref(false)
+const srcDefault = ref('')
+const srcCustom = ref<string[]>([])
+const srcInput = ref('')
+const srcMsg = ref('')
+
+async function openSettings() {
+  detail.value = null
+  settingsOpen.value = true
+  srcMsg.value = ''
+  try {
+    const d = await api.get<{ default: string; custom: string[] }>('/api/market/sources')
+    srcDefault.value = d.default || ''
+    srcCustom.value = d.custom || []
+  } catch (e: any) {
+    srcMsg.value = e.message
+  }
+}
+function addSource() {
+  const u = srcInput.value.trim()
+  if (!/^https?:\/\//i.test(u)) { srcMsg.value = '地址需以 http(s):// 开头'; return }
+  if (u.length > 500) { srcMsg.value = '地址过长'; return }
+  if (srcCustom.value.includes(u)) { srcMsg.value = '该地址已在列表中'; return }
+  if (srcCustom.value.length >= 10) { srcMsg.value = '最多添加 10 个自定义源'; return }
+  srcCustom.value.push(u)
+  srcInput.value = ''
+  srcMsg.value = ''
+}
+async function saveSources() {
+  busy.value = true
+  srcMsg.value = ''
+  try {
+    const d = await api.put<{ custom: string[]; sourcesOk: number; entries: number }>('/api/market/sources', { urls: srcCustom.value })
+    srcCustom.value = d.custom || []
+    toast(`目录源已保存（${d.sourcesOk} 个源拉取成功，共 ${d.entries} 个应用）`, { type: 'success' })
+    settingsOpen.value = false
+    await load()
+  } catch (e: any) {
+    srcMsg.value = e.message
+  } finally {
+    busy.value = false
+  }
+}
+
 const icoSearch = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.6"/><path d="M10.6 10.6 14 14"/></svg>'
 const icoBack = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 3.5 5 8l4.5 4.5"/></svg>'
+const icoGear = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><circle cx="8" cy="8" r="2.1"/><path d="M8 1.9v1.6M8 12.5v1.6M1.9 8h1.6M12.5 8h1.6M3.7 3.7l1.1 1.1M11.2 11.2l1.1 1.1M12.3 3.7l-1.1 1.1M4.8 11.2l-1.1 1.1"/></svg>'
 </script>
 
 <template>
   <div class="store-app">
     <!-- 融合工具栏：整条可拖动窗口 -->
     <div class="os-tb" data-os-drag>
-      <button v-if="detail" class="os-tb-btn" title="返回目录" v-html="icoBack" @click="detail = null" />
-      <div class="os-tb-title">{{ detail ? detail.name : '应用商店' }}</div>
-      <span v-if="!detail" class="count">{{ filtered.length }} 个应用</span>
+      <button v-if="detail || settingsOpen" class="os-tb-btn" title="返回" v-html="icoBack" @click="settingsOpen ? (settingsOpen = false) : (detail = null)" />
+      <div class="os-tb-title">{{ settingsOpen ? '商店设置' : detail ? detail.name : '应用商店' }}</div>
+      <span v-if="!detail && !settingsOpen" class="count">{{ filtered.length }} 个应用</span>
       <span class="grow" />
-      <div v-if="!detail" class="search">
+      <div v-if="!detail && !settingsOpen" class="search">
         <span class="s-ico" v-html="icoSearch" />
         <input v-model="keyword" placeholder="搜索应用" spellcheck="false" />
       </div>
+      <button v-if="isAdmin" class="os-tb-btn" title="商店设置（目录源）" v-html="icoGear" @click="openSettings" />
       <button class="os-tb-btn" title="刷新" v-html="icons.refresh" @click="load" />
     </div>
 
     <!-- 目录列表 -->
-    <div v-if="!detail" class="body">
+    <div v-if="!detail && !settingsOpen" class="body">
       <div class="cats">
         <button v-for="c in categories" :key="c" class="cat" :class="{ on: c === category }" @click="category = c">{{ c }}</button>
       </div>
@@ -181,8 +230,36 @@ const icoBack = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fil
       </div>
     </div>
 
+    <!-- 商店设置：目录源管理（admin） -->
+    <div v-else-if="settingsOpen" class="body detail">
+      <div class="d-sec">
+        <h4>目录源</h4>
+        <p class="s-desc">
+          应用目录从以下 JSON 地址拉取（每 10 分钟自动刷新，保存后立即拉取）。
+          自定义源排在官方源之前，与官方目录同 id 的条目以自定义源为准。
+        </p>
+        <div class="src-row">
+          <span class="src-badge">官方</span>
+          <span class="src-url">{{ srcDefault || '（官方源已关闭：OPENOS_MARKET_URL=off）' }}</span>
+        </div>
+        <div v-for="(u, i) in srcCustom" :key="u" class="src-row">
+          <span class="src-badge custom">自定义</span>
+          <span class="src-url" :title="u">{{ u }}</span>
+          <button class="ghost danger s-del" :disabled="busy" @click="srcCustom.splice(i, 1)">移除</button>
+        </div>
+        <div class="src-add">
+          <input v-model="srcInput" placeholder="https://example.com/catalog.json" spellcheck="false" @keydown.enter="addSource" />
+          <button class="ghost" @click="addSource">添加</button>
+        </div>
+        <div v-if="srcMsg" class="s-msg">{{ srcMsg }}</div>
+        <div class="d-actions">
+          <button class="primary" :disabled="busy" @click="saveSources">{{ busy ? '正在拉取…' : '保存并拉取' }}</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 应用详情 -->
-    <div v-else class="body detail">
+    <div v-else-if="detail" class="body detail">
       <div class="d-head">
         <AppIcon class="d-icon" :app="detail.id" :icon="detail.icon" :size="76" />
         <div class="d-info">
@@ -247,16 +324,21 @@ const icoBack = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fil
 }
 .cat:hover { background: rgba(125, 125, 125, .22); }
 .cat.on { background: var(--os-accent); color: #fff; }
+/* 深色主题：灰底 chips 在暗背景上对比不足，提亮底色与文字 */
+html.dark .cat { background: rgba(125, 125, 125, .22); color: #c7c7cc; }
+html.dark .cat:hover { background: rgba(125, 125, 125, .32); }
 
 .hint { padding: 60px 0; text-align: center; color: var(--os-text-secondary); font-size: 13px; }
 .hint-empty { padding: 60px 0; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
 .card {
   display: flex; gap: 12px; align-items: center; padding: 14px; border-radius: 12px;
-  background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .06); cursor: default;
+  background: var(--os-panel-solid); box-shadow: 0 1px 2px rgba(0, 0, 0, .06); cursor: default;
   border: 1px solid transparent;
 }
 .card:hover { border-color: var(--os-accent-soft, rgba(0, 122, 255, .3)); box-shadow: 0 2px 8px rgba(0, 0, 0, .08); }
+html.dark .card { box-shadow: 0 1px 3px rgba(0, 0, 0, .4); }
+html.dark .card:hover { box-shadow: 0 2px 10px rgba(0, 0, 0, .5); }
 .c-main { flex: 1; min-width: 0; }
 .c-name { font-size: 14px; font-weight: 600; color: var(--os-text, #222); display: flex; align-items: center; gap: 6px; }
 .c-type { font-size: 10.5px; font-weight: 400; color: var(--os-text-secondary); background: rgba(125, 125, 125, .14); padding: 1px 7px; border-radius: 8px; flex: none; }
@@ -264,7 +346,7 @@ const icoBack = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fil
   font-size: 12px; color: var(--os-text-secondary); margin-top: 3px;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
-.c-cat { font-size: 11px; color: var(--os-text-secondary); margin-top: 5px; opacity: .85; }
+.c-cat { font-size: 11px; color: var(--os-text-secondary); margin-top: 5px; }
 .c-btn {
   flex: none; border: none; cursor: pointer; font-size: 12px; padding: 6px 14px; border-radius: 13px;
   background: rgba(125, 125, 125, .15); color: var(--os-text, #222);
@@ -281,6 +363,7 @@ const icoBack = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fil
 .d-meta { font-size: 12px; color: var(--os-text-secondary); margin-top: 4px; }
 .d-actions { display: flex; gap: 8px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
 .d-actions .ok { font-size: 12px; color: #34a853; }
+html.dark .d-actions .ok { color: #30d158; }
 .primary, .ghost {
   border: none; cursor: pointer; font-size: 13px; padding: 7px 18px; border-radius: 8px;
 }
@@ -299,6 +382,7 @@ const icoBack = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fil
   margin-top: 16px; padding: 9px 12px; border-radius: 8px; font-size: 12.5px;
   background: #fff3e0; color: #b2600a;
 }
+html.dark .d-warn { background: rgba(255, 159, 10, .16); color: #ffb340; }
 .d-note { margin-top: 16px; padding: 9px 12px; border-radius: 8px; font-size: 12.5px; background: rgba(125, 125, 125, .12); color: var(--os-text-secondary); }
 .d-roles { display: flex; gap: 8px; flex-wrap: wrap; }
 .role {
@@ -308,4 +392,23 @@ const icoBack = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fil
 .role input { accent-color: var(--os-accent); }
 .role.fixed { cursor: default; opacity: .75; }
 .r-note { font-size: 11px; color: var(--os-text-secondary); }
+
+/* 商店设置：目录源 */
+.s-desc { margin: 0 0 12px; font-size: 12.5px; line-height: 1.7; color: var(--os-text-secondary); }
+.src-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; background: rgba(125, 125, 125, .1); margin-bottom: 6px; }
+.src-badge {
+  flex: none; font-size: 10.5px; padding: 2px 8px; border-radius: 8px;
+  background: var(--os-accent); color: #fff;
+}
+.src-badge.custom { background: rgba(125, 125, 125, .35); color: var(--os-text, #222); }
+.src-url { flex: 1; min-width: 0; font-size: 12.5px; color: var(--os-text, #222); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.s-del { padding: 4px 10px; font-size: 11.5px; }
+.src-add { display: flex; gap: 8px; margin-top: 10px; }
+.src-add input {
+  flex: 1; min-width: 0; height: 30px; padding: 0 10px; border-radius: 8px; font-size: 12.5px;
+  border: 1px solid var(--os-border-strong); background: var(--os-panel-solid); color: var(--os-text, #222); outline: none;
+}
+.src-add input:focus { border-color: var(--os-accent); }
+.src-add .ghost { padding: 5px 14px; }
+.s-msg { margin-top: 8px; font-size: 12px; color: #e0343c; }
 </style>

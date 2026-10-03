@@ -1,13 +1,19 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { iconOf, APP_ICONS } from '../desktop/icons'
+import { useApps } from '../stores/apps'
 
 const props = withDefaults(defineProps<{ app: string; icon?: string; size?: number }>(), { size: 44 })
+const apps = useApps()
+// 图标解析：显式 icon 优先；未传时自动查 apps store 该应用的 icon 字段——商店安装
+// 的网页应用图标是 favicon URL（iconOf 的 img 分支），调用方漏传会静默回落灰色
+// 默认图标（桌面快捷方式/通知横幅/手机端网格曾集体踩中），此处兜底后无需逐一传参。
+const resolved = computed(() => props.icon || apps.byId(props.app)?.icon)
 // 图片图标（如网页应用的 favicon 直连）加载失败时回落到 default，避免破图
 const srcError = ref(false)
-watch(() => [props.app, props.icon], () => { srcError.value = false })
+watch(() => [props.app, resolved.value], () => { srcError.value = false })
 const def = computed(() => {
-  const d = iconOf(props.app, props.icon)
+  const d = iconOf(props.app, resolved.value)
   return srcError.value && d.src ? APP_ICONS.default : d
 })
 </script>
@@ -46,6 +52,9 @@ const def = computed(() => {
   border: 1px solid rgba(255,255,255,.16);
   box-shadow: 0 1px 2px rgba(0,0,0,.18), 0 4px 10px rgba(0,0,0,.22);
 }
+/* 深色主题：透明底深色 favicon（GitHub mark 等）在暗背景上隐形，垫浅色圆角底
+   保证可读（自带实底图标的观感不受影响，白底垫白底无缝）。 */
+html.dark .app-icon-img { background: #f2f2f4; }
 .app-icon-svg {
   border-radius: 23%; overflow: hidden;
   box-shadow: 0 1px 2px rgba(0,0,0,.18), 0 4px 10px rgba(0,0,0,.22);
