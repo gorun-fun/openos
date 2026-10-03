@@ -63,6 +63,8 @@ export interface AppDef {
   locked?: boolean
   hidden?: boolean
   config?: string
+  version?: string
+  source?: string
   width: number
   height: number
 }

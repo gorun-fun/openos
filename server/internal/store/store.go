@@ -33,6 +33,8 @@ type AppDef struct {
 	Locked   bool            `json:"locked,omitempty"` // 宿主锁定应用：宿主经交换密钥注册，管理界面不可编辑/删除
 	Hidden   bool            `json:"hidden,omitempty"` // 隐藏应用：可编程打开，不出现在启动台/Dock（详情窗口类）
 	Config   json.RawMessage `json:"config,omitempty"`
+	Version  string          `json:"version,omitempty"` // 应用版本（应用商店安装时写入，管理接口编辑不动它）
+	Source   string          `json:"source,omitempty"`  // 安装来源（"market" = 应用商店；空 = 管理员手工注册）
 	Width    int             `json:"width"`
 	Height   int             `json:"height"`
 }
@@ -102,6 +104,8 @@ CREATE TABLE IF NOT EXISTS apps (
   locked INTEGER NOT NULL DEFAULT 0,
   hidden INTEGER NOT NULL DEFAULT 0,
   config TEXT NOT NULL DEFAULT '',
+  version TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT '',
   width INTEGER NOT NULL DEFAULT 800,
   height INTEGER NOT NULL DEFAULT 560
 );
@@ -169,6 +173,7 @@ var builtinApps = []AppDef{
 	{ID: "notes", Name: "便签", Icon: "notes", Category: "工具", Builtin: true, Width: 780, Height: 560},
 	{ID: "calendar", Name: "日历", Icon: "calendar", Category: "工具", Builtin: true, Width: 980, Height: 660},
 	{ID: "welcome", Name: "使用指南", Icon: "welcome", Category: "系统", Builtin: true, Width: 760, Height: 580},
+	{ID: "store", Name: "应用商店", Icon: "store", Category: "系统", Builtin: true, Width: 980, Height: 640},
 }
 
 // vfsAppIDs 依赖虚拟文件系统/终端的内置应用（OPENOS_VFS=off 时整体下架，
@@ -180,10 +185,13 @@ var vfsAppIDs = map[string]bool{
 // goderAppID goder 应用（OPENOS_GODER=off 时下架，纯业务宿主无需 AI IDE）。
 const goderAppID = "goder"
 
+// marketAppID 应用商店（OPENOS_MARKET=off 时下架，自维护应用列表的宿主无需商店）。
+const marketAppID = "store"
+
 // 默认角色 → 应用授权矩阵。
 var defaultRoleApps = map[string][]string{
-	"admin": {"terminal", "files", "calculator", "settings", "docs", "sheets", "slides", "pdf", "goder", "notes", "calendar", "welcome"},
-	"user":  {"terminal", "files", "calculator", "docs", "sheets", "slides", "pdf", "goder", "notes", "calendar", "welcome"},
+	"admin": {"terminal", "files", "calculator", "settings", "docs", "sheets", "slides", "pdf", "goder", "notes", "calendar", "welcome", "store"},
+	"user":  {"terminal", "files", "calculator", "docs", "sheets", "slides", "pdf", "goder", "notes", "calendar", "welcome", "store"},
 	"guest": {"calculator", "notes", "calendar", "welcome"},
 }
 
@@ -193,8 +201,9 @@ const StorageQuota = 100 * 1024 * 1024
 // ---- 功能裁剪选项（宿主集成：SQLite 只保留演示数据与每用户界面设置） ----
 
 type config struct {
-	withoutVFS   bool
-	withoutGoder bool
+	withoutVFS    bool
+	withoutGoder  bool
+	withoutMarket bool
 }
 
 // Option 功能裁剪选项，配合 Open 使用。
@@ -205,6 +214,9 @@ func WithoutVFS() Option { return func(c *config) { c.withoutVFS = true } }
 
 // WithoutGoder 下架 goder 应用（OPENOS_GODER=off 时由 main 传入）。
 func WithoutGoder() Option { return func(c *config) { c.withoutGoder = true } }
+
+// WithoutMarket 下架应用商店（OPENOS_MARKET=off 时由 main 传入）。
+func WithoutMarket() Option { return func(c *config) { c.withoutMarket = true } }
 
 // Open 打开（或创建）数据库并完成迁移与种子数据。
 func Open(dir string, opts ...Option) (*DB, error) {
@@ -246,6 +258,8 @@ func (db *DB) migrateColumns() error {
 		{"files", "is_binary", "ALTER TABLE files ADD COLUMN is_binary INTEGER NOT NULL DEFAULT 0"},
 		{"apps", "hidden", "ALTER TABLE apps ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0"},
 		{"apps", "locked", "ALTER TABLE apps ADD COLUMN locked INTEGER NOT NULL DEFAULT 0"},
+		{"apps", "version", "ALTER TABLE apps ADD COLUMN version TEXT NOT NULL DEFAULT ''"},
+		{"apps", "source", "ALTER TABLE apps ADD COLUMN source TEXT NOT NULL DEFAULT ''"},
 	} {
 		var n int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`, c.table, c.name).Scan(&n); err != nil {
@@ -284,6 +298,9 @@ func (db *DB) seed(cfg *config) error {
 			continue
 		}
 		if cfg.withoutGoder && a.ID == goderAppID {
+			continue
+		}
+		if cfg.withoutMarket && a.ID == marketAppID {
 			continue
 		}
 		apps = append(apps, a)
@@ -560,7 +577,7 @@ func (db *DB) Stats(startedAt time.Time) SystemStats {
 
 // ListApps 返回全部已注册应用。
 func (db *DB) ListApps() ([]AppDef, error) {
-	rows, err := db.Query(`SELECT id,name,icon,category,builtin,locked,hidden,config,width,height FROM apps ORDER BY builtin DESC, category, id`)
+	rows, err := db.Query(`SELECT id,name,icon,category,builtin,locked,hidden,config,version,source,width,height FROM apps ORDER BY builtin DESC, category, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -570,7 +587,7 @@ func (db *DB) ListApps() ([]AppDef, error) {
 		var a AppDef
 		var cfg string
 		var locked, hidden int
-		if err := rows.Scan(&a.ID, &a.Name, &a.Icon, &a.Category, &a.Builtin, &locked, &hidden, &cfg, &a.Width, &a.Height); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.Icon, &a.Category, &a.Builtin, &locked, &hidden, &cfg, &a.Version, &a.Source, &a.Width, &a.Height); err != nil {
 			return nil, err
 		}
 		a.Locked = locked != 0
@@ -585,7 +602,7 @@ func (db *DB) ListApps() ([]AppDef, error) {
 
 // ListAppsForRole 返回某角色可访问的应用。
 func (db *DB) ListAppsForRole(role string) ([]AppDef, error) {
-	rows, err := db.Query(`SELECT a.id,a.name,a.icon,a.category,a.builtin,a.locked,a.hidden,a.config,a.width,a.height
+	rows, err := db.Query(`SELECT a.id,a.name,a.icon,a.category,a.builtin,a.locked,a.hidden,a.config,a.version,a.source,a.width,a.height
 		FROM apps a JOIN role_apps r ON r.app_id=a.id WHERE r.role=? ORDER BY a.builtin DESC, a.category, a.id`, role)
 	if err != nil {
 		return nil, err
@@ -596,7 +613,7 @@ func (db *DB) ListAppsForRole(role string) ([]AppDef, error) {
 		var a AppDef
 		var cfg string
 		var locked, hidden int
-		if err := rows.Scan(&a.ID, &a.Name, &a.Icon, &a.Category, &a.Builtin, &locked, &hidden, &cfg, &a.Width, &a.Height); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.Icon, &a.Category, &a.Builtin, &locked, &hidden, &cfg, &a.Version, &a.Source, &a.Width, &a.Height); err != nil {
 			return nil, err
 		}
 		a.Locked = locked != 0
@@ -614,8 +631,8 @@ func (db *DB) AppByID(id string) (AppDef, bool) {
 	var a AppDef
 	var cfg string
 	var locked, hidden int
-	err := db.QueryRow(`SELECT id,name,icon,category,builtin,locked,hidden,config,width,height FROM apps WHERE id=?`, id).
-		Scan(&a.ID, &a.Name, &a.Icon, &a.Category, &a.Builtin, &locked, &hidden, &cfg, &a.Width, &a.Height)
+	err := db.QueryRow(`SELECT id,name,icon,category,builtin,locked,hidden,config,version,source,width,height FROM apps WHERE id=?`, id).
+		Scan(&a.ID, &a.Name, &a.Icon, &a.Category, &a.Builtin, &locked, &hidden, &cfg, &a.Version, &a.Source, &a.Width, &a.Height)
 	if err != nil {
 		return a, false
 	}
@@ -654,11 +671,13 @@ func (db *DB) UpsertApp(a AppDef) error {
 	if a.Height <= 0 {
 		a.Height = 560
 	}
-	_, err := db.Exec(`INSERT INTO apps(id,name,icon,category,builtin,locked,hidden,config,width,height) VALUES(?,?,?,?,?,?,?,?,?,?)
+	_, err := db.Exec(`INSERT INTO apps(id,name,icon,category,builtin,locked,hidden,config,version,source,width,height) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET name=excluded.name, icon=excluded.icon, category=excluded.category,
 		hidden=excluded.hidden, config=excluded.config, width=excluded.width, height=excluded.height,
+		version=CASE WHEN excluded.version<>'' THEN excluded.version ELSE apps.version END,
+		source=CASE WHEN excluded.source<>'' THEN excluded.source ELSE apps.source END,
 		locked=MAX(apps.locked, excluded.locked)`,
-		a.ID, a.Name, a.Icon, a.Category, boolInt(a.Builtin), boolInt(a.Locked), boolInt(a.Hidden), cfg, a.Width, a.Height)
+		a.ID, a.Name, a.Icon, a.Category, boolInt(a.Builtin), boolInt(a.Locked), boolInt(a.Hidden), cfg, a.Version, a.Source, a.Width, a.Height)
 	return err
 }
 
@@ -709,6 +728,25 @@ func (db *DB) SetRoleApps(role string, ids []string) error {
 	}
 	for _, id := range ids {
 		if _, err := tx.Exec(`INSERT OR IGNORE INTO role_apps(role,app_id) VALUES(?,?)`, role, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// SetAppRoles 覆盖某应用被授权的角色集合（应用商店安装用：安装时一次性选定角色，
+// 与按角色覆盖的 SetRoleApps 互为转置，不动其他应用的授权）。
+func (db *DB) SetAppRoles(appID string, roles []string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM role_apps WHERE app_id=?`, appID); err != nil {
+		return err
+	}
+	for _, r := range roles {
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO role_apps(role,app_id) VALUES(?,?)`, r, appID); err != nil {
 			return err
 		}
 	}

@@ -16,6 +16,7 @@ export const builtinComponents: Record<string, () => Promise<any>> = {
   notes: () => import('../apps/notes/NotesApp.vue'),
   calendar: () => import('../apps/calendar/CalendarApp.vue'),
   welcome: () => import('../apps/welcome/WelcomeApp.vue'),
+  store: () => import('../apps/store/StoreApp.vue'),
 }
 
 // 第三方在页面运行时通过 window.OpenOS.registerApp() 动态注册的组件
@@ -33,6 +34,7 @@ export const appChrome: Record<string, 'default' | 'merged'> = {
   notes: 'merged',
   calendar: 'merged',
   goder: 'merged',
+  store: 'merged',
 }
 
 interface State {

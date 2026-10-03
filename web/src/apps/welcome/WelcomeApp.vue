@@ -21,7 +21,8 @@ const quick = [
   { id: 'files', label: '文件' }, { id: 'docs', label: '文档' },
   { id: 'sheets', label: '表格' }, { id: 'slides', label: '幻灯片' },
   { id: 'terminal', label: '终端' }, { id: 'goder', label: 'Goder' },
-  { id: 'notes', label: '便签' }, { id: 'settings', label: '设置' },
+  { id: 'notes', label: '便签' }, { id: 'store', label: '应用商店' },
+  { id: 'settings', label: '设置' },
 ]
 </script>
 

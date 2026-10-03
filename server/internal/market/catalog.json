@@ -1,0 +1,155 @@
+{
+  "version": 1,
+  "apps": [
+    {
+      "id": "excalidraw",
+      "name": "Excalidraw 白板",
+      "description": "手绘风格白板：画流程图、架构草图、便利贴脑暴，无需注册，内容存本地，可导出 PNG/SVG。",
+      "category": "效率",
+      "icon": "https://excalidraw.com/favicon.ico",
+      "type": "web",
+      "config": { "kind": "web", "url": "https://excalidraw.com/" },
+      "version": "1.0.0",
+      "changelog": "初始版本",
+      "perms": ["在窗口内加载 excalidraw.com"],
+      "width": 1180,
+      "height": 780
+    },
+    {
+      "id": "photopea",
+      "name": "Photopea 图像编辑",
+      "description": "浏览器里的 Photoshop：支持 PSD/XCF/AI 等格式，图层、选区、滤镜、文字一应俱全。",
+      "category": "创意",
+      "icon": "https://www.photopea.com/promo/icon512.png",
+      "type": "web",
+      "config": { "kind": "web", "url": "https://www.photopea.com/" },
+      "version": "1.0.0",
+      "changelog": "初始版本",
+      "perms": ["在窗口内加载 www.photopea.com"],
+      "width": 1240,
+      "height": 800
+    },
+    {
+      "id": "music-163",
+      "name": "网易云音乐",
+      "description": "网易云音乐网页版：在线听歌、歌单、每日推荐，支持扫码登录。",
+      "category": "娱乐",
+      "icon": "https://music.163.com/favicon.ico",
+      "type": "web",
+      "config": { "kind": "web", "url": "https://music.163.com/" },
+      "version": "1.0.0",
+      "changelog": "初始版本",
+      "perms": ["在窗口内加载 music.163.com"],
+      "width": 1100,
+      "height": 760
+    },
+    {
+      "id": "wikipedia",
+      "name": "维基百科",
+      "description": "自由的网络百科全书：数百万词条的中英文检索与浏览。",
+      "category": "资料",
+      "icon": "https://en.wikipedia.org/static/favicon/wikipedia.ico",
+      "type": "web",
+      "config": { "kind": "web", "url": "https://zh.wikipedia.org/" },
+      "version": "1.0.0",
+      "changelog": "初始版本",
+      "perms": ["在窗口内加载 zh.wikipedia.org"],
+      "width": 1080,
+      "height": 760
+    },
+    {
+      "id": "osm-map",
+      "name": "世界地图",
+      "description": "基于 OpenStreetMap 的在线地图（官方嵌入组件），缩放浏览全球路网。",
+      "category": "工具",
+      "icon": "https://www.openstreetmap.org/favicon.ico",
+      "type": "web",
+      "config": { "kind": "web", "url": "https://www.openstreetmap.org/export/embed.html?bbox=60%2C5%2C150%2C58&layer=mapnik" },
+      "version": "1.0.0",
+      "changelog": "初始版本",
+      "perms": ["在窗口内加载 www.openstreetmap.org"],
+      "width": 1000,
+      "height": 720
+    },
+    {
+      "id": "github-trending",
+      "name": "GitHub 高星项目",
+      "description": "GitHub 五万星以上高星项目速览（公开 API），每 10 分钟自动刷新，可切卡片/列表视图。",
+      "category": "开发",
+      "icon": "https://github.githubassets.com/favicons/favicon.svg",
+      "type": "schema",
+      "config": {
+        "title": "GitHub 高星项目",
+        "dataSource": {
+          "kind": "rest",
+          "url": "https://api.github.com/search/repositories?q=stars%3A%3E50000&sort=stars&order=desc&per_page=50",
+          "path": "items",
+          "interval": 600
+        },
+        "views": [
+          {
+            "type": "cards", "title": "卡片", "fields": [
+              { "key": "full_name", "label": "项目", "primary": true },
+              { "key": "description", "label": "简介" },
+              { "key": "stargazers_count", "label": "Star 数" }
+            ]
+          },
+          {
+            "type": "table", "title": "列表", "columns": [
+              { "key": "full_name", "label": "项目" },
+              { "key": "language", "label": "语言" },
+              { "key": "stargazers_count", "label": "Star 数" },
+              { "key": "html_url", "label": "地址" }
+            ]
+          }
+        ]
+      },
+      "version": "1.0.0",
+      "changelog": "初始版本",
+      "perms": ["访问 api.github.com（GitHub 公开接口）"],
+      "width": 980,
+      "height": 660
+    },
+    {
+      "id": "crypto-markets",
+      "name": "加密货币行情",
+      "description": "市值前 20 加密货币的人民币计价行情（CoinGecko 公开数据），含 24 小时涨跌幅，60 秒自动刷新。",
+      "category": "工具",
+      "icon": "https://www.coingecko.com/favicon.ico",
+      "type": "schema",
+      "config": {
+        "title": "加密货币行情（CNY）",
+        "dataSource": {
+          "kind": "rest",
+          "url": "https://api.coingecko.com/api/v3/coins/markets?vs_currency=cny&order=market_cap_desc&per_page=20&page=1",
+          "interval": 60
+        },
+        "views": [
+          {
+            "type": "table", "title": "行情", "columns": [
+              { "key": "market_cap_rank", "label": "#" },
+              { "key": "name", "label": "名称" },
+              { "key": "symbol", "label": "代码" },
+              { "key": "current_price", "label": "价格 (CNY)" },
+              { "key": "market_cap", "label": "市值" },
+              { "key": "price_change_percentage_24h", "label": "24h 涨跌" }
+            ]
+          },
+          {
+            "type": "cards", "title": "卡片", "fields": [
+              { "key": "name", "label": "名称", "primary": true },
+              { "key": "symbol", "label": "代码" },
+              { "key": "current_price", "label": "价格 (CNY)" },
+              { "key": "price_change_percentage_24h", "label": "24h 涨跌" }
+            ]
+          }
+        ]
+      },
+      "version": "1.0.0",
+      "changelog": "初始版本",
+      "perms": ["访问 api.coingecko.com（CoinGecko 公开接口）"],
+      "width": 940,
+      "height": 640
+    }
+  ]
+}

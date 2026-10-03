@@ -220,6 +220,16 @@ notify({ title: '系统公告', body: '今晚 22:00 例行维护', broadcast: tr
 - **桌面小组件**：右键桌面 → 添加小组件 → 日历（今日大字 + 迷你月历含节假日红字/班标/事件圆点/日标记彩点；点任意日期打开日历并定位到该天）。
 - **SDK**：`OpenOS.calendar.list()/add()/remove()/holidayOf()/mark()/unmark()/marksOf()/today()`；宿主可经 `@openos/framework` 导入 `useCalendar` 等直接读写。
 
+## 应用商店
+
+内置「应用商店」应用（`web/src/apps/store/` + 服务端 `internal/market`）：浏览目录 → 详情（权限说明/版本日志）→ 管理员安装/更新/卸载，安装时一次性选择授权角色（admin 恒有授权），安装/卸载经 `sys:apps-changed` 总线广播实时出现在 Dock/启动台。
+
+- **目录**：`internal/market/catalog.json` 随二进制发布（go:embed），坏条目启动时跳过并记日志（`TestCatalogValid` 兜底）。MVP 收录两档零攻击面形态：**网页应用**（`type:web`，iframe 直嵌允许被嵌的站点，渲染走 WebApp 容器）与**声明式应用**（`type:schema`，config 即 SchemaApp schema，无代码执行）；`type:proxy` 预留（webproxy 反代，安装即放行其目标主机）。目录条目收录前用 `curl -sIL` 核对目标站无 `X-Frame-Options`/`frame-ancestors` 拒嵌头。
+- **安装模型**：`POST /api/market/install {id, roles}`（admin）= `UpsertApp`（`builtin=0/locked=0`）+ `SetAppRoles` 整组覆盖该应用的角色授权；未知角色忽略（防 role_apps 幽灵行），审计 `market.install`。卸载走既有 `DELETE /api/apps/{id}`（受 builtin/locked 保护规则约束）。
+- **版本与升级**：apps 表 `version`/`source` 列标记商店安装（`source=market`）；`GET /api/market/apps` 聚合本机状态返回 `installed/upgradable/managed/conflict/protected`。UpsertApp 对 version/source **空值不覆盖**——管理员经设置页编辑商店应用不断开升级链。目录版本较新时详情页出现「更新」。
+- **边界**：与内置/宿主锁定（builtin/locked）应用撞 id 的条目拒绝安装（`protected` 状态 + HTTP 403）；同 id 手工注册应用存在时标记 `conflict`，重装覆盖其配置。普通用户可浏览目录与打开已装应用，安装/更新仅管理员。
+- **裁剪**：`OPENOS_MARKET=off` 下架商店应用与 `/api/market/*` 路由（同 `OPENOS_VFS`/`OPENOS_GODER` 模式）。
+
 ## 第三方接入指南
 
 ### 方式一：声明式应用（零前端代码，推荐）

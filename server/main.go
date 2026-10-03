@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -29,6 +30,7 @@ import (
 	"openos/server/internal/bus"
 	"openos/server/internal/calendar"
 	"openos/server/internal/goder"
+	"openos/server/internal/market"
 	"openos/server/internal/osmcp"
 	"openos/server/internal/store"
 	"openos/server/internal/vfs"
@@ -50,6 +52,9 @@ func main() {
 	}
 	if envOr("OPENOS_GODER", "") == "off" {
 		storeOpts = append(storeOpts, store.WithoutGoder())
+	}
+	if envOr("OPENOS_MARKET", "") == "off" {
+		storeOpts = append(storeOpts, store.WithoutMarket())
 	}
 	db, err := store.Open(dataDir, storeOpts...)
 	if err != nil {
@@ -284,6 +289,45 @@ func main() {
 		hub.Publish("sys:apps-changed", map[string]any{"role": req.Role})
 		writeJSON(w, map[string]string{"ok": "1"})
 	})
+
+	// ---- 应用商店（OPENOS_MARKET=off 时路由不注册，商店应用也不入种子）----
+	// 目录对所有登录用户可浏览（安装按钮仅管理员）；安装 = 写 apps 表 + 按所选角色授权
+	if envOr("OPENOS_MARKET", "") != "off" {
+		authed.HandleFunc("GET /api/market/apps", func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, market.List(db))
+		})
+		authed.HandleFunc("POST /api/market/install", func(w http.ResponseWriter, r *http.Request) {
+			id := auth.FromContext(r)
+			if id.Role != "admin" {
+				http.Error(w, "需要管理员权限", http.StatusForbidden)
+				return
+			}
+			var req struct {
+				ID    string   `json:"id"`
+				Roles []string `json:"roles"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" {
+				http.Error(w, "参数错误：需要 id", 400)
+				return
+			}
+			e, err := market.Install(db, req.ID, req.Roles)
+			if errors.Is(err, market.ErrNotFound) {
+				http.Error(w, "目录中不存在该应用", http.StatusNotFound)
+				return
+			}
+			if errors.Is(err, market.ErrProtected) {
+				http.Error(w, "应用 ID 与内置或宿主锁定应用冲突", http.StatusForbidden)
+				return
+			}
+			if err != nil {
+				http.Error(w, "安装失败", 500)
+				return
+			}
+			db.Audit(id.Username, "market.install", e.ID+"@"+e.Version, "")
+			hub.Publish("sys:apps-changed", map[string]any{"id": e.ID})
+			writeJSON(w, map[string]string{"ok": "1"})
+		})
+	}
 
 	// 用户管理（admin；sync 为宿主批量幂等同步）
 	authed.HandleFunc("GET /api/users", auth.RequireAdmin(http.HandlerFunc(authSvc.ListUsers)).ServeHTTP)
