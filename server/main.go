@@ -113,6 +113,42 @@ func main() {
 	})
 	osmcpMgr.Start()
 	hub.Handle("agent:resp", osmcpMgr.OnBridgeResp)
+	// 聊天室消息持久化：总线 chat:room 处理器落库（From/TS 由 Hub 强制注入不可伪造，
+	// 每条消息到达服务端恰一次=天然去重；发送者本地即时回显不经此处）。payload 与
+	// 前端约定 {text≤500, attach?{id,name,mime,size}}，服务端再做防御性截断。
+	hub.Handle("chat:room", func(env bus.Envelope, _ func(string, any)) {
+		var p struct {
+			Text  string `json:"text"`
+			Attach *struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+				MIME string `json:"mime"`
+				Size int64  `json:"size"`
+			} `json:"attach"`
+		}
+		if json.Unmarshal(env.Payload, &p) != nil {
+			return
+		}
+		text := strings.TrimSpace(p.Text)
+		if len([]rune(text)) > 500 {
+			text = string([]rune(text)[:500])
+		}
+		var ref *store.AttachmentRef
+		if p.Attach != nil && p.Attach.ID != "" && len(p.Attach.ID) <= 64 {
+			ref = &store.AttachmentRef{
+				ID: p.Attach.ID, Name: truncateRunes(p.Attach.Name, 200),
+				MIME: truncateRunes(p.Attach.MIME, 100), Size: p.Attach.Size,
+			}
+		}
+		if text == "" && ref == nil {
+			return
+		}
+		if err := db.InsertChatRoomMessage(store.ChatRoomMessage{
+			From: env.From, Text: text, Attach: ref, TS: env.TS,
+		}); err != nil {
+			log.Printf("chat: 消息落库失败: %v", err)
+		}
+	})
 	// 系统附件存储（聊天附件 / bundle 应用文件分享；目录 <data>/attachments）
 	attachStore, err := attach.New(filepath.Join(dataDir, "attachments"), db)
 	if err != nil {
@@ -179,6 +215,21 @@ func main() {
 	// 当前在线用户快照（增量事件走总线 sys:presence 主题；聊天等应用启动时取一次基线）
 	authed.HandleFunc("GET /api/presence", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"online": hub.OnlineUsers()})
+	})
+	// 聊天室历史消息分页（登录即可读——总线 chat:room 广播本就全员可订阅，同边界）：
+	// ?before=<id> 取更早一页（0=最新一页），?limit= 默认 50 上限 100。
+	authed.HandleFunc("GET /api/chat/history", func(w http.ResponseWriter, r *http.Request) {
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		if limit <= 0 || limit > 100 {
+			limit = 50
+		}
+		before, _ := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64)
+		msgs, err := db.ChatRoomHistory(before, limit)
+		if err != nil {
+			http.Error(w, "查询失败", 500)
+			return
+		}
+		writeJSON(w, map[string]any{"messages": msgs})
 	})
 	// 附件上传（multipart 字段 file，单文件 ≤10MB；Content-Type 边界由浏览器生成，
 	// 此处不可预置 json）——MaxBytesReader 硬限请求体（10MB 文件 + multipart 开销）
@@ -774,6 +825,9 @@ func scheduleRetention(db *store.DB, attachStore *attach.Store) {
 			if n, err := db.PruneChatBefore(time.Now().AddDate(0, 0, -d)); err == nil && n > 0 {
 				log.Printf("保留期清理：chat_messages 删除 %d 行（%d 天前）", n, d)
 			}
+			if n, err := db.PruneChatRoomBefore(time.Now().AddDate(0, 0, -d)); err == nil && n > 0 {
+				log.Printf("保留期清理：chat_room_messages 删除 %d 行（%d 天前）", n, d)
+			}
 		}
 		if d := envDays("OPENOS_ATTACH_RETENTION_DAYS", 30); d > 0 {
 			if n := attachStore.Prune(time.Now().AddDate(0, 0, -d)); n > 0 {
@@ -803,6 +857,18 @@ func sanitizeFilenameASCII(name string) string {
 		return "file"
 	}
 	return out
+}
+
+// truncateRunes 按字符数截断（防御性限长，落库字段用）。
+func truncateRunes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
 }
 
 func envDays(key string, def int) int {

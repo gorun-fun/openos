@@ -244,16 +244,16 @@
     {
       "id": "chat",
       "name": "聊天室",
-      "description": "在线实时聊天：左侧在线用户列表，气泡消息流，Enter 发送；支持发送图片与文件附件（≤10MB，图片缩略图直显）。消息经 OpenOS 事件总线实时推送（chat:room 主题），身份由服务端注入不可伪造；应用没打开时新消息经系统通知中心提醒；不保存历史，全员在线畅聊。",
+      "description": "在线实时聊天：左侧在线用户列表，气泡消息流，Enter 发送；支持发送图片与文件附件（≤10MB，图片缩略图直显）。消息经 OpenOS 事件总线实时推送（chat:room 主题），身份由服务端注入不可伪造；应用没打开时新消息经系统通知中心提醒；支持查看历史消息（打开自动加载最近记录，上滑翻看更早）。",
       "category": "社交",
       "icon": "https://download.gorun.fun/openos/market/icons/chat.svg",
       "type": "bundle",
       "config": {
         "kind": "bundle",
-        "url": "https://download.gorun.fun/openos/market/bundles/chat-1.1.1.js"
+        "url": "https://download.gorun.fun/openos/market/bundles/chat-1.2.0.js"
       },
-      "version": "1.1.1",
-      "changelog": "附件图标改为跟随主题的矢量图标（深浅色自动适配）",
+      "version": "1.2.0",
+      "changelog": "新增历史消息：打开自动加载最近 50 条，上滑分页翻看更早",
       "perms": [
         "经事件总线收发 chat:room 消息（实时推送）",
         "读取在线用户列表",

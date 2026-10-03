@@ -166,6 +166,18 @@ CREATE TABLE IF NOT EXISTS attachments (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_attach_created ON attachments(created_at);
+CREATE TABLE IF NOT EXISTS chat_room_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  sender TEXT NOT NULL,
+  text TEXT NOT NULL DEFAULT '',
+  attach_id TEXT NOT NULL DEFAULT '',
+  attach_name TEXT NOT NULL DEFAULT '',
+  attach_mime TEXT NOT NULL DEFAULT '',
+  attach_size INTEGER NOT NULL DEFAULT 0,
+  ts INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_chat_room_id ON chat_room_messages(id DESC);
 `
 
 // builtinApps 内置应用清单。icon 为前端渲染标识。
@@ -553,6 +565,75 @@ func (db *DB) PruneChatBefore(cutoff time.Time) (int64, error) {
 	return db.pruneBefore("chat_messages", cutoff)
 }
 
+// ---- 聊天室消息历史（总线 chat:room 主题持久化） ----
+
+// ChatRoomMessage 聊天室历史消息行（正序返回给前端）。
+type ChatRoomMessage struct {
+	ID     int64          `json:"id"`
+	From   string         `json:"from"`
+	Text   string         `json:"text"`
+	Attach *AttachmentRef `json:"attach,omitempty"`
+	TS     int64          `json:"ts"`
+}
+
+// AttachmentRef 消息内嵌的附件快照（附件本体可能先于消息被保留期清理，
+// 按快照渲染、点击时 404 由前端兜底提示）。
+type AttachmentRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	MIME string `json:"mime"`
+	Size int64  `json:"size"`
+}
+
+// InsertChatRoomMessage 聊天消息落库（from/ts 由服务端总线注入，调用方已校验）。
+func (db *DB) InsertChatRoomMessage(m ChatRoomMessage) error {
+	var aID, aName, aMIME string
+	var aSize int64
+	if m.Attach != nil {
+		aID, aName, aMIME, aSize = m.Attach.ID, m.Attach.Name, m.Attach.MIME, m.Attach.Size
+	}
+	_, err := db.Exec(`INSERT INTO chat_room_messages(sender,text,attach_id,attach_name,attach_mime,attach_size,ts)
+		VALUES(?,?,?,?,?,?,?)`, m.From, m.Text, aID, aName, aMIME, aSize, m.TS)
+	return err
+}
+
+// ChatRoomHistory 分页查询历史：before=0 取最新一页，否则取 id < before 的更早一页；
+// 倒序取 limit 行后反转为正序返回。
+func (db *DB) ChatRoomHistory(before int64, limit int) ([]ChatRoomMessage, error) {
+	rows, err := db.Query(`SELECT id,sender,text,attach_id,attach_name,attach_mime,attach_size,ts
+		FROM chat_room_messages WHERE (? = 0 OR id < ?) ORDER BY id DESC LIMIT ?`, before, before, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ChatRoomMessage{}
+	for rows.Next() {
+		var m ChatRoomMessage
+		var aID, aName, aMIME string
+		var aSize int64
+		if err := rows.Scan(&m.ID, &m.From, &m.Text, &aID, &aName, &aMIME, &aSize, &m.TS); err != nil {
+			return nil, err
+		}
+		if aID != "" {
+			m.Attach = &AttachmentRef{ID: aID, Name: aName, MIME: aMIME, Size: aSize}
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// 反转为正序（旧 → 新）
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
+}
+
+// PruneChatRoomBefore 删除截止时间前的聊天室消息。
+func (db *DB) PruneChatRoomBefore(cutoff time.Time) (int64, error) {
+	return db.pruneBefore("chat_room_messages", cutoff)
+}
+
 // InsertAttachment 附件元数据入库（文件已落盘；入库失败由调用方清理文件）。
 func (db *DB) InsertAttachment(id, name, mime string, size int64, uploader string) error {
 	_, err := db.Exec(`INSERT INTO attachments(id,name,mime,size,uploader) VALUES(?,?,?,?,?)`,
@@ -584,8 +665,7 @@ func (db *DB) AttachmentByID(id string) (Attachment, bool) {
 }
 
 // PruneAttachmentsBefore 删除截止时间前的附件行，返回被删 id（文件删除由 attach 层完成）。
-func (db *DB) PruneAttachmentsBefore(cutoff time.Time) ([]string, error) {
-	rows, err := db.Query(`SELECT id FROM attachments WHERE created_at < ?`, cutoff.UTC().Format("2006-01-02 15:04:05"))
+func (db *DB) PruneAttachmentsBefore(cutoff time.Time) ([]string, error) {	rows, err := db.Query(`SELECT id FROM attachments WHERE created_at < ?`, cutoff.UTC().Format("2006-01-02 15:04:05"))
 	if err != nil {
 		return nil, err
 	}

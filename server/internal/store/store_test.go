@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -139,5 +140,51 @@ func TestAppByIDAndRoleAccess(t *testing.T) {
 	}
 	if db.RoleCanAccessApp("admin", "px1") {
 		t.Fatal("未授权角色不应可访问")
+	}
+}
+
+// TestChatRoomHistory 聊天室历史：插入 → 最新一页 → before 分页 → 附件快照回读。
+func TestChatRoomHistory(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	for i := 1; i <= 7; i++ {
+		m := ChatRoomMessage{From: "alice", Text: fmt.Sprintf("m%d", i), TS: int64(1000 + i)}
+		if i == 3 {
+			m.Attach = &AttachmentRef{ID: "abc123", Name: "图.png", MIME: "image/png", Size: 88}
+		}
+		if err := db.InsertChatRoomMessage(m); err != nil {
+			t.Fatalf("insert %d: %v", i, err)
+		}
+	}
+
+	// 最新一页（limit 5）：正序 m3..m7，m3 带附件快照
+	page, err := db.ChatRoomHistory(0, 5)
+	if err != nil {
+		t.Fatalf("history: %v", err)
+	}
+	if len(page) != 5 || page[0].Text != "m3" || page[4].Text != "m7" {
+		t.Fatalf("最新页顺序错误: %+v", page)
+	}
+	if page[0].Attach == nil || page[0].Attach.Name != "图.png" {
+		t.Fatalf("附件快照回读错误: %+v", page[0].Attach)
+	}
+
+	// 上一页：before=m3.id → m1..m2
+	page2, err := db.ChatRoomHistory(page[0].ID, 5)
+	if err != nil {
+		t.Fatalf("history2: %v", err)
+	}
+	if len(page2) != 2 || page2[0].Text != "m1" || page2[1].Text != "m2" {
+		t.Fatalf("翻页错误: %+v", page2)
+	}
+
+	// 无附件消息 attach 字段为 nil
+	if page[4].Attach != nil {
+		t.Fatalf("无附件消息 Attach 应为 nil: %+v", page[4])
 	}
 }

@@ -114,7 +114,8 @@ export OPENOS_AI_MODEL=glm-4-flash
 
 ### 在线用户与系统附件
 
-- **在线用户**：`GET /api/presence` 返回当前在线用户名快照（登录可用）；增量走 `sys:presence` 主题事件 `{user, online}`。同一用户多标签页 = 多条连接，应用侧应按连接计数（在线名单以快照纠偏为准）。
+- **在线用户**：`GET /api/presence` 返回当前在线用户名快照（登录可用）；增量走 `sys:presence` 主题事件 `{user, online}`。
+- **聊天室消息历史**：总线 `chat:room` 的消息由服务端处理器落库（`chat_room_messages` 表，From/TS 由 Hub 注入不可伪造；附件存内嵌快照，附件本体可能先被保留期清理）；`GET /api/chat/history?before=<id>&limit=50`（登录可用，倒序分页、正序返回，limit 上限 100）查询；保留期随 `OPENOS_CHAT_RETENTION_DAYS`（默认 90 天）清理。同一用户多标签页 = 多条连接，应用侧应按连接计数（在线名单以快照纠偏为准）。
 - **系统附件**（`server/internal/attach`）：平台级文件分享能力，聊天附件等共用——`POST /api/attachments`（multipart 字段 `file`，单文件 ≤10MB，登录）上传返回 `{id,name,mime,size}`（id 为 128bit 随机不可枚举，mime 以内容嗅探为准）；`GET /api/attachments/{id}?token=<jwt>` 下载（`<img>/<a>` 标签带不了 Authorization header，鉴权走查询参数同 `/ws`；`api.upload()` 客户端方法自动携带登录态）。**安全边界**：Content-Type 只对图片白名单（png/jpeg/gif/webp/bmp/avif）内联，其余（含 SVG/HTML——可携带脚本）一律 `application/octet-stream` 下载 + `nosniff`，附件服务不可变成 HTML 注入源；保留期清理 `OPENOS_ATTACH_RETENTION_DAYS`（默认 30 天，0=永久），文件存 `<data>/attachments/`。
 
 ### 前端总线 API
