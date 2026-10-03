@@ -8,10 +8,15 @@
       "category": "效率",
       "icon": "https://excalidraw.com/favicon.ico",
       "type": "web",
-      "config": { "kind": "web", "url": "https://excalidraw.com/" },
+      "config": {
+        "kind": "web",
+        "url": "https://excalidraw.com/"
+      },
       "version": "1.0.0",
       "changelog": "初始版本",
-      "perms": ["在窗口内加载 excalidraw.com"],
+      "perms": [
+        "在窗口内加载 excalidraw.com"
+      ],
       "width": 1180,
       "height": 780
     },
@@ -22,10 +27,15 @@
       "category": "创意",
       "icon": "https://www.photopea.com/promo/icon512.png",
       "type": "web",
-      "config": { "kind": "web", "url": "https://www.photopea.com/" },
+      "config": {
+        "kind": "web",
+        "url": "https://www.photopea.com/"
+      },
       "version": "1.0.0",
       "changelog": "初始版本",
-      "perms": ["在窗口内加载 www.photopea.com"],
+      "perms": [
+        "在窗口内加载 www.photopea.com"
+      ],
       "width": 1240,
       "height": 800
     },
@@ -36,10 +46,15 @@
       "category": "娱乐",
       "icon": "https://music.163.com/favicon.ico",
       "type": "web",
-      "config": { "kind": "web", "url": "https://music.163.com/" },
+      "config": {
+        "kind": "web",
+        "url": "https://music.163.com/"
+      },
       "version": "1.0.0",
       "changelog": "初始版本",
-      "perms": ["在窗口内加载 music.163.com"],
+      "perms": [
+        "在窗口内加载 music.163.com"
+      ],
       "width": 1100,
       "height": 760
     },
@@ -50,10 +65,15 @@
       "category": "资料",
       "icon": "https://en.wikipedia.org/static/favicon/wikipedia.ico",
       "type": "web",
-      "config": { "kind": "web", "url": "https://zh.wikipedia.org/" },
+      "config": {
+        "kind": "web",
+        "url": "https://zh.wikipedia.org/"
+      },
       "version": "1.0.0",
       "changelog": "初始版本",
-      "perms": ["在窗口内加载 zh.wikipedia.org"],
+      "perms": [
+        "在窗口内加载 zh.wikipedia.org"
+      ],
       "width": 1080,
       "height": 760
     },
@@ -64,10 +84,15 @@
       "category": "工具",
       "icon": "https://www.amap.com/favicon.ico",
       "type": "web",
-      "config": { "kind": "web", "url": "https://www.amap.com/" },
+      "config": {
+        "kind": "web",
+        "url": "https://www.amap.com/"
+      },
       "version": "1.0.0",
       "changelog": "初始版本",
-      "perms": ["在窗口内加载 www.amap.com"],
+      "perms": [
+        "在窗口内加载 www.amap.com"
+      ],
       "width": 1000,
       "height": 720
     },
@@ -88,25 +113,53 @@
         },
         "views": [
           {
-            "type": "cards", "title": "卡片", "fields": [
-              { "key": "full_name", "label": "项目", "primary": true },
-              { "key": "description", "label": "简介" },
-              { "key": "stargazers_count", "label": "Star 数" }
+            "type": "cards",
+            "title": "卡片",
+            "fields": [
+              {
+                "key": "full_name",
+                "label": "项目",
+                "primary": true
+              },
+              {
+                "key": "description",
+                "label": "简介"
+              },
+              {
+                "key": "stargazers_count",
+                "label": "Star 数"
+              }
             ]
           },
           {
-            "type": "table", "title": "列表", "columns": [
-              { "key": "full_name", "label": "项目" },
-              { "key": "language", "label": "语言" },
-              { "key": "stargazers_count", "label": "Star 数" },
-              { "key": "html_url", "label": "地址" }
+            "type": "table",
+            "title": "列表",
+            "columns": [
+              {
+                "key": "full_name",
+                "label": "项目"
+              },
+              {
+                "key": "language",
+                "label": "语言"
+              },
+              {
+                "key": "stargazers_count",
+                "label": "Star 数"
+              },
+              {
+                "key": "html_url",
+                "label": "地址"
+              }
             ]
           }
         ]
       },
       "version": "1.0.0",
       "changelog": "初始版本",
-      "perms": ["访问 api.github.com（GitHub 公开接口）"],
+      "perms": [
+        "访问 api.github.com（GitHub 公开接口）"
+      ],
       "width": 980,
       "height": 660
     },
@@ -126,28 +179,65 @@
         },
         "views": [
           {
-            "type": "table", "title": "行情", "columns": [
-              { "key": "market_cap_rank", "label": "#" },
-              { "key": "name", "label": "名称" },
-              { "key": "symbol", "label": "代码" },
-              { "key": "current_price", "label": "价格 (CNY)" },
-              { "key": "market_cap", "label": "市值" },
-              { "key": "price_change_percentage_24h", "label": "24h 涨跌" }
+            "type": "table",
+            "title": "行情",
+            "columns": [
+              {
+                "key": "market_cap_rank",
+                "label": "#"
+              },
+              {
+                "key": "name",
+                "label": "名称"
+              },
+              {
+                "key": "symbol",
+                "label": "代码"
+              },
+              {
+                "key": "current_price",
+                "label": "价格 (CNY)"
+              },
+              {
+                "key": "market_cap",
+                "label": "市值"
+              },
+              {
+                "key": "price_change_percentage_24h",
+                "label": "24h 涨跌"
+              }
             ]
           },
           {
-            "type": "cards", "title": "卡片", "fields": [
-              { "key": "name", "label": "名称", "primary": true },
-              { "key": "symbol", "label": "代码" },
-              { "key": "current_price", "label": "价格 (CNY)" },
-              { "key": "price_change_percentage_24h", "label": "24h 涨跌" }
+            "type": "cards",
+            "title": "卡片",
+            "fields": [
+              {
+                "key": "name",
+                "label": "名称",
+                "primary": true
+              },
+              {
+                "key": "symbol",
+                "label": "代码"
+              },
+              {
+                "key": "current_price",
+                "label": "价格 (CNY)"
+              },
+              {
+                "key": "price_change_percentage_24h",
+                "label": "24h 涨跌"
+              }
             ]
           }
         ]
       },
       "version": "1.0.0",
       "changelog": "初始版本",
-      "perms": ["访问 api.coingecko.com（CoinGecko 公开接口）"],
+      "perms": [
+        "访问 api.coingecko.com（CoinGecko 公开接口）"
+      ],
       "width": 940,
       "height": 640
     },
@@ -158,10 +248,17 @@
       "category": "社交",
       "icon": "https://download.gorun.fun/openos/market/icons/chat.svg",
       "type": "bundle",
-      "config": { "kind": "bundle", "url": "https://download.gorun.fun/openos/market/bundles/chat-1.1.0.js" },
-      "version": "1.1.0",
-      "changelog": "新增附件发送（图片 / 文件，≤10MB）与应用未打开时的新消息系统通知",
-      "perms": ["经事件总线收发 chat:room 消息（实时推送）", "读取在线用户列表", "上传附件（≤10MB，服务端保留 30 天）"],
+      "config": {
+        "kind": "bundle",
+        "url": "https://download.gorun.fun/openos/market/bundles/chat-1.1.1.js"
+      },
+      "version": "1.1.1",
+      "changelog": "附件图标改为跟随主题的矢量图标（深浅色自动适配）",
+      "perms": [
+        "经事件总线收发 chat:room 消息（实时推送）",
+        "读取在线用户列表",
+        "上传附件（≤10MB，服务端保留 30 天）"
+      ],
       "width": 860,
       "height": 600
     }
