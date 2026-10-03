@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"openos/server/internal/store"
@@ -45,7 +48,17 @@ func TestInstallLifecycle(t *testing.T) {
 	if len(entries) == 0 {
 		t.Skip("内置目录为空")
 	}
+	// 挑非 bundle 条目：bundle 安装会真实下载组件文件，生命周期测试用零网络形态
 	e := entries[0]
+	for _, cand := range entries {
+		if cand.Type != "bundle" {
+			e = cand
+			break
+		}
+	}
+	if e.Type == "bundle" {
+		t.Skip("内置目录全是 bundle 条目")
+	}
 
 	// 1. 安装：落库 + version/source 标记 + admin 恒在授权
 	if _, err := Install(db, e.ID, []string{"user"}); err != nil {
@@ -310,6 +323,121 @@ func TestRefreshNowMultiSource(t *testing.T) {
 	if total != 3 {
 		t.Errorf("沿用现行时 total 应为现行条目数 3: %d", total)
 	}
+}
+
+// TestBundleValidate bundle 形态静态校验：地址强制 https、id/version 限安全字符（拼文件名）。
+func TestBundleValidate(t *testing.T) {
+ mk := func(id, ver, rawURL string) Entry {
+  return Entry{ID: id, Name: "组件应用", Type: "bundle", Version: ver,
+   Config: []byte(fmt.Sprintf(`{"kind":"bundle","url":%q}`, rawURL))}
+ }
+ if err := mk("chat", "1.0.0", "https://example.com/chat.js").validate(); err != nil {
+  t.Errorf("合法 bundle 条目不应报错: %v", err)
+ }
+ if err := mk("chat", "1.0.0", "http://example.com/chat.js").validate(); err == nil {
+  t.Error("http 地址的 bundle 条目应被拒（可执行代码强制 https）")
+ }
+ if err := mk("chat", "", "https://example.com/chat.js").validate(); err == nil {
+  t.Error("缺少 version 应被拒")
+ }
+ if err := mk("../evil", "1.0.0", "https://example.com/chat.js").validate(); err == nil {
+  t.Error("id 含路径穿越字符应被拒")
+ }
+ if err := mk("chat", "a/b", "https://example.com/chat.js").validate(); err == nil {
+  t.Error("version 含路径穿越字符应被拒")
+ }
+}
+
+// TestBundleInstallLifecycle bundle 安装全链路（httptest 真实 HTTP）：下载落盘 →
+// BundlePath 按已装版本解析 → 升级换代清理旧文件 → RemoveBundles 清理 → 下载失败不入库。
+func TestBundleInstallLifecycle(t *testing.T) {
+ dir := t.TempDir()
+ db, err := store.Open(dir)
+ if err != nil {
+  t.Fatalf("Open: %v", err)
+ }
+ defer db.Close()
+
+ const body = "export default { template: '<div>hi</div>' }\n"
+ var hits int
+ srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+  hits++
+  if strings.HasSuffix(r.URL.Path, "broken.js") {
+   http.Error(w, "boom", 500)
+   return
+  }
+  fmt.Fprint(w, body)
+ }))
+ defer srv.Close()
+
+ SetBundleDir(filepath.Join(t.TempDir(), "bundles"))
+
+	entry := Entry{ID: "demo-bundle", Name: "演示组件", Type: "bundle", Version: "1.0.0",
+		Config: []byte(fmt.Sprintf(`{"kind":"bundle","url":%q}`, srv.URL+"/demo.js"))}
+	broken := Entry{ID: "broken-bundle", Name: "坏源组件", Type: "bundle", Version: "1.0.0",
+		Config: []byte(fmt.Sprintf(`{"kind":"bundle","url":%q}`, srv.URL+"/broken.js"))}
+ mu.Lock()
+ prev := active
+ active = []Entry{entry, broken}
+ mu.Unlock()
+ t.Cleanup(func() { mu.Lock(); active = prev; mu.Unlock() })
+
+ // 1) 下载失败：Install 报错且不入库（不产生装了跑不起来的应用）
+ if _, err := Install(db, "broken-bundle", nil); err == nil {
+  t.Fatal("下载失败应导致安装失败")
+ }
+ if _, ok := db.AppByID("broken-bundle"); ok {
+  t.Error("下载失败的应用不应入库")
+ }
+
+ // 2) 正常安装：入库 + 文件落盘 + BundlePath 可解析
+ if _, err := Install(db, "demo-bundle", []string{"user"}); err != nil {
+  t.Fatalf("Install: %v", err)
+ }
+ cur, ok := db.AppByID("demo-bundle")
+ if !ok {
+  t.Fatal("安装后未入库")
+ }
+ p, err := BundlePath(cur)
+ if err != nil {
+  t.Fatalf("BundlePath: %v", err)
+ }
+ raw, err := os.ReadFile(p)
+ if err != nil || string(raw) != body {
+  t.Errorf("落盘内容不一致: %v", err)
+ }
+
+ // 3) 非 bundle 应用 / 非 market 来源 → BundlePath 拒绝
+ if _, err := BundlePath(store.AppDef{ID: "demo-bundle", Version: "1.0.0", Source: SourceMarket, Config: []byte(`{"kind":"web","url":"https://x/"}`)}); err != ErrNoBundle {
+  t.Errorf("web 形态应返回 ErrNoBundle: %v", err)
+ }
+ if _, err := BundlePath(store.AppDef{ID: "demo-bundle", Version: "1.0.0", Config: entry.Config}); err != ErrNoBundle {
+  t.Errorf("非 market 来源应返回 ErrNoBundle: %v", err)
+ }
+
+	// 4) 升级换代：目录版本更新重装 → 新文件落盘、旧文件清理
+	up := entry
+	up.Version = "1.1.0"
+	up.Config = []byte(fmt.Sprintf(`{"kind":"bundle","url":%q}`, srv.URL+"/v2.js"))
+	mu.Lock()
+	active = []Entry{up}
+	mu.Unlock()
+ if _, err := Install(db, "demo-bundle", nil); err != nil {
+  t.Fatalf("升级安装: %v", err)
+ }
+ cur, _ = db.AppByID("demo-bundle")
+ if _, err := BundlePath(cur); err != nil {
+  t.Fatalf("升级后 BundlePath: %v", err)
+ }
+ if _, err := os.Stat(bundleFile("demo-bundle", "1.0.0")); !os.IsNotExist(err) {
+  t.Error("旧版本文件应被清理")
+ }
+
+ // 5) 卸载清理
+ RemoveBundles("demo-bundle")
+ if _, err := os.Stat(bundleFile("demo-bundle", "1.1.0")); !os.IsNotExist(err) {
+  t.Error("卸载后组件文件应被清理")
+ }
 }
 
 func findState(states []State, id string) *State {

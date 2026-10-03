@@ -41,6 +41,8 @@ const ErrorPanel = {
 }
 
 const WebAppComp = defineAsyncComponent(() => import('../apps/web/WebApp.vue'))
+// 商店 bundle 应用容器（动态 import 服务端提供的组件模块）
+const BundleAppComp = defineAsyncComponent(() => import('../apps/bundle/BundleApp.vue'))
 
 const comp = shallowRef<any>(null)
 const apps = useApps()
@@ -61,6 +63,9 @@ async function resolveComp() {
           // 统一融合工具栏窗体
           appChrome[appId] = 'merged'
           comp.value = WebAppComp
+        } else if (cfg.kind === 'bundle') {
+          // 商店 bundle 应用：标准标题栏 + BundleApp 容器动态加载组件
+          comp.value = BundleAppComp
         } else {
           comp.value = { render: () => h(SchemaApp, { schema: cfg, win: props.win }) }
         }

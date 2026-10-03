@@ -17,11 +17,13 @@
 // 跨应用弹窗：OpenOS.registerDialog / OpenOS.openDialog（见 ui/dialogService.ts）。
 import { bus } from '../bus/bus'
 import * as ui from '../ui'
+import * as vueSDK from 'vue'
 import { toast } from '../ui/toast'
 import { runtimeComponents, appChrome } from '../stores/apps'
 import { useWindows } from '../stores/windows'
 import { useApps } from '../stores/apps'
-import { api, fsApi } from '../api/client'
+import { useSession } from '../stores/session'
+import { api, fsApi, type SessionUser } from '../api/client'
 import { notify } from '../stores/notifications'
 import { useCalendar, todayStr, REMIND_OPTIONS, type CalMark, type RemindOffset } from '../stores/calendar'
 import { registerDialog, unregisterDialog, openDialog, dialogRegistry, type DialogDef } from '../ui/dialogService'
@@ -111,6 +113,14 @@ export const OpenOS = {
     once: (t: string, fn: any) => bus.once(t, fn),
     emit: (t: string, payload?: any, opts?: { remote?: boolean }) => bus.emit(t, payload, opts),
     remote: (t: string, payload?: any) => bus.remote(t, payload),
+  },
+  /** Vue 运行时 API（ref/computed/onMounted 等，主程序完整版 Vue 的具名导出原样转发）。
+   *  商店 bundle 应用是不带依赖的单文件 ES 模块，组件逻辑从这里取响应式 API：
+   *  const { ref } = window.OpenOS.vue。 */
+  vue: vueSDK,
+  /** 当前登录用户（未登录为 null）。 */
+  me(): SessionUser | null {
+    return useSession().user
   },
   /** 基础 UI 组件库。 */
   ui,

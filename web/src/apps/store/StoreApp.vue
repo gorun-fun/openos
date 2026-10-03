@@ -20,7 +20,7 @@ interface MarketState {
   description: string
   category: string
   icon: string
-  type: 'web' | 'proxy' | 'schema'
+  type: 'web' | 'proxy' | 'schema' | 'bundle'
   version: string
   changelog?: string
   perms?: string[]
@@ -100,7 +100,7 @@ const filtered = computed(() => {
 })
 
 function typeLabel(t: string) {
-  return t === 'web' ? '网页应用' : t === 'proxy' ? '代理网页' : t === 'schema' ? '声明式' : t
+  return t === 'web' ? '网页应用' : t === 'proxy' ? '代理网页' : t === 'schema' ? '声明式' : t === 'bundle' ? '组件应用' : t
 }
 
 function openDetail(s: MarketState) {

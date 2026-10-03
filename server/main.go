@@ -169,6 +169,10 @@ func main() {
 
 	// ---- 需要登录的接口 ----
 	authed := http.NewServeMux()
+	// 当前在线用户快照（增量事件走总线 sys:presence 主题；聊天等应用启动时取一次基线）
+	authed.HandleFunc("GET /api/presence", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"online": hub.OnlineUsers()})
+	})
 	authed.HandleFunc("GET /api/auth/me", authSvc.Me)
 	authed.HandleFunc("GET /api/auth/refresh", authSvc.Refresh)
 	authed.HandleFunc("PUT /api/users/password", authSvc.ChangePassword)
@@ -225,6 +229,7 @@ func main() {
 			http.Error(w, "内置或宿主锁定的应用不可删除", http.StatusForbidden)
 			return
 		}
+		market.RemoveBundles(appID) // 商店 bundle 应用卸载即清理组件文件（非 bundle / 商店关闭时为空操作）
 		db.Audit(id.Username, "app.delete", appID, "")
 		hub.Publish("sys:apps-changed", nil)
 		writeJSON(w, map[string]string{"ok": "1"})
@@ -301,6 +306,8 @@ func main() {
 		if marketDefault == "off" {
 			marketDefault = ""
 		}
+		// bundle 组件落盘目录（安装时下载、运行期本地提供）
+		market.SetBundleDir(filepath.Join(dataDir, "market", "bundles"))
 		// 先恢复持久化的自定义源（system_kv market_sources，JSON 数组）再启动拉取循环：
 		// StartRemote 的 goroutine 启动即 RefreshNow，顺序颠倒会让首次拉取漏掉自定义源
 		if raw, _ := db.GetSystemKV("market_sources"); raw != "" {
@@ -384,6 +391,35 @@ func main() {
 			db.Audit(id.Username, "market.install", e.ID+"@"+e.Version, "")
 			hub.Publish("sys:apps-changed", map[string]any{"id": e.ID})
 			writeJSON(w, map[string]string{"ok": "1"})
+		})
+		// bundle 组件取件：前端 BundleApp 容器用动态 import() 加载——ESM 模块请求
+		// 无法携带 Authorization header，鉴权走查询参数 token（与 /ws 同例）。
+		// 逐请求校验：登录态 + 应用为商店安装的 bundle 形态 + 当前角色获授权。
+		mux.HandleFunc("GET /api/market/bundle/{id}", func(w http.ResponseWriter, r *http.Request) {
+			idn, err := authSvc.VerifySession(r.URL.Query().Get("token"))
+			if err != nil {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			appID := r.PathValue("id")
+			cur, ok := db.AppByID(appID)
+			if !ok {
+				http.Error(w, "not found", http.StatusNotFound)
+				return
+			}
+			path, err := market.BundlePath(cur) // 内部校验 source=market 且 kind=bundle、文件存在
+			if err != nil {
+				http.Error(w, "not found", http.StatusNotFound)
+				return
+			}
+			if !db.RoleCanAccessApp(idn.Role, appID) {
+				http.Error(w, "需要管理员授权该应用", http.StatusForbidden)
+				return
+			}
+			// 版本固定在文件名里，内容不可变，可放心让浏览器缓存模块
+			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+			w.Header().Set("Cache-Control", "private, max-age=3600")
+			http.ServeFile(w, r, path)
 		})
 	}
 

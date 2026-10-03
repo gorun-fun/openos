@@ -150,6 +150,20 @@
       "perms": ["访问 api.coingecko.com（CoinGecko 公开接口）"],
       "width": 940,
       "height": 640
+    },
+    {
+      "id": "chat",
+      "name": "聊天室",
+      "description": "在线实时聊天：左侧在线用户列表，气泡消息流，Enter 发送。消息经 OpenOS 事件总线实时推送（chat:room 主题），消息身份由服务端注入不可伪造；不保存历史，全员在线畅聊。",
+      "category": "社交",
+      "icon": "https://download.gorun.fun/openos/market/icons/chat.svg",
+      "type": "bundle",
+      "config": { "kind": "bundle", "url": "https://download.gorun.fun/openos/market/bundles/chat-1.0.0.js" },
+      "version": "1.0.0",
+      "changelog": "初始版本",
+      "perms": ["经事件总线收发 chat:room 消息（实时推送）", "读取在线用户列表"],
+      "width": 860,
+      "height": 600
     }
   ]
 }

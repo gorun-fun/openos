@@ -6,12 +6,17 @@
 // 合并去重按 id **首见优先**：自定义源可遮蔽官方同 id 条目。任一源成功即以成功
 // 源合并结果为生效目录；全部失败沿用现行目录。更新货架只改远端 JSON，无需发版。
 //
-// MVP 目录只收录两档零攻击面的应用形态：
+// 目录收录的应用形态：
 //   - web   网页应用（config.kind=web）：iframe 直嵌允许被嵌的站点，渲染走 WebApp 容器
 //   - proxy 代理网页（config.kind=proxy）：目标站经服务端反代（webproxy），安装即放行其目标主机
 //   - schema 声明式应用（config 即 SchemaApp schema）：纯数据描述、无代码执行
-// 安装 = UpsertApp（builtin=0/locked=0，version/source 标记来源）+ 按所选角色授权，
-// 不引入任何远程代码加载。宿主可用 OPENOS_MARKET=off 整体下架商店。
+//   - bundle 组件应用（config.kind=bundle）：单文件 ES 模块（默认导出 Vue 组件定义），
+//     安装时由服务端从目录声明的 https 地址下载落盘（<data>/market/bundles/），
+//     运行时经 /api/market/bundle/{id} 提供（按角色授权校验），前端 BundleApp 容器
+//     动态 import 渲染——代码只在管理员安装时取一次远端，运行期不依赖外部源。
+//     这是唯一的远程代码形态：与内置应用同级信任，宿主应只收录可信来源的目录。
+// 安装 = UpsertApp（builtin=0/locked=0，version/source 标记来源）+ 按所选角色授权。
+// 宿主可用 OPENOS_MARKET=off 整体下架商店。
 package market
 
 import (
@@ -23,6 +28,9 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -308,13 +316,13 @@ func (e Entry) validate() error {
 	if e.ID == "" || e.Name == "" {
 		return fmt.Errorf("id 与 name 必填")
 	}
-	if e.Type != "web" && e.Type != "proxy" && e.Type != "schema" {
+	if e.Type != "web" && e.Type != "proxy" && e.Type != "schema" && e.Type != "bundle" {
 		return fmt.Errorf("未知形态 %q", e.Type)
 	}
 	if len(e.Config) == 0 || !json.Valid(e.Config) {
 		return fmt.Errorf("config 缺失或非法 JSON")
 	}
-	if e.Type == "web" || e.Type == "proxy" {
+	if e.Type == "web" || e.Type == "proxy" || e.Type == "bundle" {
 		var cfg struct {
 			Kind string `json:"kind"`
 			URL  string `json:"url"`
@@ -326,9 +334,22 @@ func (e Entry) validate() error {
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return fmt.Errorf("config.url 须为合法 http(s) 地址")
 		}
+		// bundle 是要执行的代码：地址强制 https、id/version 限安全字符
+		//（二者拼进落盘文件名，先于此挡住路径穿越）
+		if e.Type == "bundle" {
+			if u.Scheme != "https" {
+				return fmt.Errorf("bundle 地址须为 https")
+			}
+			if !safeNameRe.MatchString(e.ID) || !safeNameRe.MatchString(e.Version) {
+				return fmt.Errorf("bundle 条目 id/version 须为字母数字._-")
+			}
+		}
 	}
 	return nil
 }
+
+// safeNameRe bundle 落盘文件名的组成部分（id/version）允许的字符集。
+var safeNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // Find 按 ID 查目录条目。
 func Find(id string) (Entry, error) {
@@ -364,6 +385,7 @@ func List(db *store.DB) []State {
 
 // Install 安装/升级/覆盖安装目录条目，并按所选角色整组授权（admin 恒在授权内）。
 // 角色只认系统出现过的（ListRoles），防 role_apps 写入幽灵角色。
+// bundle 形态在入库前先下载组件文件落盘（下载失败即安装失败，不产生装了跑不起来的应用）。
 func Install(db *store.DB, id string, roles []string) (Entry, error) {
 	e, err := Find(id)
 	if err != nil {
@@ -371,6 +393,11 @@ func Install(db *store.DB, id string, roles []string) (Entry, error) {
 	}
 	if cur, ok := db.AppByID(e.ID); ok && (cur.Builtin || cur.Locked) {
 		return e, ErrProtected
+	}
+	if e.Type == "bundle" {
+		if err := fetchBundle(e); err != nil {
+			return e, fmt.Errorf("组件下载失败: %w", err)
+		}
 	}
 	valid, err := db.ListRoles()
 	if err != nil {
@@ -406,4 +433,117 @@ func contains(xs []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// ---- bundle 组件文件管理 ----
+//
+// 安装时从目录声明的 https 地址下载到 <data>/market/bundles/<id>-<version>.js，
+// 运行期由服务端本地提供（GET /api/market/bundle/{id}，按角色授权校验）——
+// 代码只在管理员安装的那一刻取一次远端，之后版本固定、不再依赖外部源。
+
+var (
+	bundleDirOnce sync.Once
+	bundleDir     string
+)
+
+// SetBundleDir 设置 bundle 落盘目录并确保存在（main.go 启动时注入 <data>/market/bundles）。
+func SetBundleDir(dir string) {
+	bundleDirOnce.Do(func() {
+		bundleDir = dir
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			log.Printf("market: 创建 bundle 目录失败: %v", err)
+		}
+	})
+}
+
+// bundleFile 本地组件文件路径（id/version 已由 validate 限定安全字符）。
+func bundleFile(id, version string) string {
+	return filepath.Join(bundleDir, fmt.Sprintf("%s-%s.js", id, version))
+}
+
+// bundleURL 从条目 config 提取下载地址（validate 已保证形态合法）。
+func bundleURL(e Entry) string {
+	var cfg struct {
+		URL string `json:"url"`
+	}
+	_ = json.Unmarshal(e.Config, &cfg)
+	return cfg.URL
+}
+
+// fetchBundle 下载组件文件并原子落盘（限 2MB / 15s，与目录清单同一套限额），
+// 成功后清理同 id 的旧版本文件（升级即换代，不留孤儿）。
+func fetchBundle(e Entry) error {
+	if bundleDir == "" {
+		return fmt.Errorf("bundle 目录未初始化")
+	}
+	resp, err := httpClient.Get(bundleURL(e))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return err
+	}
+	if len(raw) == 0 {
+		return fmt.Errorf("组件文件为空")
+	}
+	if len(raw) >= 2<<20 {
+		return fmt.Errorf("组件文件超过 2MB 限制")
+	}
+	dst := bundleFile(e.ID, e.Version)
+	tmp := dst + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	// 清理旧版本文件（忽略错误：残留文件不影响正确性，只占磁盘）
+	if matches, _ := filepath.Glob(filepath.Join(bundleDir, e.ID+"-*.js")); len(matches) > 0 {
+		for _, m := range matches {
+			if m != dst {
+				os.Remove(m)
+			}
+		}
+	}
+	log.Printf("market: bundle %s@%s 已落盘（%d 字节）", e.ID, e.Version, len(raw))
+	return nil
+}
+
+// ErrNoBundle 应用非 bundle 形态或组件文件缺失。
+var ErrNoBundle = errors.New("market: 组件文件不存在")
+
+// BundlePath 按已安装应用的当前版本解析本地组件文件路径。
+// 传入的 AppDef 须为商店安装（source=market）且 config.kind=bundle。
+func BundlePath(a store.AppDef) (string, error) {
+	if a.Source != SourceMarket || !safeNameRe.MatchString(a.ID) || !safeNameRe.MatchString(a.Version) {
+		return "", ErrNoBundle
+	}
+	var cfg struct {
+		Kind string `json:"kind"`
+	}
+	if json.Unmarshal(a.Config, &cfg) != nil || cfg.Kind != "bundle" {
+		return "", ErrNoBundle
+	}
+	p := bundleFile(a.ID, a.Version)
+	if _, err := os.Stat(p); err != nil {
+		return "", ErrNoBundle
+	}
+	return p, nil
+}
+
+// RemoveBundles 卸载应用时清理其全部组件版本文件（幂等；非 bundle 应用为空操作）。
+func RemoveBundles(id string) {
+	if bundleDir == "" || !safeNameRe.MatchString(id) {
+		return
+	}
+	matches, _ := filepath.Glob(filepath.Join(bundleDir, id+"-*.js"))
+	for _, m := range matches {
+		os.Remove(m)
+	}
 }
