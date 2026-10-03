@@ -65,13 +65,15 @@ const dateText = () => {
   padding: calc(env(safe-area-inset-top, 0px) + 18px) 20px 4px;
 }
 .clock {
-  border: none; background: none; cursor: pointer; color: var(--os-text);
+  border: none; background: none; cursor: pointer;
   display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
   padding: 4px 8px; margin: -4px 0 0 -8px; font-family: inherit;
-  text-shadow: 0 1px 12px rgba(0, 0, 0, .18);
 }
-.clock .time { font-size: 34px; font-weight: 600; line-height: 1.1; letter-spacing: .5px; }
-.clock .date { font-size: 13px; color: var(--os-text-secondary); }
+.clock .time {
+  font-size: 34px; font-weight: 600; line-height: 1.1; letter-spacing: .5px;
+  color: #fff; text-shadow: 0 1px 12px rgba(0, 0, 0, .4);
+}
+.clock .date { font-size: 13px; color: rgba(255, 255, 255, .88); text-shadow: 0 1px 6px rgba(0, 0, 0, .4); }
 .search {
   width: 40px; height: 40px; border-radius: 50%; border: none; cursor: pointer;
   background: var(--os-panel); color: var(--os-text);
@@ -93,6 +95,8 @@ const dateText = () => {
 .mitem .app-icon { transition: transform .14s var(--os-ease-out); }
 .label {
   max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: 12px; color: var(--os-text); text-shadow: 0 1px 6px rgba(0, 0, 0, .25);
+  font-size: 12px;
+  /* 固定白字不随主题：文字叠在壁纸上，深色主题变量在浅壁纸上不可读（用户拍板） */
+  color: #fff; text-shadow: 0 1px 4px rgba(0, 0, 0, .55), 0 0 8px rgba(0, 0, 0, .25);
 }
 </style>

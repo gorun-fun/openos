@@ -8,7 +8,7 @@ import { useApps } from '../../stores/apps'
 import { useSession } from '../../stores/session'
 import { fsApi, downloadFile, fetchRawBlob, type VFile } from '../../api/client'
 import { bus } from '../../bus/bus'
-import { OsInput, OsButton, OsEmpty, OsModal, MobileNavToggle, toast, useMenu, menuPos, icons, resolveFileDialog, type FileDialogRequest } from '../../ui'
+import { OsInput, OsButton, OsEmpty, OsModal, MobileNavToggle, OsTbOverflow, toast, useMenu, menuPos, icons, resolveFileDialog, type FileDialogRequest } from '../../ui'
 import { openPath, openWithApps, isImage, fileEmoji, kindOf, extOf, fmtSize, IMAGE_EXTS, parentOf } from '../openWith'
 import { renderMarkdown } from '../../lib/md'
 import { parseCSV } from '../sheets/engine'
@@ -733,31 +733,34 @@ watch(() => columnPaths.value.length, async () => {
       <div class="tb-title" :title="path">{{ selPaths.length > 1 ? `${curTitle}（已选 ${selPaths.length} 项）` : curTitle }}</div>
       <span class="grow" />
 
-      <div class="os-seg">
-        <button class="os-seg-btn" :class="{ on: view === 'icon' }" title="图标视图" @click="view = 'icon'">
-          <svg viewBox="0 0 16 16"><rect x="2" y="2" width="5" height="5" rx="1.2" fill="currentColor" /><rect x="9" y="2" width="5" height="5" rx="1.2" fill="currentColor" /><rect x="2" y="9" width="5" height="5" rx="1.2" fill="currentColor" /><rect x="9" y="9" width="5" height="5" rx="1.2" fill="currentColor" /></svg>
-        </button>
-        <button class="os-seg-btn" :class="{ on: view === 'list' }" title="列表视图" @click="view = 'list'">
-          <svg viewBox="0 0 16 16"><rect x="2" y="2.6" width="12" height="1.8" rx="0.9" fill="currentColor" /><rect x="2" y="7.1" width="12" height="1.8" rx="0.9" fill="currentColor" /><rect x="2" y="11.6" width="12" height="1.8" rx="0.9" fill="currentColor" /></svg>
-        </button>
-        <button class="os-seg-btn" :class="{ on: view === 'column' }" title="分栏视图" @click="view = 'column'">
-          <svg viewBox="0 0 16 16"><rect x="1.5" y="2" width="13" height="12" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.4" /><line x1="5.8" y1="2" x2="5.8" y2="14" stroke="currentColor" stroke-width="1.1" /><line x1="10.2" y1="2" x2="10.2" y2="14" stroke="currentColor" stroke-width="1.1" /></svg>
-        </button>
-        <button class="os-seg-btn" :class="{ on: view === 'gallery' }" title="画廊视图" @click="view = 'gallery'">
-          <svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.4" /><circle cx="5.2" cy="6" r="1.2" fill="currentColor" /><path d="M3.5 12 L7 8.5 L9.5 11 L11.5 9 L14 11.5" fill="none" stroke="currentColor" stroke-width="1.2" /></svg>
-        </button>
-      </div>
-
-      <!-- 排序方式 -->
-      <div class="tb-anchor">
-        <button class="os-tb-btn" data-os-menu-anchor title="排序方式" v-html="icons.sort" @click="sortMenu.toggle()" />
-        <div v-if="sortMenu.isOpen" class="os-menu os-menu-root sort-menu">
-          <div class="grp">排序方式</div>
-          <button :class="{ check: sortBy === 'name' }" @click="setSort('name'); sortMenu.close()">名称<span v-if="sortBy === 'name'" class="hint">{{ sortDir === 1 ? '↑' : '↓' }}</span></button>
-          <button :class="{ check: sortBy === 'size' }" @click="setSort('size'); sortMenu.close()">大小<span v-if="sortBy === 'size'" class="hint">{{ sortDir === 1 ? '↑' : '↓' }}</span></button>
-          <button :class="{ check: sortBy === 'time' }" @click="setSort('time'); sortMenu.close()">修改时间<span v-if="sortBy === 'time'" class="hint">{{ sortDir === 1 ? '↑' : '↓' }}</span></button>
+      <!-- 窄窗/手机自动折叠为「⋯」菜单（标题与搜索经 grow/弹性让位，排序钮自带菜单不受影响） -->
+      <OsTbOverflow>
+        <div class="os-seg">
+          <button class="os-seg-btn" :class="{ on: view === 'icon' }" title="图标视图" @click="view = 'icon'">
+            <svg viewBox="0 0 16 16"><rect x="2" y="2" width="5" height="5" rx="1.2" fill="currentColor" /><rect x="9" y="2" width="5" height="5" rx="1.2" fill="currentColor" /><rect x="2" y="9" width="5" height="5" rx="1.2" fill="currentColor" /><rect x="9" y="9" width="5" height="5" rx="1.2" fill="currentColor" /></svg>
+          </button>
+          <button class="os-seg-btn" :class="{ on: view === 'list' }" title="列表视图" @click="view = 'list'">
+            <svg viewBox="0 0 16 16"><rect x="2" y="2.6" width="12" height="1.8" rx="0.9" fill="currentColor" /><rect x="2" y="7.1" width="12" height="1.8" rx="0.9" fill="currentColor" /><rect x="2" y="11.6" width="12" height="1.8" rx="0.9" fill="currentColor" /></svg>
+          </button>
+          <button class="os-seg-btn" :class="{ on: view === 'column' }" title="分栏视图" @click="view = 'column'">
+            <svg viewBox="0 0 16 16"><rect x="1.5" y="2" width="13" height="12" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.4" /><line x1="5.8" y1="2" x2="5.8" y2="14" stroke="currentColor" stroke-width="1.1" /><line x1="10.2" y1="2" x2="10.2" y2="14" stroke="currentColor" stroke-width="1.1" /></svg>
+          </button>
+          <button class="os-seg-btn" :class="{ on: view === 'gallery' }" title="画廊视图" @click="view = 'gallery'">
+            <svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.4" /><circle cx="5.2" cy="6" r="1.2" fill="currentColor" /><path d="M3.5 12 L7 8.5 L9.5 11 L11.5 9 L14 11.5" fill="none" stroke="currentColor" stroke-width="1.2" /></svg>
+          </button>
         </div>
-      </div>
+
+        <!-- 排序方式 -->
+        <div class="tb-anchor">
+          <button class="os-tb-btn" data-os-menu-anchor title="排序方式" v-html="icons.sort" @click="sortMenu.toggle()" />
+          <div v-if="sortMenu.isOpen" class="os-menu os-menu-root sort-menu">
+            <div class="grp">排序方式</div>
+            <button :class="{ check: sortBy === 'name' }" @click="setSort('name'); sortMenu.close()">名称<span v-if="sortBy === 'name'" class="hint">{{ sortDir === 1 ? '↑' : '↓' }}</span></button>
+            <button :class="{ check: sortBy === 'size' }" @click="setSort('size'); sortMenu.close()">大小<span v-if="sortBy === 'size'" class="hint">{{ sortDir === 1 ? '↑' : '↓' }}</span></button>
+            <button :class="{ check: sortBy === 'time' }" @click="setSort('time'); sortMenu.close()">修改时间<span v-if="sortBy === 'time'" class="hint">{{ sortDir === 1 ? '↑' : '↓' }}</span></button>
+          </div>
+        </div>
+      </OsTbOverflow>
 
       <div class="search-wrap">
         <svg viewBox="0 0 16 16"><circle cx="6.8" cy="6.8" r="4.6" fill="none" stroke="currentColor" stroke-width="1.5" /><line x1="10.4" y1="10.4" x2="14.2" y2="14.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg>

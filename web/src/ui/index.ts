@@ -20,6 +20,7 @@ import OsToasts from './OsToasts.vue'
 import OsFilePicker from './OsFilePicker.vue'
 import AppIcon from './AppIcon.vue'
 import MobileNavToggle from './MobileNavToggle.vue'
+import OsTbOverflow from './OsTbOverflow.vue'
 
 export { toast, toastState } from './toast'
 export type { ToastType, ToastItem } from './toast'
@@ -37,5 +38,5 @@ export type { TableColumn } from './OsTable.vue'
 export {
   OsButton, OsInput, OsSelect, OsToggle, OsCheckbox, OsTextarea, OsPanel, OsModal,
   OsTabs, OsTable, OsLayout, OsToolbar, OsEmpty, OsForm, OsField, OsUpload, OsToasts, OsFilePicker, AppIcon,
-  MobileNavToggle,
+  MobileNavToggle, OsTbOverflow,
 }

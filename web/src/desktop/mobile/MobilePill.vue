@@ -133,6 +133,14 @@ function onBallClick() {
   if (mode.value === 'ball' && !lastDragMoved) actionsOpen.value = true
 }
 
+/** 胶囊「更多」里的显式入口：切换为悬浮球（右侧中部），免去用户自己发现拖动手势。 */
+function turnIntoBall() {
+  mode.value = 'ball'
+  ball.value = { x: window.innerWidth - ballR * 2 - EDGE, y: Math.round((vvTop.value + vvH.value) * 0.55) }
+  save()
+  actionsOpen.value = false
+}
+
 // ---- 弹层：多任务卡片 / 操作面板 ----
 const tasksOpen = ref(false)
 const actionsOpen = ref(false)
@@ -242,6 +250,9 @@ function onCardPointerDown(e: PointerEvent, id: string) {
         </button>
         <button class="abtn" @click="actionsOpen = false; tasksOpen = true">多任务</button>
         <button class="abtn" @click="actionsOpen = false; emit('home')">回桌面</button>
+        <button v-if="mode === 'pill'" class="abtn" @click="turnIntoBall">
+          变成悬浮球
+        </button>
         <button v-if="mode === 'ball'" class="abtn" @click="mode = 'pill'; save(); actionsOpen = false">
           恢复底部胶囊
         </button>

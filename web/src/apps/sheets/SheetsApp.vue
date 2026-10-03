@@ -7,7 +7,7 @@ import { useWindows } from '../../stores/windows'
 import { useSession } from '../../stores/session'
 import { fsApi } from '../../api/client'
 import { bus } from '../../bus/bus'
-import { fileDialog, icons, toast } from '../../ui'
+import { fileDialog, icons, toast, OsTbOverflow } from '../../ui'
 import { colName, cellName, evalCell, parseCSV } from './engine'
 
 const props = defineProps<{ win: WinState }>()
@@ -351,13 +351,16 @@ function exportFile() {
         @keydown.enter.prevent="commitEdit" @keydown.esc="editing = false" @blur="commitEdit" />
       <input v-else class="fx mono" :value="selRaw" placeholder="点击单元格或输入公式，如 =SUM(A1:A5)" readonly @pointerdown="startEdit(selRaw, false)" />
       <span class="os-tb-sep" />
-      <button class="os-tb-btn" title="撤销（⌘Z）" v-html="icons.undo" @click="undo" />
-      <button class="os-tb-btn" title="重做（⌘Y）" v-html="icons.redo" @click="redo" />
-      <span class="os-tb-sep" />
-      <button class="os-tb-btn" title="在上方插入行" v-html="icons.insRow" @click="insertRow" />
-      <button class="os-tb-btn" title="在左侧插入列" v-html="icons.insCol" @click="insertCol" />
-      <button class="os-tb-btn" title="删除选中行" v-html="icons.delRow" @click="deleteRow" />
-      <button class="os-tb-btn" title="删除选中列" v-html="icons.delCol" @click="deleteCol" />
+      <!-- 窄窗/手机自动折叠为「⋯」菜单（fx 公式栏经 minFree 保留最小可用宽度） -->
+      <OsTbOverflow :min-free="140">
+        <button class="os-tb-btn" title="撤销（⌘Z）" v-html="icons.undo" @click="undo" />
+        <button class="os-tb-btn" title="重做（⌘Y）" v-html="icons.redo" @click="redo" />
+        <span class="os-tb-sep" />
+        <button class="os-tb-btn" title="在上方插入行" v-html="icons.insRow" @click="insertRow" />
+        <button class="os-tb-btn" title="在左侧插入列" v-html="icons.insCol" @click="insertCol" />
+        <button class="os-tb-btn" title="删除选中行" v-html="icons.delRow" @click="deleteRow" />
+        <button class="os-tb-btn" title="删除选中列" v-html="icons.delCol" @click="deleteCol" />
+      </OsTbOverflow>
       <span class="grow" />
       <span class="meta">{{ saveHint || (dirty ? '未存储' : '') }}</span>
       <button class="os-tb-btn" title="导出到本机" v-html="icons.export" @click="exportFile" />

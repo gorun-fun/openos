@@ -7,7 +7,7 @@ import { useWindows } from '../../stores/windows'
 import { useSession } from '../../stores/session'
 import { fsApi } from '../../api/client'
 import { bus } from '../../bus/bus'
-import { fileDialog, icons, toast } from '../../ui'
+import { fileDialog, icons, toast, OsTbOverflow } from '../../ui'
 import { parseDeck, serializeDeck } from './format'
 
 const props = defineProps<{ win: WinState }>()
@@ -195,18 +195,21 @@ const fmtGroups: { cmd: string; val?: string; label: string; title: string; styl
       <button class="os-tb-btn" title="存储（⌘S）" v-html="icons.save" @click="save" />
       <button class="os-tb-btn" title="另存为…（⇧⌘S）" v-html="icons.saveAs" @click="openSaveDialog" />
       <span class="os-tb-sep" />
-      <button class="os-tb-btn" title="新建一页" v-html="icons.addPage" @click="addSlide" />
-      <button class="os-tb-btn" title="删除当前页" v-html="icons.delPage" @click="removeSlide" />
-      <button class="os-tb-btn" title="上移一页" v-html="icons.chevL" @click="move(-1)" />
-      <button class="os-tb-btn" title="下移一页" v-html="icons.chevR" @click="move(1)" />
-      <span class="os-tb-sep" />
-      <div class="os-seg">
-        <button class="os-seg-btn" :class="{ on: theme === 'light' }" title="浅色主题" v-html="icons.sun" @click="theme = 'light'; dirty = true; scheduleAutosave()" />
-        <button class="os-seg-btn" :class="{ on: theme === 'dark' }" title="深色主题" v-html="icons.moon" @click="theme = 'dark'; dirty = true; scheduleAutosave()" />
-      </div>
-      <span class="grow" />
-      <span class="meta">{{ saveHint || (dirty ? '未存储' : '') }}</span>
-      <button class="os-tb-btn" title="导出独立 HTML（双击即可放映）" v-html="icons.export" @click="exportFile" />
+      <!-- 窄窗/手机自动折叠为「⋯」菜单；播放按钮保留在外 -->
+      <OsTbOverflow>
+        <button class="os-tb-btn" title="新建一页" v-html="icons.addPage" @click="addSlide" />
+        <button class="os-tb-btn" title="删除当前页" v-html="icons.delPage" @click="removeSlide" />
+        <button class="os-tb-btn" title="上移一页" v-html="icons.chevL" @click="move(-1)" />
+        <button class="os-tb-btn" title="下移一页" v-html="icons.chevR" @click="move(1)" />
+        <span class="os-tb-sep" />
+        <div class="os-seg">
+          <button class="os-seg-btn" :class="{ on: theme === 'light' }" title="浅色主题" v-html="icons.sun" @click="theme = 'light'; dirty = true; scheduleAutosave()" />
+          <button class="os-seg-btn" :class="{ on: theme === 'dark' }" title="深色主题" v-html="icons.moon" @click="theme = 'dark'; dirty = true; scheduleAutosave()" />
+        </div>
+        <span class="os-tb-sep" />
+        <span class="meta">{{ saveHint || (dirty ? '未存储' : '') }}</span>
+        <button class="os-tb-btn" title="导出独立 HTML（双击即可放映）" v-html="icons.export" @click="exportFile" />
+      </OsTbOverflow>
       <button class="os-tb-btn primary" title="播放演示（方向键翻页，Esc 退出）" v-html="icons.play" @click="playing = true" />
     </div>
 

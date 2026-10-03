@@ -7,7 +7,7 @@ import { useWindows } from '../../stores/windows'
 import { useSession } from '../../stores/session'
 import { fsApi } from '../../api/client'
 import { bus } from '../../bus/bus'
-import { fileDialog, icons, toast } from '../../ui'
+import { fileDialog, icons, toast, OsTbOverflow } from '../../ui'
 import { renderMarkdown } from '../../lib/md'
 
 const props = defineProps<{ win: WinState }>()
@@ -151,15 +151,18 @@ function exportFile() {
         <span v-if="dirty" class="dot" />{{ fileName }}
       </div>
       <span class="grow" />
-      <div v-if="isMd" class="os-seg">
-        <button class="os-seg-btn" :class="{ on: mode === 'edit' }" title="编辑" v-html="icons.edit" @click="mode = 'edit'" />
-        <button class="os-seg-btn" :class="{ on: mode === 'split' }" title="分栏" v-html="icons.split" @click="mode = 'split'" />
-        <button class="os-seg-btn" :class="{ on: mode === 'preview' }" title="预览" v-html="icons.eye" @click="mode = 'preview'" />
-      </div>
-      <span class="os-tb-sep" />
-      <span class="meta">{{ saveHint || (dirty ? '未存储' : '') }}</span>
-      <span class="meta dim">{{ wordCount }} 字</span>
-      <button class="os-tb-btn" title="导出到本机" v-html="icons.export" @click="exportFile" />
+      <!-- 窄窗/手机自动折叠为「⋯」菜单（标题经 grow 弹性，无需 minFree） -->
+      <OsTbOverflow>
+        <div v-if="isMd" class="os-seg">
+          <button class="os-seg-btn" :class="{ on: mode === 'edit' }" title="编辑" v-html="icons.edit" @click="mode = 'edit'" />
+          <button class="os-seg-btn" :class="{ on: mode === 'split' }" title="分栏" v-html="icons.split" @click="mode = 'split'" />
+          <button class="os-seg-btn" :class="{ on: mode === 'preview' }" title="预览" v-html="icons.eye" @click="mode = 'preview'" />
+        </div>
+        <span class="os-tb-sep" />
+        <span class="meta">{{ saveHint || (dirty ? '未存储' : '') }}</span>
+        <span class="meta dim">{{ wordCount }} 字</span>
+        <button class="os-tb-btn" title="导出到本机" v-html="icons.export" @click="exportFile" />
+      </OsTbOverflow>
     </div>
 
     <div class="main" :class="'mode-' + mode">
