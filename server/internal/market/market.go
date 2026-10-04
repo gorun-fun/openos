@@ -6,6 +6,11 @@
 // 合并去重按 id **首见优先**：自定义源可遮蔽官方同 id 条目。任一源成功即以成功
 // 源合并结果为生效目录；全部失败沿用现行目录。更新货架只改远端 JSON，无需发版。
 //
+// 清单 apps 字段兼容两种形态：数组（官方目录）与 id→条目对象映射（宿主把 App
+// 发布货架与商店共用同一 catalog.json 时，如 grf-hotel 的 remoteApps 货架）——
+// 对象形态 id 取键名、按 id 排序输出（解析结果须稳定：刷新按序列化字节比较）；
+// 缺 name 与 type 的条目视为其他通道的记录，静默跳过不算坏清单。
+//
 // 目录收录的应用形态：
 //   - web   网页应用（config.kind=web）：iframe 直嵌允许被嵌的站点，渲染走 WebApp 容器
 //   - proxy 代理网页（config.kind=proxy）：目标站经服务端反代（webproxy），安装即放行其目标主机
@@ -31,6 +36,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -126,15 +132,23 @@ func Catalog() []Entry {
 // 个别条目无效只跳过并记日志，不拖垮整份清单。内置与远程共用同一套校验。
 func parseCatalog(raw []byte) ([]Entry, error) {
 	var doc struct {
-		Version int     `json:"version"`
-		Apps    []Entry `json:"apps"`
+		Version int             `json:"version"`
+		Apps    json.RawMessage `json:"apps"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return nil, err
 	}
+	list, err := parseApps(doc.Apps)
+	if err != nil {
+		return nil, err
+	}
 	seen := map[string]bool{}
-	out := make([]Entry, 0, len(doc.Apps))
-	for _, e := range doc.Apps {
+	out := make([]Entry, 0, len(list))
+	for _, e := range list {
+		// 缺 name 与 type = 其他发布通道的记录（如 remoteApps 货架条目），不是坏条目
+		if e.Name == "" && e.Type == "" {
+			continue
+		}
 		if err := e.validate(); err != nil {
 			log.Printf("market: 目录条目 %q 无效已跳过: %v", e.ID, err)
 			continue
@@ -144,6 +158,36 @@ func parseCatalog(raw []byte) ([]Entry, error) {
 			continue
 		}
 		seen[e.ID] = true
+		out = append(out, e)
+	}
+	return out, nil
+}
+
+// parseApps 解析 apps 字段的两种形态：Entry 数组（官方目录）与 id→条目对象映射
+// （宿主货架与商店共用同一 catalog.json 时；此时条目内可省 id，键名即 id）。
+// 对象形态按 id 排序输出——解析结果必须稳定，RefreshNow 否则会在内容不变时
+// 反复交换生效目录。apps 缺失视为空清单（与旧解析行为一致），既非数组也非对象则报错。
+func parseApps(raw json.RawMessage) ([]Entry, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var arr []Entry
+	if json.Unmarshal(raw, &arr) == nil {
+		return arr, nil
+	}
+	var m map[string]Entry
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(m))
+	for id := range m {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]Entry, 0, len(ids))
+	for _, id := range ids {
+		e := m[id]
+		e.ID = id
 		out = append(out, e)
 	}
 	return out, nil

@@ -1,6 +1,7 @@
 package market
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -193,6 +194,42 @@ func TestParseCatalogRemoteDoc(t *testing.T) {
 	}
 	if len(es) != 1 || es[0].ID != "good" {
 		t.Errorf("应只保留 1 个去重后的好条目: %+v", es)
+	}
+}
+
+// TestParseCatalogObjectShape apps 对象映射形态（宿主把发布货架与商店共用同一
+// catalog.json，如 grf-hotel remoteApps 货架）：id 取键名、按 id 稳定排序、
+// 跨通道记录（缺 name 与 type）静默跳过；apps 既非数组也非对象仍报错。
+func TestParseCatalogObjectShape(t *testing.T) {
+	doc := []byte(`{"version":1,"updatedAt":"2026-10-04T00:33:55.685Z","apps":{
+		"rooms":{"version":"v0.0.23","entry":"files/rooms/v0.0.23/rooms.js","minHostVersion":"v0.0.23"},
+		"wiki":{"name":"维基百科","type":"web","config":{"kind":"web","url":"https://www.wikipedia.org/"},"version":"1.0.0"},
+		"amap":{"name":"高德地图","type":"web","config":{"kind":"web","url":"https://www.amap.com/"},"version":"1.0.0"}
+	}}`)
+	es, err := parseCatalog(doc)
+	if err != nil {
+		t.Fatalf("parseCatalog: %v", err)
+	}
+	if len(es) != 2 || es[0].ID != "amap" || es[1].ID != "wiki" {
+		t.Fatalf("应跳过跨通道记录并按 id 排序: %+v", es)
+	}
+	if es[1].Name != "维基百科" {
+		t.Errorf("条目字段应完整解析: %+v", es[1])
+	}
+	// 解析结果稳定（内容不变时 RefreshNow 不应反复交换生效目录）
+	again, _ := parseCatalog(doc)
+	ab, _ := json.Marshal(es)
+	bb, _ := json.Marshal(again)
+	if string(ab) != string(bb) {
+		t.Error("重复解析结果应稳定")
+	}
+	// apps 非数组/对象 → 整份清单非法
+	if _, err := parseCatalog([]byte(`{"version":1,"apps":"nope"}`)); err == nil {
+		t.Error("apps 非数组/对象应报错")
+	}
+	// 缺 apps = 空清单不报错（与数组形态行为一致）
+	if es, err := parseCatalog([]byte(`{"version":1}`)); err != nil || len(es) != 0 {
+		t.Errorf("缺 apps 应为空清单: %v %+v", err, es)
 	}
 }
 
