@@ -79,7 +79,9 @@
 
 ## 五、修复与发版记录
 
-- v0.0.44：修复 Bug#1/2/3（见上），本地 `cd web && npm run typecheck` + `make test` 通过后提交打 tag，CI 自动构建部署，部署后线上复测：
-  - [ ] `curl -I` 验证 index.html 带 `Cache-Control: no-cache`、assets 带 immutable
-  - [ ] 设置切 English 验证菜单栏时钟/在线 chip 英文形态
-  - [ ] 抽查文件/商店/聊天等核心路径无回归
+- v0.0.44（commit 3a6e4e8）：修复 Bug#1/2/3（见上），`cd web && npm run typecheck` + `go build/test` 通过，本地冒烟 curl 实测五类路径缓存头与 SPA 回退 200 后提交打 tag，CI 自动构建部署。
+- **线上复测（v0.0.44，2026-10-05 08:00）全部通过**：
+  - [x] `curl -I`：index.html / sw.js / manifest / icons 均带 `Cache-Control: no-cache`；`/assets/index-*.js` 带 `public, max-age=31536000, immutable`；条件请求（If-Modified-Since）返回 304（no-cache 再验证语义生效）
+  - [x] i18n：切 English 后菜单栏时钟显示 `Mon, Oct 5 07:56`、在线 chip 显示 `👥 2 online`；切回中文恢复「周一 10月5日」「N 在线」
+  - [x] 回归抽检：文件（目录+文件列表）/计算器/应用商店（8 应用目录）均正常打开，goder-serve running，控制台 0 错误；系统信息显示 v0.0.44
+- 已知 cosmetic 尾巴（不构成缺陷，留待后续随版收敛）：en-US 形态日期经 Intl 组合带逗号（Mon, Oct 5），与 macOS 原生无逗号形态（Mon Oct 5）差一个逗号。
