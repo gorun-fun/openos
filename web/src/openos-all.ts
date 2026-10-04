@@ -12,6 +12,7 @@
 export * from './framework'
 export * from './ui'
 export * from './api/client'
+export * from './host'
 export * from './stores/windows'
 export * from './stores/calendar'
 export * from './stores/session'

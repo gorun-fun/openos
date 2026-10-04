@@ -30,6 +30,7 @@ export const OPENOS_BARE_IDS = [
   '@openos/framework',
   '@openos/ui',
   '@openos/api/client',
+  '@openos/host',
   '@openos/stores/windows',
   '@openos/stores/calendar',
   '@openos/stores/session',
