@@ -28,6 +28,7 @@ import { api, fsApi, getToken, fetchWsTicket, type SessionUser } from '../api/cl
 import { notify } from '../stores/notifications'
 import { useCalendar, todayStr, REMIND_OPTIONS, type CalMark, type RemindOffset } from '../stores/calendar'
 import { registerDialog, unregisterDialog, openDialog, dialogRegistry, type DialogDef } from '../ui/dialogService'
+import { registerAgentTool, unregisterAgentTool, agentTools, type AgentToolDef } from '../desktop/agentTools'
 import { launch, resolveLaunch, launchOf } from '../ui/launch'
 import { openPath } from '../apps/openWith'
 
@@ -151,6 +152,16 @@ export const OpenOS = {
   async authTicket(): Promise<string> {
     return fetchWsTicket()
   },
+  /** 向 goder AI 注册自定义桌面工具（P6 扩展点）：AI 经 os_app_tools 可见、
+   *  os_app_tool({tool, args}) 调用（run 在桌面壳执行）。返回完整工具名。
+   *  const key = OpenOS.registerAgentTool({ appId:'rooms', name:'vacant',
+   *    description:'查询今日空房', params:{type:'object',properties:{...}},
+   *    run: (args) => hotelApi.get('/rooms/vacant', {params:args}) }) */
+  registerAgentTool,
+  /** 注销自定义 AI 工具（完整名或 {appId,name}）。 */
+  unregisterAgentTool,
+  /** 当前在线的自定义 AI 工具表（诊断用）。 */
+  agentTools,
   /** 基础 UI 组件库。 */
   ui,
   /** API 客户端（自动携带登录态）。 */

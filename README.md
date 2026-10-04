@@ -230,22 +230,32 @@ gh server（每用户一个，goder-serve 子进程）
   └─ 自动发现 grf-home/plugins/openos（wrapper 脚本，OpenOS 落盘）
        └─ exec openos-server mcp-shim <endpoint> <token> <user>   ← stdio MCP 插件
             ↕ HTTP JSON-RPC（127.0.0.1:7712/mcp，Bearer 令牌 + X-OS-User）
-openos-server 进程内 osmcp 包（20 个 os_* 工具，gh 侧全名 mcp__openos__os_*）
+openos-server 进程内 osmcp 包（31 个 os_* 工具，gh 侧全名 mcp__openos__os_*）
   ├─ 服务端直答：应用列表 / 用户设置 / VFS 文件（复用 vfs 权限与配额）/ 总线发布
+  │              / 文件分享 / 商店安装（权限点门控）/ 用户目录（权限点门控）
   └─ 前端桥：PublishTo(user,"sys:agent") ↓ 浏览器 agentBridge 执行
               bus.remote("agent:resp") ↑ 回传结果（15s 超时兜底）
+              桌面/便签/日历/Dock + 宿主自定义工具（见「扩展点」）
 ```
 
 **工具清单**（gh 把描述拼进系统提示词，AI 自主选用）：
 
 | 类别 | 工具 |
 |---|---|
-| 系统 | `os_info`（版本/用户/goder 状态/在线用户）、`os_apps_list`（可用应用） |
+| 系统 | `os_info`（版本/用户/goder 状态/在线用户）、`os_apps_list`（可用应用）、`os_users_list`（全部用户目录，需 `users.manage` 权限） |
 | 窗口/桌面 | `os_desktop_state`（窗口列表+外观实时状态）、`os_window_open/close/do`（focus/minimize/最大化/半屏吸附/移动尺寸/改标题）、`os_app_open_file`（按扩展名选应用打开）、`os_desktop_do`（壁纸/深色/Dock 自动隐藏）、`os_notify`（系统通知，入通知中心可回看） |
-| 数据 | `os_notes_do`（便签增删改查）、`os_settings_get/put`、`os_fs_list/read/write/mkdir/delete/search/usage`（VFS，限定 `/home/<用户>`、≤8MB、配额 100MB，写入广播 `fs:changed` 自动刷新文件应用） |
-| 通用通道 | `os_bus_publish`（向自己桌面发布任意总线主题，可驱动声明式应用的 `dataSource.topic`） |
+| 数据 | `os_notes_do`（便签增删改查）、`os_calendar_do`（日程 list/add/remove）、`os_dock_do`（Dock 固定/移除/重排）、`os_settings_get/put`、`os_fs_list/read/write/mkdir/delete/search/usage`（VFS，限定 `/home/<用户>`、≤8MB、配额 100MB，写入广播 `fs:changed` 自动刷新文件应用） |
+| 分享 | `os_share_list/create/revoke`（跨用户文件分享链接：默认 7 天上限 30 天，owner 校验/撤销/审计与 REST 完全一致） |
+| 商店 | `os_market_list/install/uninstall`（目录/安装/卸载，需 `market.manage` 权限——首个非本人维度的工具，按功能权限点门控） |
+| 通用通道 | `os_bus_publish`（向自己桌面发布任意总线主题，可驱动声明式应用的 `dataSource.topic`）、`os_app_tools`/`os_app_tool`（宿主自定义工具的发现与执行，见下） |
 
-**安全边界**：MCP 端点仅监听回环地址 + Bearer 令牌（`<data>/goder/osmcp.json`，0600 持久化）；wrapper 0700；工具执行前校验用户存在且未禁用；**所有操作只作用于发起用户本人**（不提供跨用户与管理员操作）；写类工具入审计日志（`goder.tool`）。
+**宿主自定义工具扩展点（P6 2026-10）**：宿主与业务应用可把自己的功能暴露给 AI——
+
+- 静态声明：`createOpenOS({ agentTools: [{ appId: 'rooms', name: 'vacant', description: '查今日空房', params: <JSON Schema>, run: (args) => … }] })`；
+- 运行期注册：`OpenOS.registerAgentTool(def)` / `unregisterAgentTool`（应用挂载注册、卸载反注册）；
+- 命名空间 `app_<appId>_<name>` 防跨应用冲突；`tools/list` 会把在线工具表动态合并进清单（2s 短超时尽力而为），`os_app_tools` 随时可查；执行走 `os_app_tool({tool, args})`——run 在桌面壳执行（需要窗口的操作由工具自行 `OpenOS.open`），返回值回传给 AI。
+
+**安全边界**：MCP 端点仅监听回环地址 + Bearer 令牌（`<data>/goder/osmcp.json`，0600 持久化，**按用户分发、令牌↔X-OS-User 成对校验**）；wrapper 0700；工具执行前校验用户存在且未禁用；**工具只作用于发起用户本人**（`os_users_list`/`os_market_*` 为只读/管理维度，按功能权限点门控——admin 恒持，细分授权经角色权限矩阵下发）；写类工具入审计日志（`goder.tool`）。
 
 **生效时机与自愈**：新用户首次访问 `/goder-api` 时落 wrapper（先于该用户 gh 懒启动，gh 启动即发现插件）；服务重启时扫描存量用户目录自动重装（应对二进制路径变化，dev 的 `go run` 亦适用）。**已在运行的存量 gh server 不热加载插件**——部署本功能后重启 openos-server 即可（容器部署天然干净）；宿主 `~/.grf` 种子若预置了 `plugins` 键（显式列表模式），插件以命令项 upsert 进入，同样需 gh 重启。
 
@@ -823,7 +833,7 @@ openos/
 │   │   ├── vfs/             # 虚拟 FS（文本+二进制+配额）+ 虚拟终端
 │   │   ├── ai/              # 在线配置热更、SSE 流式、历史、连通测试
 │   │   ├── goder/            # goder-serve 子进程托管 + /goder-api 身份反代
-│   │   ├── osmcp/            # goder 桌面控制 MCP 插件（openos，20 个 os_* 工具）
+│   │   ├── osmcp/            # goder 桌面控制 MCP 插件（openos，31 个 os_* 工具 + 宿主扩展点）
 │   │   └── webproxy/         # 应用代理（网页应用 kind=proxy 的服务端反代 + 地址重写）
 │   └── *_test.go            # 单元测试（auth/bus/vfs/osmcp/webproxy）
 ├── web/                     # Vite 前端

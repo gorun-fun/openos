@@ -12,8 +12,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"time"
 
 	"openos/server/internal/auth"
+	"openos/server/internal/store"
 )
 
 // protocolVersion 与 gh mcp 客户端声明一致（knownVersions 全集内的最新版；
@@ -42,7 +44,14 @@ type ToolCall struct {
 	User        string
 	Role        string
 	DisplayName string
-	Args        json.RawMessage
+	// Perms 功能级权限点（用户级覆盖 > 角色推导；admin 由 Can 语义直通）
+	Perms []string
+	Args  json.RawMessage
+}
+
+// Can 功能级权限判定（与 REST auth.RequirePerm 同语义：admin 直通、* 通配）。
+func (c *ToolCall) Can(perm string) bool {
+	return store.HasPermJudge(c.Role, c.Perms, perm)
 }
 
 // Server MCP 服务端：工具注册表 + JSON-RPC 分派。
@@ -144,6 +153,33 @@ func (s *Server) serveMCP(w http.ResponseWriter, r *http.Request) {
 				"annotations": map[string]any{"readOnlyHint": t.ReadOnly},
 			})
 		}
+		// P6：合并桌面在线的宿主/应用自定义工具（短超时尽力而为，桌面离线静默跳过）
+		if user := strings.TrimSpace(r.Header.Get("X-OS-User")); user != "" {
+			if raw, err := s.bridge.callWait(user, "tools_list", nil, 2*time.Second); err == nil {
+				var res struct {
+					Tools []struct {
+						Name        string         `json:"name"`
+						AppID       string         `json:"appId"`
+						Description string         `json:"description"`
+						Params      map[string]any `json:"params"`
+					} `json:"tools"`
+				}
+				if json.Unmarshal(raw, &res) == nil {
+					for _, t := range res.Tools {
+						schema := t.Params
+						if schema == nil {
+							schema = map[string]any{"type": "object", "properties": map[string]any{}}
+						}
+						tools = append(tools, map[string]any{
+							"name":        t.Name,
+							"description": "[宿主应用 " + t.AppID + "] " + t.Description,
+							"inputSchema": schema,
+							"annotations": map[string]any{"readOnlyHint": false},
+						})
+					}
+				}
+			}
+		}
 		out.Result = map[string]any{"tools": tools}
 	case "tools/call":
 		var p struct {
@@ -189,7 +225,8 @@ func (s *Server) newCall(r *http.Request, args json.RawMessage) (*ToolCall, erro
 	if info.Disabled {
 		return nil, fmt.Errorf("用户已禁用：%s", user)
 	}
-	return &ToolCall{User: user, Role: info.Role, DisplayName: info.DisplayName, Args: args}, nil
+	perms, _ := s.deps.DB.UserPerms(user)
+	return &ToolCall{User: user, Role: info.Role, DisplayName: info.DisplayName, Perms: perms, Args: args}, nil
 }
 
 // negotiateVersion 回显客户端请求的已知版本（未知/缺省回落到当前版）。

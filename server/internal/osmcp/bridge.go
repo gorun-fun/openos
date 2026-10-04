@@ -51,6 +51,11 @@ func newBridge(hub *bus.Hub) *bridge {
 
 // call 向某用户的桌面发起动作并等待应答。返回前端回传的 data 原文。
 func (b *bridge) call(user, action string, args map[string]any) (json.RawMessage, error) {
+	return b.callWait(user, action, args, b.timeout)
+}
+
+// callWait 指定等待上限的 call（tools/list 合并在线工具用 2s 短超时尽力而为）。
+func (b *bridge) callWait(user, action string, args map[string]any, timeout time.Duration) (json.RawMessage, error) {
 	if b.hub == nil {
 		return nil, errors.New("总线未接入")
 	}
@@ -79,7 +84,7 @@ func (b *bridge) call(user, action string, args map[string]any) (json.RawMessage
 			return nil, errors.New(res.Error)
 		}
 		return res.Data, nil
-	case <-time.After(b.timeout):
+	case <-time.After(timeout):
 		return nil, errors.New("桌面未应答（浏览器可能离线或正在重连），请稍后重试")
 	}
 }

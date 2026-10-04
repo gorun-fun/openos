@@ -106,7 +106,7 @@ func TestToolsList(t *testing.T) {
 	if err := json.Unmarshal(out.Result, &res); err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Tools) != 20 {
+	if len(res.Tools) != 31 { // 20 内置 + P6 11（share×3/market×3/users/app_tools/app_tool/calendar/dock）
 		t.Fatalf("应有 20 个工具，got %d", len(res.Tools))
 	}
 	want := map[string]bool{"os_info": false, "os_apps_list": false, "os_fs_write": false,

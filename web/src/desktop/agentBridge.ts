@@ -14,7 +14,10 @@ import { useWindows } from '../stores/windows'
 import { useDesktop } from '../stores/desktop'
 import { useNotes } from '../stores/notes'
 import { useNotifications } from '../stores/notifications'
+import { useCalendar } from '../stores/calendar'
+import { useDock } from '../stores/dock'
 import { openPath } from '../apps/openWith'
+import { agentTools, runAgentTool } from './agentTools'
 import type { Note } from '../stores/notes'
 
 interface AgentReq {
@@ -153,6 +156,71 @@ const ACTIONS: Record<string, Action> = {
       body: String(text),
     })
     return { ok: true }
+  },
+
+  /** 在线自定义工具表（宿主/应用经 registerAgentTool 注册；osmcp tools/list 合并展示）。 */
+  tools_list() {
+    return { tools: agentTools() }
+  },
+
+  /** 执行自定义工具（os_app_tool 下发；run 回调由桌面壳执行，窗口无需在场）。 */
+  async tool_call({ tool, args }) {
+    if (!tool) throw new Error('缺少 tool')
+    const data = await runAgentTool(String(tool), args || {})
+    return { tool: String(tool), result: data ?? null }
+  },
+
+  /** 日历日程（数据权威在前端 calendar store：user_settings calendar.events）。 */
+  calendar_do({ action, id, title, date, time, remind }) {
+    const cal = useCalendar()
+    switch (action) {
+      case 'list': {
+        const today = new Date()
+        const pad = (n: number) => String(n).padStart(2, '0')
+        const from = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`
+        return cal.events
+          .filter((e) => !date || e.date === date)
+          .sort((a, b) => (a.date + (a.time || '~')).localeCompare(b.date + (b.time || '~')))
+          .slice(0, date ? 100 : 30)
+          .map((e) => ({ id: e.id, title: e.title, date: e.date, time: e.time, remind: e.remind, upcoming: e.date >= from }))
+      }
+      case 'add': {
+        if (!title || !date) throw new Error('缺少 title/date（date 形如 2026-10-05）')
+        const e = cal.addEvent({ title: String(title), date: String(date), time: time ? String(time) : undefined, remind })
+        return { id: e.id, title: e.title, date: e.date, time: e.time }
+      }
+      case 'remove':
+        if (!id) throw new Error('缺少 id')
+        cal.removeEvent(String(id))
+        return { ok: true }
+      default: throw new Error(`未知日历动作：${action}（list/add/remove）`)
+    }
+  },
+
+  /** Dock 定制（pinned 持久化 user_settings dock 键）。 */
+  dock_do({ action, appId, appIds }) {
+    const dock = useDock()
+    switch (action) {
+      case 'list': return { pinned: dock.pinned, effective: dock.effective }
+      case 'pin': {
+        if (!appId) throw new Error('缺少 appId')
+        dock.pinAt(String(appId), dock.effective.length)
+        return { pinned: dock.pinned }
+      }
+      case 'unpin': {
+        if (!appId) throw new Error('缺少 appId')
+        dock.unpin(String(appId))
+        return { pinned: dock.pinned }
+      }
+      case 'reorder': {
+        if (!Array.isArray(appIds) || !appIds.length) throw new Error('缺少 appIds 数组')
+        const last = String(appIds[appIds.length - 1])
+        dock.pinAt(last, 0)
+        for (let i = 1; i < appIds.length; i++) dock.pinAt(String(appIds[i]), i)
+        return { pinned: dock.pinned }
+      }
+      default: throw new Error(`未知 Dock 动作：${action}（list/pin/unpin/reorder）`)
+    }
   },
 }
 

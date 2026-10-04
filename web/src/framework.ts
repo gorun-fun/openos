@@ -37,6 +37,7 @@ import { registerWidget, type WidgetDef } from './desktop/widgetRegistry'
 import { installMenuGuard } from './ui/menu'
 import { installKeys } from './ui/keys'
 import { installPermDirective } from './ui/perms'
+import { installAgentTools, type AgentToolDef } from './desktop/agentTools'
 import { installTooltip } from './ui/tooltip'
 import { installAppNotifiers } from './desktop/appNotifier'
 import { registerDialog, type DialogDef } from './ui/dialogService'
@@ -105,6 +106,12 @@ export interface CreateOpenOSOptions {
    * 浮层与桌面壳共享同一应用上下文（总线/组件库/主题）。
    */
   overlay?: Component | Component[]
+  /**
+   * 向 goder AI 声明宿主自定义桌面工具（P6 扩展点）：注册后 AI 经 os_app_tools
+   * 可见、os_app_tool 调用（工具名自动加 app_<appId>_ 前缀）。应用运行期也可经
+   * OpenOS.registerAgentTool 动态注册。
+   */
+  agentTools?: AgentToolDef[]
 }
 
 /** 应用主题强调色：设置 --os-accent 及其派生令牌（选中/焦点/渐变），立即生效。 */
@@ -159,6 +166,8 @@ export function createOpenOS(opts: CreateOpenOSOptions = {}): VueApp | null {
   if (opts.wallpapers) shell.wallpapers = opts.wallpapers
   if (opts.appMenus) shell.appMenus = opts.appMenus
   shell.overlay = opts.overlay || null
+  // 宿主静态声明的 AI 桌面工具（goder 扩展点，P6）
+  installAgentTools(opts.agentTools)
   if (opts.widgets) {
     for (const [type, def] of Object.entries(opts.widgets)) {
       registerWidget({ type, ...def })

@@ -12,9 +12,12 @@ package osmcp
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/url"
 	"strconv"
 	"time"
+
+	"openos/server/internal/market"
 )
 
 // registerTools 注册全部工具（newServer 构造时调用）。
@@ -22,6 +25,243 @@ func (s *Server) registerTools() {
 	s.registerInfoTools()
 	s.registerFSTools()
 	s.registerBridgeTools()
+	s.registerP6Tools()
+}
+
+// ---- P6 扩展（2026-10）：文件分享 / 商店 / 用户目录 / 宿主自定义工具 ----
+
+// registerP6Tools 服务端直答与桥工具的 P6 增量。
+func (s *Server) registerP6Tools() {
+	// 文件分享链接（进程内复用 vfs share handler：owner 校验/过期/审计全保留）
+	s.add(Tool{
+		Name:        "os_share_list",
+		ReadOnly:    true,
+		Description: "列出当前用户全部有效期内的文件分享链接（id/路径/文件名/大小/创建与过期时间）。",
+		Schema:      obj(nil),
+		Handler: func(c *ToolCall) ([]Content, bool) {
+			return s.fsShareCall(c, "GET", "/api/fs/shares", nil)
+		},
+	})
+	s.add(Tool{
+		Name:        "os_share_create",
+		Description: "为当前用户的某个 VFS 文件创建跨用户分享链接（默认 7 天、上限 30 天）。返回分享 URL 与过期时间。",
+		Schema: obj(map[string]any{
+			"path": pstr("VFS 内的文件路径，如 /home/用户/文档/报告.pdf"),
+			"days": map[string]any{"type": "integer", "description": "有效天数（默认 7，上限 30）"},
+		}, "path"),
+		Handler: func(c *ToolCall) ([]Content, bool) {
+			var a struct {
+				Path string `json:"path"`
+				Days int    `json:"days"`
+			}
+			if err := decodeArgs(c, &a); err != nil || a.Path == "" {
+				return textErr("参数错误：需要 path")
+			}
+			body := map[string]any{"path": a.Path}
+			if a.Days > 0 {
+				body["days"] = a.Days
+			}
+			return s.fsShareCall(c, "POST", "/api/fs/shares", body)
+		},
+	})
+	s.add(Tool{
+		Name:        "os_share_revoke",
+		Description: "撤销自己的一个分享链接（id 从 os_share_list 获取；撤销后链接即刻失效）。",
+		Schema:      obj(map[string]any{"id": pstr("分享 id")}, "id"),
+		Handler: func(c *ToolCall) ([]Content, bool) {
+			var a struct {
+				ID string `json:"id"`
+			}
+			if err := decodeArgs(c, &a); err != nil || a.ID == "" {
+				return textErr("参数错误：需要 id")
+			}
+			return s.fsShareCall(c, "DELETE", "/api/fs/shares/"+url.PathEscape(a.ID), nil)
+		},
+	})
+
+	// 应用商店（首个非本人维度的工具：按功能权限点门控，默认仅 admin）
+	s.add(Tool{
+		Name:        "os_market_list",
+		ReadOnly:    true,
+		Description: "列出应用商店当前目录（可安装应用清单：id/名称/形态/版本/说明）。需要 market.manage 权限。",
+		Schema:      obj(nil),
+		Handler: func(c *ToolCall) ([]Content, bool) {
+			if !c.Can("market.manage") {
+				return textErr("需要 market.manage 权限")
+			}
+			return textJSON(market.List(s.deps.DB))
+		},
+	})
+	s.add(Tool{
+		Name:        "os_market_install",
+		Description: "从商店目录安装一个应用到指定角色（web/proxy/schema/bundle 形态）。需要 market.manage 权限；roles 缺省为 [admin]。",
+		Schema: obj(map[string]any{
+			"id":    pstr("商店目录条目 id（os_market_list 获取）"),
+			"roles": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "授权角色列表（缺省 [admin]）"},
+		}, "id"),
+		Handler: func(c *ToolCall) ([]Content, bool) {
+			if !c.Can("market.manage") {
+				return textErr("需要 market.manage 权限")
+			}
+			var a struct {
+				ID    string   `json:"id"`
+				Roles []string `json:"roles"`
+			}
+			if err := decodeArgs(c, &a); err != nil || a.ID == "" {
+				return textErr("参数错误：需要 id")
+			}
+			if len(a.Roles) == 0 {
+				a.Roles = []string{"admin"}
+			}
+			e, err := market.Install(s.deps.DB, a.ID, a.Roles)
+			if err != nil {
+				return textErr("安装失败：%v", err)
+			}
+			return textJSON(map[string]any{"installed": e.ID, "version": e.Version, "roles": a.Roles})
+		},
+	})
+	s.add(Tool{
+		Name:        "os_market_uninstall",
+		Description: "卸载一个商店安装的应用（内置/宿主锁定应用会被拒绝）。需要 market.manage 权限。",
+		Schema:      obj(map[string]any{"id": pstr("应用 id")}, "id"),
+		Handler: func(c *ToolCall) ([]Content, bool) {
+			if !c.Can("market.manage") {
+				return textErr("需要 market.manage 权限")
+			}
+			var a struct {
+				ID string `json:"id"`
+			}
+			if err := decodeArgs(c, &a); err != nil || a.ID == "" {
+				return textErr("参数错误：需要 id")
+			}
+			if err := s.deps.DB.DeleteApp(a.ID); err != nil {
+				return textErr("卸载失败：%v（内置/锁定应用不可卸载）", err)
+			}
+			market.RemoveBundles(a.ID)
+			return textJSON(map[string]any{"removed": a.ID})
+		},
+	})
+
+	// 用户目录（权限点门控：AI 查身份/角色的只读窗口，管理操作仍走设置页）
+	s.add(Tool{
+		Name:        "os_users_list",
+		ReadOnly:    true,
+		Description: "列出全部用户（用户名/角色/显示名/禁用态/创建时间）。需要 users.manage 权限（admin 恒有）。",
+		Schema:      obj(nil),
+		Handler: func(c *ToolCall) ([]Content, bool) {
+			if !c.Can("users.manage") {
+				return textErr("需要 users.manage 权限")
+			}
+			rows, err := s.deps.DB.Query(`SELECT username, role, display_name, disabled, created_at FROM users ORDER BY id`)
+			if err != nil {
+				return textErr("读取用户失败：%v", err)
+			}
+			defer rows.Close()
+			users := []map[string]any{}
+			for rows.Next() {
+				var name, role, dn, created string
+				var disabled int
+				if err := rows.Scan(&name, &role, &dn, &disabled, &created); err != nil {
+					continue
+				}
+				users = append(users, map[string]any{"username": name, "role": role, "displayName": dn, "disabled": disabled == 1, "createdAt": created})
+			}
+			return textJSON(users)
+		},
+	})
+
+	// 宿主/应用自定义工具（P6 扩展点：前端注册表经桥读取与执行）
+	s.add(Tool{
+		Name:        "os_app_tools",
+		ReadOnly:    true,
+		Description: "列出当前桌面上注册的宿主/应用自定义 AI 工具（app_<appId>_<name> 命名空间，含各工具的参数 Schema）。宿主业务功能（如查空房、查订单）经此暴露；无则返回空表。",
+		Schema:      obj(nil),
+		Handler: func(c *ToolCall) ([]Content, bool) {
+			return s.bridgeCall(c, "tools_list", nil)
+		},
+	})
+	s.add(Tool{
+		Name:        "os_app_tool",
+		Description: "执行一个宿主/应用自定义工具（os_app_tools 查看可用清单）。工具在当前用户桌面执行；需要窗口的操作由工具自行打开。",
+		Schema: obj(map[string]any{
+			"tool": pstr("完整工具名（app_<appId>_<name>）"),
+			"args": map[string]any{"type": "object", "description": "工具参数（按其 Schema 提供）"},
+		}, "tool"),
+		Handler: func(c *ToolCall) ([]Content, bool) {
+			var a struct {
+				Tool string          `json:"tool"`
+				Args json.RawMessage `json:"args"`
+			}
+			if err := decodeArgs(c, &a); err != nil || a.Tool == "" {
+				return textErr("参数错误：需要 tool")
+			}
+			var args any
+			if len(a.Args) > 0 {
+				_ = json.Unmarshal(a.Args, &args)
+			}
+			if args == nil {
+				args = map[string]any{}
+			}
+			return s.bridgeCall(c, "tool_call", map[string]any{"tool": a.Tool, "args": args})
+		},
+	})
+
+	// 日历与 Dock（桥：数据权威在前端 store）
+	s.add(Tool{
+		Name:        "os_calendar_do",
+		Description: "日历日程操作：list（列日程，可按 date=YYYY-MM-DD 过滤）/ add（title+date 必填，time=HH:MM 可选）/ remove（id）。",
+		Schema: obj(map[string]any{
+			"action": pstr("list | add | remove"),
+			"id":     pstr("日程 id（remove 用）"),
+			"title":  pstr("日程标题（add 用）"),
+			"date":   pstr("日期 YYYY-MM-DD（add 必填 / list 可选过滤）"),
+			"time":   pstr("时间 HH:MM（可选）"),
+		}, "action"),
+		Handler: func(c *ToolCall) ([]Content, bool) {
+			return s.bridgePass(c, "calendar_do")
+		},
+	})
+	s.add(Tool{
+		Name:        "os_dock_do",
+		Description: "Dock 定制：list（当前固定列表）/ pin（appId 固定到末尾）/ unpin（appId 移除）/ reorder（appIds 数组全量重排）。",
+		Schema: obj(map[string]any{
+			"action": pstr("list | pin | unpin | reorder"),
+			"appId":  pstr("应用 id（pin/unpin 用）"),
+			"appIds": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "应用 id 全量有序数组（reorder 用）"},
+		}, "action"),
+		Handler: func(c *ToolCall) ([]Content, bool) {
+			return s.bridgePass(c, "dock_do")
+		},
+	})
+}
+
+// fsShareCall 进程内调用 vfs 分享 handler（owner/过期/审计语义与 REST 完全一致）。
+func (s *Server) fsShareCall(c *ToolCall, method, urlPath string, body any) ([]Content, bool) {
+	if s.deps.FS == nil || s.deps.FS.Disabled() {
+		return textErr("文件系统未启用（OPENOS_VFS=off）")
+	}
+	var h http.HandlerFunc
+	switch method {
+	case "GET":
+		h = s.deps.FS.ListShares
+	case "POST":
+		h = s.deps.FS.CreateShare
+	case "DELETE":
+		h = s.deps.FS.RevokeShare
+	default:
+		return textErr("不支持的方法")
+	}
+	out, failed := s.fsCall(c, h, method, urlPath, body)
+	return []Content{{Type: "text", Text: out}}, failed
+}
+
+// bridgePass 桥工具直通外壳：参数原样透传给前端动作。
+func (s *Server) bridgePass(c *ToolCall, action string) ([]Content, bool) {
+	var args map[string]any
+	if err := decodeArgs(c, &args); err != nil {
+		return textErr("参数解析失败: %v", err)
+	}
+	return s.bridgeCall(c, action, args)
 }
 
 // ---- 系统与设置（服务端直答） ----
