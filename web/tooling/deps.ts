@@ -130,6 +130,12 @@ export function defineDepsBuild(o: DepsBuildOptions): UserConfig {
     // vue/pinia 的 esm-bundler 形态引用 process.env.NODE_ENV（设计上由打包器替换）：
     // deps 产物直接由浏览器加载，必须在此替换，否则求值抛 process is not defined
     define: { 'process.env.NODE_ENV': JSON.stringify('production') },
+    // CSS 管线强制 postcss + esbuild（与 openos 独立部署同款）：宿主多用 vite 8，
+    // 其默认 Lightning CSS 会把 backdrop-filter + -webkit-backdrop-filter 成对声明
+    // 按「前缀回退」折叠成仅剩 -webkit- 形态，而 Chromium 不认该别名（Safari 认）
+    // → openos 壳样式（openos-all 全量在此产物）毛玻璃整体退化为纯透明。
+    // cssMinify 显式 esbuild：rolldown-vite 不自带 esbuild，宿主工程须有该 devDep。
+    css: { transformer: 'postcss' },
     build: {
       outDir: o.outDir,
       emptyOutDir: true,
@@ -148,6 +154,7 @@ export function defineDepsBuild(o: DepsBuildOptions): UserConfig {
         },
       },
       cssCodeSplit: false,
+      cssMinify: 'esbuild',
       chunkSizeWarningLimit: 2000,
     },
   })

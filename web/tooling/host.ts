@@ -40,7 +40,13 @@ export function openosHost(o: HostBuildOptions): Plugin {
     apply: 'build',
     config() {
       return {
+        // CSS 管线强制 postcss + esbuild（同 deps.ts 的背书理由：vite 8 默认
+        // Lightning CSS 会把 backdrop-filter 成对前缀折叠成仅 -webkit- 形态，
+        // Chromium 不认该别名 → 毛玻璃退化为纯透明）。本插件 apply:'build'，
+        // dev 侧仍需宿主 vite.config.ts 自行声明同款 css 配置（现有宿主均已带）
+        css: { transformer: 'postcss' },
         build: {
+          cssMinify: 'esbuild',
           // 不清空 dist：deps 产物（dist/assets/deps）由先行构建产出，宿主构建
           // 只覆盖自己的文件（旧 hash 产物累积无害，deps 构建自身仍清 deps 目录）
           emptyOutDir: false,

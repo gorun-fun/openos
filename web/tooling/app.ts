@@ -71,6 +71,9 @@ export function defineAppBuild(o: AppBuildOptions): UserConfig {
     // 产物不需要 public 资产（图标经宿主页面注册）；outDir 可能位于 public/ 内
     // （本地货架 public/market），保持默认 publicDir 会把 public 递归拷进产物目录
     publicDir: false,
+    // CSS 管线强制 postcss + esbuild（同 deps.ts：防 vite 8 默认 Lightning CSS
+    // 把 backdrop-filter 成对前缀折叠成仅 -webkit- 形态，Chromium 不认 → 毛玻璃灭）
+    css: { transformer: 'postcss' },
     build: {
       outDir: o.outDir,
       emptyOutDir: true,
@@ -88,6 +91,7 @@ export function defineAppBuild(o: AppBuildOptions): UserConfig {
         },
       },
       cssCodeSplit: false,
+      cssMinify: 'esbuild',
       chunkSizeWarningLimit: 2000,
     },
   })
