@@ -35,6 +35,8 @@ export type { DialogDef, DialogOpenOpts } from './dialogService'
 export { default as DialogHost } from './DialogHost.vue'
 export { osConfirm } from './confirm'
 export type { ConfirmOpts } from './confirm'
+// 功能级权限门控：can()/v-perm（P2 2026-10；宿主 App 与内置应用统一走这里）
+export { can, vPerm, installPermDirective } from './perms'
 export { consumeShareHash, openShareDialog } from './shareDialog'
 export { icons } from './icons'
 // OsTable 列定义类型：宿主应用以强类型声明列（export type 不产生运行时代码）

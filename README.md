@@ -467,9 +467,43 @@ func introspect(openosToken string) (id struct {
   跨信任边界一律走内省。
 
 **批量用户同步**：`POST /api/users/sync`（admin）幂等推送用户清单——不存在则开通
-（随机密码），存在则按字段更新（角色/显示名/禁用态，变化即热吊销）；最后一名管理员
+（随机密码），存在则按字段更新（角色/显示名/禁用态/权限点快照，变化即热吊销）；最后一名管理员
 的降级/禁用会被跳过并在响应 `skipped` 中说明。配合 exchange 的惰性开通，宿主可选
 「登录时开通」或「启动时全量同步」两种策略。
+
+**角色目录与功能级权限（2026-10 P2）**：应用级授权（role_apps）之上新增功能级权限点模型，
+双模式并存：
+
+- **system 模式（独立部署）**：`roles` / `role_perms` / `perm_defs` 三表为权威，管理员在
+  「系统设置 → 角色与权限」双区编辑（功能权限点分组勾选 + 应用授权卡片网格）；
+- **host 模式（宿主集成）**：角色与权限的**权威存储留在宿主自己的数据库**，宿主经
+  `POST /api/host/declare`（X-Exchange-Secret 守护）声明式全量投影：
+
+  ```json
+  {
+    "roles": [
+      { "key": "boss", "label": "老板/业主", "perms": ["order.view"], "apps": ["welcome", "calendar"] },
+      { "key": "R3",   "label": "门店自定义", "perms": ["room.view"], "apps": ["welcome"] }
+    ],
+    "perms": [
+      { "code": "order.view", "group": "业务", "label": "订单查看" }
+    ]
+  }
+  ```
+
+  幂等收敛：清单外既有 host 角色整体移除（级联清权限与授权）、system 角色不动、
+  保存即广播 `sys:apps-changed`；取代宿主侧 os_role_seed 标记表这类种子 workaround。
+  host 角色在设置页只读展示（「宿主托管」徽标）。
+- **权限快照**：`POST /api/auth/exchange` 与 `/api/users/sync` 支持可选 `perms[]` 字段——
+  宿主权威库算出的该用户权限并集写入 users.perms（变化即热吊销）；未传时按角色权限矩阵
+  推导。JWT claims 与 `/api/auth/me` 均携带 `perms`。
+- **前端门控**：`import { can } from '@openos/framework'`——`can('room.view')` /
+  `v-perm="'room.view'"` 指令；语义与服务端一致（admin 直通、`*` 通配、精确匹配）。
+- **openos 内置权限点**：`users.manage` / `apps.manage` / `market.manage` / `ai.manage` /
+  `system.manage`（admin 恒持 `*`；服务端 `auth.RequirePerm` 中间件已就位，现有管理端点
+  行为不变，为后续细分授权留位）。
+- 角色目录 API：`GET /api/roles`（登录态，含每角色 perms/apps 快照与权限点目录）、
+  `PUT /api/roles/{key}` / `DELETE /api/roles/{key}`（admin；host 角色只读拒绝）。
 
 **裁剪部署（数据边界）**：宿主以 SQLite 只保存**演示数据与每用户界面设置**为目标时：
 

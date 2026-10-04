@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS users (
   display_name TEXT NOT NULL DEFAULT '',
   token_version INTEGER NOT NULL DEFAULT 0,
   disabled INTEGER NOT NULL DEFAULT 0,
+  perms TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS apps (
@@ -113,6 +114,24 @@ CREATE TABLE IF NOT EXISTS role_apps (
   role TEXT NOT NULL,
   app_id TEXT NOT NULL,
   PRIMARY KEY (role, app_id)
+);
+CREATE TABLE IF NOT EXISTS roles (
+  key TEXT PRIMARY KEY,
+  label TEXT NOT NULL DEFAULT '',
+  builtin INTEGER NOT NULL DEFAULT 0,
+  managed_by TEXT NOT NULL DEFAULT 'system',
+  sort INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS role_perms (
+  role TEXT NOT NULL,
+  perm TEXT NOT NULL,
+  PRIMARY KEY (role, perm)
+);
+CREATE TABLE IF NOT EXISTS perm_defs (
+  code TEXT PRIMARY KEY,
+  grp TEXT NOT NULL DEFAULT '',
+  label TEXT NOT NULL DEFAULT '',
+  managed_by TEXT NOT NULL DEFAULT 'system'
 );
 CREATE TABLE IF NOT EXISTS files (
   owner TEXT NOT NULL,
@@ -289,6 +308,9 @@ func Open(dir string, opts ...Option) (*DB, error) {
 	if err := db.seed(cfg); err != nil {
 		return nil, err
 	}
+	if err := db.EnsureRolesBootstrap(); err != nil {
+		return nil, fmt.Errorf("roles bootstrap: %w", err)
+	}
 	return db, nil
 }
 
@@ -298,6 +320,7 @@ func (db *DB) migrateColumns() error {
 	for _, c := range []col{
 		{"users", "token_version", "ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0"},
 		{"users", "disabled", "ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0"},
+		{"users", "perms", "ALTER TABLE users ADD COLUMN perms TEXT NOT NULL DEFAULT ''"},
 		{"files", "is_binary", "ALTER TABLE files ADD COLUMN is_binary INTEGER NOT NULL DEFAULT 0"},
 		{"apps", "hidden", "ALTER TABLE apps ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0"},
 		{"apps", "locked", "ALTER TABLE apps ADD COLUMN locked INTEGER NOT NULL DEFAULT 0"},

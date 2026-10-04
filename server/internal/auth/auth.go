@@ -17,6 +17,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -31,11 +32,12 @@ import (
 
 // Claims JWT 载荷。
 type Claims struct {
-	Sub  string `json:"sub"`
-	Role string `json:"role"`
-	TV   int64  `json:"tv"`
-	Exp  int64  `json:"exp"`
-	Iat  int64  `json:"iat"`
+	Sub   string   `json:"sub"`
+	Role  string   `json:"role"`
+	Perms []string `json:"perms,omitempty"` // 功能级权限点快照（用户级覆盖 > 角色推导）
+	TV    int64    `json:"tv"`
+	Exp   int64    `json:"exp"`
+	Iat   int64    `json:"iat"`
 }
 
 // Service 认证服务。
@@ -122,6 +124,7 @@ type cacheEntry struct {
 	role     string
 	tv       int64
 	disabled bool
+	perms    []string
 	at       time.Time
 }
 
@@ -202,10 +205,10 @@ func (s *Service) sign(data []byte) string {
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-// Issue 签发 Token。
+// Issue 签发 Token（claims 内含功能级权限点快照：用户级覆盖优先，否则按角色推导）。
 func (s *Service) Issue(username, role string, tv int64) (string, error) {
 	now := time.Now()
-	c := Claims{Sub: username, Role: role, TV: tv, Iat: now.Unix(), Exp: now.Add(s.ttl).Unix()}
+	c := Claims{Sub: username, Role: role, Perms: s.effectivePerms(username, role), TV: tv, Iat: now.Unix(), Exp: now.Add(s.ttl).Unix()}
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
 	payload, err := json.Marshal(c)
 	if err != nil {
@@ -213,6 +216,24 @@ func (s *Service) Issue(username, role string, tv int64) (string, error) {
 	}
 	body := header + "." + base64.RawURLEncoding.EncodeToString(payload)
 	return body + "." + s.sign([]byte(body)), nil
+}
+
+// effectivePerms 有效权限点：users.perms 覆盖（宿主 exchange 快照）优先；
+// 为空按 role_perms(role) 推导（demo/独立部署的角色权限矩阵）。失败为空集
+//（admin 由判定语义直通，不受影响）。
+func (s *Service) effectivePerms(username, role string) []string {
+	var override string
+	if err := s.db.QueryRow(`SELECT perms FROM users WHERE username=?`, username).Scan(&override); err == nil && strings.TrimSpace(override) != "" && override != "null" {
+		var perms []string
+		if json.Unmarshal([]byte(override), &perms) == nil && len(perms) > 0 {
+			return perms
+		}
+	}
+	perms, err := s.db.RolePerms(role)
+	if err != nil {
+		return nil
+	}
+	return perms
 }
 
 // Verify 校验签名与有效期（不查库）。
@@ -244,32 +265,40 @@ func (s *Service) Verify(token string) (*Claims, error) {
 func (s *Service) VerifySession(token string) (*Identity, error) {
 	c, err := s.Verify(token)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("凭证已失效")
 	}
-	exists, role, tv, disabled := s.currentUserRole(c.Sub)
+	exists, role, tv, disabled, perms := s.currentUserState(c.Sub)
 	if !exists || role != c.Role || tv != c.TV || disabled {
 		return nil, errors.New("凭证已失效")
 	}
-	return &Identity{Username: c.Sub, Role: role}, nil
+	return &Identity{Username: c.Sub, Role: role, Perms: perms}, nil
 }
 
-// currentUserRole 取用户当前角色、token 版本与禁用态（10s 缓存）。
-func (s *Service) currentUserRole(username string) (exists bool, role string, tv int64, disabled bool) {
+// currentUserState 取用户当前角色、token 版本、禁用态与有效权限点（10s 缓存；
+// 权限与角色同窗缓存——角色/权限变更须 InvalidateCache 立即生效）。
+func (s *Service) currentUserState(username string) (exists bool, role string, tv int64, disabled bool, perms []string) {
 	s.cacheMu.Lock()
 	if e, ok := s.cache[username]; ok && time.Since(e.at) < 10*time.Second {
 		s.cacheMu.Unlock()
-		return true, e.role, e.tv, e.disabled
+		return true, e.role, e.tv, e.disabled, e.perms
 	}
 	s.cacheMu.Unlock()
 
 	info, err := s.db.GetUserAuth(username)
 	if err != nil || !info.Exists {
-		return false, "", 0, false
+		return false, "", 0, false, nil
 	}
+	perms = s.effectivePerms(username, info.Role)
 	s.cacheMu.Lock()
-	s.cache[username] = cacheEntry{role: info.Role, tv: info.TokenVersion, disabled: info.Disabled, at: time.Now()}
+	s.cache[username] = cacheEntry{role: info.Role, tv: info.TokenVersion, disabled: info.Disabled, perms: perms, at: time.Now()}
 	s.cacheMu.Unlock()
-	return true, info.Role, info.TokenVersion, info.Disabled
+	return true, info.Role, info.TokenVersion, info.Disabled, perms
+}
+
+// currentUserRole 旧签名兼容（只需角色/版本/禁用态的调用方）。
+func (s *Service) currentUserRole(username string) (bool, string, int64, bool) {
+	exists, role, tv, disabled, _ := s.currentUserState(username)
+	return exists, role, tv, disabled
 }
 
 // InvalidateCache 用户态变更后调用，立即生效。
@@ -393,6 +422,24 @@ const userKey ctxKey = "user"
 type Identity struct {
 	Username string
 	Role     string
+	// Perms 功能级权限点（签发/请求时的有效集合：用户级覆盖 > 角色推导）
+	Perms []string
+}
+
+// Can 功能级权限判定（与 grf-hotel Claims.HasPerm 同语义：admin 直通、* 通配）。
+func (id *Identity) Can(perm string) bool {
+	if id == nil {
+		return false
+	}
+	return store.HasPermJudge(id.Role, id.PermStore(), perm)
+}
+
+// PermStore 返回权限集（nil 安全）。
+func (id *Identity) PermStore() []string {
+	if id == nil {
+		return nil
+	}
+	return id.Perms
 }
 
 // Middleware 校验 Bearer Token（或 openos_token Cookie——供 goder 等同源嵌入组件自动携带）并实时核对用户态。
@@ -404,17 +451,17 @@ func (s *Service) Middleware(next http.Handler) http.Handler {
 				token = c.Value
 			}
 		}
-		c, err := s.Verify(token)
-		if err != nil {
-			jsonError(w, http.StatusUnauthorized, "未认证或登录已过期")
-			return
-		}
-		exists, role, tv, disabled := s.currentUserRole(c.Sub)
-		if !exists || role != c.Role || tv != c.TV || disabled {
-			jsonError(w, http.StatusUnauthorized, "凭证已失效，请重新登录")
-			return
-		}
-		next.ServeHTTP(w, r.WithContext(contextWithIdentity(r, &Identity{Username: c.Sub, Role: role})))
+	c, err := s.Verify(token)
+	if err != nil {
+		jsonError(w, http.StatusUnauthorized, "未认证或登录已过期")
+		return
+	}
+	exists, role, tv, disabled, perms := s.currentUserState(c.Sub)
+	if !exists || role != c.Role || tv != c.TV || disabled {
+		jsonError(w, http.StatusUnauthorized, "凭证已失效，请重新登录")
+		return
+	}
+	next.ServeHTTP(w, r.WithContext(contextWithIdentity(r, &Identity{Username: c.Sub, Role: role, Perms: perms})))
 	})
 }
 
@@ -451,6 +498,9 @@ func (s *Service) ConsumeTicketFromRequest(r *http.Request) (string, bool) {
 func (s *Service) CurrentUserRole(username string) (exists bool, role string, tv int64, disabled bool) {
 	return s.currentUserRole(username)
 }
+
+// ValidRoleKey 角色键合法（导出：角色目录 CRUD 校验用，与 exchange 同一规则）。
+func ValidRoleKey(role string) bool { return validRole(role) }
 
 // WsTicket POST /api/auth/ws-ticket（登录态）—— 签发一次性短票：
 // /ws 与附件/商店取件等无法携带 header 的 query 鉴权场景用它替代长期 JWT。
@@ -490,6 +540,20 @@ func RequireAdmin(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// RequirePerm 要求功能级权限点（admin 直通——与 RequireAdmin 现行为兼容，
+// 细分授权就位后可逐步替换管理端点）。perms 为空集的非 admin 一律拒绝。
+func RequirePerm(perm string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if id := FromContext(r); id != nil && id.Can(perm) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			jsonError(w, http.StatusForbidden, "需要权限："+perm)
+		})
+	}
 }
 
 // FromContext 取当前身份。
@@ -550,8 +614,9 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request) {
 	// 同时种 Cookie：goder 等嵌入组件的同源 fetch 自动携带（httpOnly，JS 不可读）
 	s.setSessionCookie(w, r, token, int(s.ttl.Seconds()))
 	s.db.Audit(req.Username, "login.ok", "ip="+ip, ip)
+	perms := s.effectivePerms(req.Username, info.Role)
 	writeJSON(w, map[string]any{"token": token, "user": map[string]any{
-		"username": req.Username, "role": info.Role, "displayName": info.DisplayName,
+		"username": req.Username, "role": info.Role, "displayName": info.DisplayName, "perms": perms,
 	}})
 }
 
@@ -587,9 +652,12 @@ func (s *Service) Exchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Username    string `json:"username"`
-		Role        string `json:"role"`
-		DisplayName string `json:"displayName"`
+		Username    string   `json:"username"`
+		Role        string   `json:"role"`
+		DisplayName string   `json:"displayName"`
+		// Perms 功能级权限点快照（宿主接管模式：宿主权威库算出的该用户权限并集）。
+		// nil=不变（兼容旧宿主）；非 nil（含空数组）=覆盖 users.perms 并吊销旧令牌。
+		Perms []string `json:"perms"`
 	}
 	if err := jsonDecode(r, &req); err != nil || req.Username == "" {
 		jsonError(w, 400, "参数错误")
@@ -646,6 +714,32 @@ func (s *Service) Exchange(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 500, "读取用户失败")
 		return
 	}
+	// 权限快照覆盖（宿主接管模式）：非 nil 即写入 users.perms；变化时吊销旧令牌
+	//（旧 token 内嵌 perms 已过期）。空数组=显式清空（回落角色推导）。
+	if req.Perms != nil {
+		v := ""
+		if len(req.Perms) > 0 {
+			b, _ := json.Marshal(req.Perms)
+			v = string(b)
+		}
+		var old string
+		s.db.QueryRow(`SELECT perms FROM users WHERE username=?`, req.Username).Scan(&old)
+		if old != v {
+			if _, err := s.db.Exec(`UPDATE users SET perms=? WHERE username=?`, v, req.Username); err != nil {
+				jsonError(w, 500, "同步权限失败")
+				return
+			}
+			s.db.BumpTokenVersion(req.Username)
+			s.InvalidateCache(req.Username)
+			s.db.Audit(req.Username, "user.perms", fmt.Sprintf("exchange 覆盖 %d 项", len(req.Perms)), ip)
+			// tv 已变（吊销旧令牌），重取最新状态供签发
+			info, err = s.db.GetUserAuth(req.Username)
+			if err != nil || !info.Exists {
+				jsonError(w, 500, "读取用户失败")
+				return
+			}
+		}
+	}
 	token, err := s.Issue(req.Username, info.Role, info.TokenVersion)
 	if err != nil {
 		jsonError(w, 500, "签发令牌失败")
@@ -655,6 +749,7 @@ func (s *Service) Exchange(w http.ResponseWriter, r *http.Request) {
 	s.db.Audit(req.Username, "auth.exchange", "role="+info.Role, ip)
 	writeJSON(w, map[string]any{"token": token, "user": map[string]any{
 		"username": req.Username, "role": info.Role, "displayName": info.DisplayName,
+		"perms": s.effectivePerms(req.Username, info.Role),
 	}})
 }
 
@@ -742,6 +837,7 @@ func (s *Service) Refresh(w http.ResponseWriter, r *http.Request) {
 	s.setSessionCookie(w, r, token, int(s.ttl.Seconds()))
 	writeJSON(w, map[string]any{"token": token, "user": map[string]any{
 		"username": id.Username, "role": info.Role, "displayName": info.DisplayName,
+		"perms": s.effectivePerms(id.Username, info.Role),
 	}})
 }
 
@@ -749,7 +845,11 @@ func (s *Service) Refresh(w http.ResponseWriter, r *http.Request) {
 func (s *Service) Me(w http.ResponseWriter, r *http.Request) {
 	id := FromContext(r)
 	info, _ := s.db.GetUserAuth(id.Username)
-	writeJSON(w, map[string]any{"username": id.Username, "role": id.Role, "displayName": info.DisplayName})
+	perms := id.PermStore()
+	if perms == nil {
+		perms = []string{}
+	}
+	writeJSON(w, map[string]any{"username": id.Username, "role": id.Role, "displayName": info.DisplayName, "perms": perms})
 }
 
 // ChangePassword PUT /api/users/password
@@ -869,10 +969,11 @@ func (s *Service) CreateUser(w http.ResponseWriter, r *http.Request) {
 func (s *Service) SyncUsers(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Users []struct {
-			Username    string `json:"username"`
-			Role        string `json:"role"`
-			DisplayName string `json:"displayName"`
-			Disabled    *bool  `json:"disabled"`
+			Username    string   `json:"username"`
+			Role        string   `json:"role"`
+			DisplayName string   `json:"displayName"`
+			Disabled    *bool    `json:"disabled"`
+			Perms       []string `json:"perms"` // 功能级权限快照（nil=不变，非 nil=覆盖）
 		} `json:"users"`
 	}
 	if err := jsonDecode(r, &req); err != nil || len(req.Users) == 0 {
@@ -935,6 +1036,19 @@ func (s *Service) SyncUsers(w http.ResponseWriter, r *http.Request) {
 		if u.DisplayName != "" && u.DisplayName != info.DisplayName {
 			s.db.Exec(`UPDATE users SET display_name=? WHERE username=?`, u.DisplayName, u.Username)
 			changed = true
+		}
+		if u.Perms != nil {
+			v := ""
+			if len(u.Perms) > 0 {
+				b, _ := json.Marshal(u.Perms)
+				v = string(b)
+			}
+			var old string
+			s.db.QueryRow(`SELECT perms FROM users WHERE username=?`, u.Username).Scan(&old)
+			if old != v {
+				s.db.Exec(`UPDATE users SET perms=? WHERE username=?`, v, u.Username)
+				changed = true
+			}
 		}
 		if changed {
 			s.db.BumpTokenVersion(u.Username) // 角色/禁用变化：旧令牌即时失效

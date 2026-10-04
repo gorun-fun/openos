@@ -258,6 +258,42 @@ func main() {
 		writeJSON(w, map[string]any{"ok": true, "users": len(req.Users)})
 	})
 
+	// 宿主声明式角色/权限投影（P2 2026-10）：宿主权威库的全量角色清单（键/显示名/
+	// 权限点/应用授权）+ 权限点目录，幂等同步到 roles/role_perms/role_apps
+	//（managed_by='host'）。取代宿主侧 os_role_seed 标记表 / 「access 含 gateway」
+	// 这类种子 workaround。与令牌交换/定向推送共用 X-Exchange-Secret。
+	mux.HandleFunc("POST /api/host/declare", func(w http.ResponseWriter, r *http.Request) {
+		if !authSvc.CheckExchangeSecret(r.Header.Get("X-Exchange-Secret")) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		var req struct {
+			Roles []store.HostRoleEntry `json:"roles"`
+			Perms []store.PermDef       `json:"perms"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if len(req.Roles) == 0 && len(req.Perms) == 0 {
+			http.Error(w, "roles 与 perms 至少一项", http.StatusBadRequest)
+			return
+		}
+		for _, e := range req.Roles {
+			if e.Key == "" || !auth.ValidRoleKey(e.Key) {
+				http.Error(w, "非法角色键: "+e.Key, http.StatusBadRequest)
+				return
+			}
+		}
+		if err := db.DeclareHostRoles(req.Roles, req.Perms); err != nil {
+			http.Error(w, "声明失败: "+err.Error(), 500)
+			return
+		}
+		db.Audit("host", "host.declare", fmt.Sprintf("%d 角色 / %d 权限点", len(req.Roles), len(req.Perms)), "")
+		hub.Publish("sys:apps-changed", map[string]any{"source": "host-declare"})
+		writeJSON(w, map[string]any{"ok": true, "roles": len(req.Roles)})
+	})
+
 	// ---- WebSocket 事件总线（query 鉴权：优先 30s 一次性短票 ?ticket=，兼容 ?token=；
 	// 升级时全量校验用户态，与 REST 同一套判定） ----
 	mux.HandleFunc("GET /ws", func(w http.ResponseWriter, r *http.Request) {
@@ -601,6 +637,80 @@ func main() {
 		}
 		db.Audit(id.Username, "apps.access", "role="+req.Role, "")
 		hub.Publish("sys:apps-changed", map[string]any{"role": req.Role})
+		writeJSON(w, map[string]string{"ok": "1"})
+	})
+
+	// ---- 角色目录与功能级权限（P2 2026-10）----
+	// 目录对所有登录用户可读（角色/权限的展示性信息；编辑仅 admin，宿主托管角色
+	// 只读——host 模式权威在宿主自己的数据库，openos 侧仅投影）。
+	authed.HandleFunc("GET /api/roles", func(w http.ResponseWriter, r *http.Request) {
+		roles, err := db.ListRoleDefs()
+		if err != nil {
+			http.Error(w, "读取角色目录失败", 500)
+			return
+		}
+		perms, err := db.PermsCatalog()
+		if err != nil {
+			http.Error(w, "读取权限点目录失败", 500)
+			return
+		}
+		if roles == nil {
+			roles = []store.RoleDef{}
+		}
+		if perms == nil {
+			perms = []store.PermDef{}
+		}
+		writeJSON(w, map[string]any{"roles": roles, "perms": perms})
+	})
+	authed.HandleFunc("PUT /api/roles/{key}", func(w http.ResponseWriter, r *http.Request) {
+		id := auth.FromContext(r)
+		if id.Role != "admin" {
+			http.Error(w, "需要管理员权限", http.StatusForbidden)
+			return
+		}
+		key := r.PathValue("key")
+		var req struct {
+			Label string   `json:"label"`
+			Perms []string `json:"perms"`
+			Apps  []string `json:"apps"`
+		}
+		if json.NewDecoder(r.Body).Decode(&req) != nil || !auth.ValidRoleKey(key) {
+			http.Error(w, "参数错误", 400)
+			return
+		}
+		if err := db.UpsertRole(key, req.Label, req.Perms); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		if req.Apps != nil {
+			if err := db.SetRoleApps(key, req.Apps); err != nil {
+				http.Error(w, "保存应用授权失败", 500)
+				return
+			}
+		}
+		db.Audit(id.Username, "roles.upsert", key, "")
+		hub.Publish("sys:apps-changed", map[string]any{"role": key})
+		writeJSON(w, map[string]string{"ok": "1"})
+	})
+	authed.HandleFunc("DELETE /api/roles/{key}", func(w http.ResponseWriter, r *http.Request) {
+		id := auth.FromContext(r)
+		if id.Role != "admin" {
+			http.Error(w, "需要管理员权限", http.StatusForbidden)
+			return
+		}
+		key := r.PathValue("key")
+		var n int
+		db.QueryRow(`SELECT COUNT(*) FROM users WHERE role=?`, key).Scan(&n)
+		if n > 0 {
+			http.Error(w, fmt.Sprintf("仍有 %d 个用户绑定该角色，先调整他们的角色", n), 400)
+			return
+		}
+		if err := db.DeleteRole(key); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		db.Audit(id.Username, "roles.delete", key, "")
+		hub.Publish("sys:apps-changed", map[string]any{"role": key})
 		writeJSON(w, map[string]string{"ok": "1"})
 	})
 

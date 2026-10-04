@@ -36,6 +36,7 @@ import { setToken } from './api/client'
 import { registerWidget, type WidgetDef } from './desktop/widgetRegistry'
 import { installMenuGuard } from './ui/menu'
 import { installKeys } from './ui/keys'
+import { installPermDirective } from './ui/perms'
 import { installTooltip } from './ui/tooltip'
 import { installAppNotifiers } from './desktop/appNotifier'
 import { registerDialog, type DialogDef } from './ui/dialogService'
@@ -192,6 +193,8 @@ export function createOpenOS(opts: CreateOpenOSOptions = {}): VueApp | null {
   document.title = shell.brand.name
   const app = createApp(App)
   app.use(createPinia())
+  // 功能级权限门控：can() 函数 + v-perm 指令（见 ui/perms.ts）
+  installPermDirective(app)
   app.mount(opts.root || '#app')
 
   // PWA：生产构建注册 service worker（public/sw.js——API/总线直通网络、仅静态资源

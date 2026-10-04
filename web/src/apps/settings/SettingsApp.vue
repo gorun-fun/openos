@@ -28,7 +28,10 @@ function openSsoPassword() {
 // 角色名本地化显示：优先宿主注入的显示名（GET /api/apps/access 的 labels，随
 // loadAccess 加载），再回落内置角色映射（t() 渲染期求值，切换语言即时变），最后原样显示角色 key
 const roleLabels = ref<Record<string, string>>({})
-function roleLabel(r: string) { return roleLabels.value[r] || t(`settings.role.${r}`) }
+function roleLabel(r: string) {
+  const def = roleDefs.value.find((x) => x.key === r)
+  return (def && def.label) || roleLabels.value[r] || t(`settings.role.${r}`)
+}
 
 const tab = ref('appearance')
 // 桌面客户端专属：服务器设置（OpenOS 兼容端连接）。标记对象带 settingsUrl =
@@ -45,7 +48,7 @@ const items = computed(() => {
   if (isAdmin) {
     base.push(
       { key: 'users', label: t('settings.tab.users'), icon: '👥' },
-      { key: 'access', label: t('settings.tab.access'), icon: '🔐' },
+      { key: 'access', label: t('settings.tab.roles'), icon: '🔐' },
       { key: 'registry', label: t('settings.tab.registry'), icon: '🧩' },
       { key: 'system', label: t('settings.tab.system'), icon: 'ℹ️' },
     )
@@ -154,12 +157,30 @@ async function saveDisplayNameEdit() {
   } catch (e: any) { toast(e.message, { type: 'error' }) }
 }
 
-// ---- 应用授权矩阵 ----
+// ---- 角色与权限（应用授权 + 功能级权限点双区，P2 2026-10）----
 const roles = ref<string[]>([])
 const access = ref<Record<string, string[]>>({})
 const allApps = ref<AppDef[]>([])
 const accessRole = ref('user')
 const accessDirty = ref(false)
+// 角色目录与权限点目录（GET /api/roles；老服务端无此端点时优雅降级为纯应用授权）
+interface RoleDefVM { key: string; label: string; builtin: boolean; managedBy: string; perms: string[]; apps: string[] }
+interface PermDefVM { code: string; group: string; label: string; managedBy: string }
+const roleDefs = ref<RoleDefVM[]>([])
+const permDefs = ref<PermDefVM[]>([])
+const rolePerms = ref<Record<string, string[]>>({})
+const permsDirty = ref(false)
+
+const isAdminUser = computed(() => session.user?.role === 'admin')
+const activeRoleDef = computed(() => roleDefs.value.find((r) => r.key === accessRole.value))
+/** 宿主托管角色与只读查看者均不可编辑（宿主接管模式：权威在宿主自己的库） */
+const roleReadonly = computed(() => !isAdminUser.value || activeRoleDef.value?.managedBy === 'host')
+const permsByOrigin = computed(() => {
+  const host: PermDefVM[] = [], system: PermDefVM[] = []
+  for (const p of permDefs.value) (p.managedBy === 'host' ? host : system).push(p)
+  return { host, system }
+})
+const rolesDirty = computed(() => accessDirty.value || permsDirty.value)
 
 async function loadAccess() {
   const data = await api.get<{ roles: string[]; access: Record<string, string[]>; labels?: Record<string, string> }>('/api/apps/access')
@@ -168,15 +189,46 @@ async function loadAccess() {
   roleLabels.value = data.labels || {}
   accessRole.value = data.roles.includes(accessRole.value) ? accessRole.value : data.roles[1] || data.roles[0]
   allApps.value = await api.get<AppDef[]>('/api/apps?all=1')
+  // 角色目录（含宿主声明角色）与权限点目录
+  try {
+    const cat = await api.get<{ roles: RoleDefVM[]; perms: PermDefVM[] }>('/api/roles')
+    roleDefs.value = cat.roles || []
+    permDefs.value = cat.perms || []
+    rolePerms.value = {}
+    for (const r of roleDefs.value) {
+      rolePerms.value[r.key] = [...(r.perms || [])]
+      if (!roles.value.includes(r.key)) roles.value.push(r.key)
+      if (r.label && !roleLabels.value[r.key]) roleLabels.value[r.key] = r.label
+    }
+  } catch { roleDefs.value = []; permDefs.value = [] }
 }
 function toggleApp(role: string, id: string) {
   const cur = access.value[role] || []
   access.value[role] = cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]
   accessDirty.value = true
 }
+function togglePerm(role: string, code: string) {
+  const cur = rolePerms.value[role] || []
+  rolePerms.value[role] = cur.includes(code) ? cur.filter((x) => x !== code) : [...cur, code]
+  permsDirty.value = true
+}
 async function saveAccess() {
-  await api.put('/api/apps/access', { role: accessRole.value, apps: access.value[accessRole.value] })
+  const role = accessRole.value
+  if (roleDefs.value.length) {
+    // 新通道：目录 + 权限点 + 应用授权一并保存（PUT /api/roles/{key}）
+    const def = roleDefs.value.find((r) => r.key === role)
+    await api.put(`/api/roles/${encodeURIComponent(role)}`, {
+      label: roleLabel(role),
+      perms: rolePerms.value[role] || [],
+      apps: access.value[role] || [],
+    })
+    if (def) def.perms = [...(rolePerms.value[role] || [])]
+  } else {
+    // 老服务端兼容：仅应用授权
+    await api.put('/api/apps/access', { role, apps: access.value[role] })
+  }
   accessDirty.value = false
+  permsDirty.value = false
   apps.refresh() // 自己桌面立即生效
 }
 
@@ -550,7 +602,7 @@ watch(tab, (v) => {
       </OsModal>
     </template>
 
-    <!-- 应用授权 -->
+    <!-- 角色与权限（应用授权升级版：权限点 + 应用授权双区） -->
     <template v-else-if="tab === 'access'">
       <div class="panel-actions">
         <OsTabs
@@ -558,22 +610,52 @@ watch(tab, (v) => {
           v-model="accessRole"
         />
         <span class="grow" />
-        <OsButton variant="primary" size="sm" :disabled="!accessDirty" @click="saveAccess">
-          {{ accessDirty ? t('settings.access.save') : t('settings.access.saved') }}
+        <OsButton variant="primary" size="sm" :disabled="roleReadonly || !rolesDirty" @click="saveAccess">
+          {{ rolesDirty && !roleReadonly ? t('settings.roles.dirty') : t('settings.roles.saved') }}
         </OsButton>
       </div>
-      <div class="access-grid">
-        <label v-for="a in allApps" :key="a.id" class="access-item">
-          <input
-            type="checkbox"
-            :checked="(access[accessRole] || []).includes(a.id)"
-            @change="toggleApp(accessRole, a.id)"
-          />
-          <span class="an">{{ a.name }}</span>
-          <span class="aid">{{ a.id }} · {{ a.category }}</span>
-        </label>
+      <p v-if="activeRoleDef?.managedBy === 'host'" class="hint">{{ t('settings.roles.hostManaged') }}</p>
+      <p v-else-if="!isAdminUser" class="hint">{{ t('settings.roles.readonly') }}</p>
+      <div class="roles-grid">
+        <!-- 左区：功能级权限点（admin 直通提示 + 分组勾选） -->
+        <div class="roles-perms">
+          <h3 class="sec">{{ t('settings.roles.perms') }}</h3>
+          <p v-if="accessRole === 'admin'" class="hint">{{ t('settings.roles.allPerms') }}</p>
+          <template v-else>
+            <div v-for="grp in ['host', 'system'] as const" :key="grp">
+              <p v-if="permsByOrigin[grp].length" class="perm-group">{{ t(grp === 'host' ? 'settings.roles.hostGroup' : 'settings.roles.systemGroup') }}</p>
+              <label v-for="p in permsByOrigin[grp]" :key="p.code" class="perm-item" :class="{ ro: roleReadonly }">
+                <input
+                  type="checkbox"
+                  :disabled="roleReadonly"
+                  :checked="(rolePerms[accessRole] || []).includes(p.code)"
+                  @change="togglePerm(accessRole, p.code)"
+                />
+                <span class="an">{{ p.label || p.code }}</span>
+                <span class="aid">{{ p.code }}</span>
+              </label>
+            </div>
+            <p v-if="!permDefs.length" class="hint">{{ t('settings.roles.noPerms') }}</p>
+          </template>
+        </div>
+        <!-- 右区：应用授权卡片网格（原 access 分区） -->
+        <div class="roles-apps">
+          <h3 class="sec">{{ t('settings.roles.apps') }}</h3>
+          <div class="access-grid">
+            <label v-for="a in allApps" :key="a.id" class="access-item" :class="{ ro: roleReadonly }">
+              <input
+                type="checkbox"
+                :disabled="roleReadonly"
+                :checked="(access[accessRole] || []).includes(a.id)"
+                @change="toggleApp(accessRole, a.id)"
+              />
+              <span class="an">{{ a.name }}</span>
+              <span class="aid">{{ a.id }} · {{ a.category }}</span>
+            </label>
+          </div>
+          <p class="hint">{{ t('settings.access.hint') }}</p>
+        </div>
       </div>
-      <p class="hint">{{ t('settings.access.hint') }}</p>
     </template>
 
     <!-- 第三方应用：列表为主，添加/注册走弹窗 -->
@@ -830,6 +912,18 @@ watch(tab, (v) => {
   border: 1px solid var(--os-border); border-radius: 9px; padding: 9px 12px; cursor: pointer;
 }
 .access-item:hover { border-color: var(--os-border-strong); }
+.access-item.ro, .perm-item.ro { cursor: not-allowed; opacity: .7; }
+/* 角色与权限双区布局：左权限点 / 右应用授权（窄屏自动叠放） */
+.roles-grid { display: grid; grid-template-columns: minmax(280px, 2fr) 3fr; gap: 18px; align-items: start; }
+@media (max-width: 900px) { .roles-grid { grid-template-columns: 1fr; } }
+.roles-perms h3.sec, .roles-apps h3.sec { margin: 2px 0 10px; }
+.perm-group { font-size: 12px; font-weight: 700; color: var(--os-text-secondary); margin: 12px 0 6px; }
+.perm-item {
+  display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 9px;
+  border: 1px solid transparent; cursor: pointer;
+}
+.perm-item:hover { border-color: var(--os-border); background: var(--os-panel-solid); }
+.perm-item .aid { flex: none; }
 .an { font-size: 13px; font-weight: 600; }
 .aid { font-size: 11px; color: var(--os-text-secondary); }
 .schema {

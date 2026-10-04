@@ -98,7 +98,7 @@ export const api = {
 
 // ---- 类型 ----
 
-export interface SessionUser { username: string; role: string; displayName: string }
+export interface SessionUser { username: string; role: string; displayName: string; perms?: string[] }
 export interface AppDef {
   id: string
   name: string
