@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 )
 
@@ -53,12 +54,21 @@ func validHeaderName(s string) bool {
 }
 
 // sanitizeCfgHeaders 清洗配置请求头：丢弃黑名单头、非法名与含 CR/LF/NUL 的值
-// （防头部注入）。
+// （防头部注入）。值为 "env:<NAME>" 形态时展开为环境变量的当前值——会话 Cookie
+// 类敏感头不必再硬编码进应用配置/重启换血（如美团 ebooking Cookie 走
+// env:MEITUAN_COOKIE），改环境变量即热更新于下次代理请求。
 func sanitizeCfgHeaders(in map[string]string) map[string]string {
 	var out map[string]string
 	for k, v := range in {
 		if bannedCfgHeaders[strings.ToLower(k)] || !validHeaderName(k) || strings.ContainsAny(v, "\r\n\x00") {
 			continue
+		}
+		if name, ok := strings.CutPrefix(v, "env:"); ok && name != "" {
+			ev := os.Getenv(name)
+			if strings.ContainsAny(ev, "\r\n\x00") {
+				continue // 环境变量含非法字符：整头丢弃
+			}
+			v = ev
 		}
 		if out == nil {
 			out = make(map[string]string, len(in))

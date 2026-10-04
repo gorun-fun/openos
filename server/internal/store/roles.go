@@ -335,15 +335,19 @@ func (db *DB) DeclareHostRoles(entries []HostRoleEntry, permDefs []PermDef) erro
 				return err
 			}
 		}
-		if _, err := tx.Exec(`DELETE FROM role_apps WHERE role=?`, e.Key); err != nil {
-			return err
-		}
-		for _, a := range e.Apps {
-			if a == "" {
-				continue
-			}
-			if _, err := tx.Exec(`INSERT OR IGNORE INTO role_apps(role,app_id) VALUES(?,?)`, e.Key, a); err != nil {
+		// Apps=nil 表示该角色的应用授权**不在宿主权威内**（如 grf-hotel 的
+		// role_apps 是运行期唯一存储），不动 role_apps；非 nil 才覆盖。
+		if e.Apps != nil {
+			if _, err := tx.Exec(`DELETE FROM role_apps WHERE role=?`, e.Key); err != nil {
 				return err
+			}
+			for _, a := range e.Apps {
+				if a == "" {
+					continue
+				}
+				if _, err := tx.Exec(`INSERT OR IGNORE INTO role_apps(role,app_id) VALUES(?,?)`, e.Key, a); err != nil {
+					return err
+				}
 			}
 		}
 	}

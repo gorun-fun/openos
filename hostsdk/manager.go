@@ -331,6 +331,43 @@ func (m *Manager) NotifyUsers(users []string, title, body, appID string) {
 	}
 }
 
+// NotifyPerm 向「持某权限点的全部用户」推送桌面通知（P4：openos 按角色权限
+// 矩阵/用户级快照展开收件人，取代宿主侧 notifyPermHolders 类 SQL）。users
+// 非空时与权限展开取并集（如「全局 admin + 持 perm 的员工」一并通知）。
+func (m *Manager) NotifyPerm(perm string, users []string, title, body, appID string) {
+	if perm == "" {
+		m.NotifyUsers(users, title, body, appID)
+		return
+	}
+	if title == "" {
+		return
+	}
+	payload := map[string]any{"title": title}
+	if body != "" {
+		payload["body"] = body
+	}
+	if appID != "" {
+		payload["appId"] = appID
+	}
+	raw, _ := json.Marshal(map[string]any{"users": users, "perm": perm, "topic": "sys:notify", "payload": payload})
+	req, err := http.NewRequest(http.MethodPost, "http://"+m.cfg.Addr+"/api/hub/publish", bytes.NewReader(raw))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Exchange-Secret", m.cfg.ExchangeSecret)
+	resp, err := m.client.Do(req)
+	if err != nil {
+		log.Printf("[hostsdk] 权限通知推送失败（%s）: %v", title, err)
+		return
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("[hostsdk] 权限通知推送被拒（%s）: status %d", title, resp.StatusCode)
+	}
+}
+
 // SyncUser 同步单个 openos 用户的角色/显示名/禁用态/权限快照（PUT /api/users/{name}，
 // 变化自动吊销其全部旧令牌）。perms 传 nil 表示不变。
 func (m *Manager) SyncUser(username, role, displayName string, disabled bool, perms []string) error {

@@ -235,6 +235,9 @@ func main() {
 	// hub.PublishTo。典型用途：宿主业务事件（如加入申请待审批）即时送达桌面
 	// 通知中心（sys:notify 主题前端默认订阅）。不在线的用户自然无投递，
 	// 送达语义由宿主侧的兜底（列表角标/轮询）承担。
+	// P4 起支持 perm 收件人（与 users 二选一、并存取并集）：{perm: "computer.view"}
+	// → 服务端按角色权限矩阵展开全部持权且启用中的用户（取代宿主侧
+	// notifyPermHolders 类 SQL——权限点的权威投影已在 openos，收件人展开就地完成）。
 	mux.HandleFunc("POST /api/hub/publish", func(w http.ResponseWriter, r *http.Request) {
 		if !authSvc.CheckExchangeSecret(r.Header.Get("X-Exchange-Secret")) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -242,20 +245,27 @@ func main() {
 		}
 		var req struct {
 			Users   []string       `json:"users"`
+			Perm    string         `json:"perm"`
 			Topic   string         `json:"topic"`
 			Payload map[string]any `json:"payload"`
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil ||
-			req.Topic == "" || len(req.Users) == 0 {
+			req.Topic == "" || (len(req.Users) == 0 && req.Perm == "") {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		for _, u := range req.Users {
+		users := req.Users
+		if req.Perm != "" {
+			users = mergeUnique(users, usersHoldingPerm(db, req.Perm))
+		}
+		n := 0
+		for _, u := range users {
 			if u != "" {
 				hub.PublishTo(u, req.Topic, req.Payload)
+				n++
 			}
 		}
-		writeJSON(w, map[string]any{"ok": true, "users": len(req.Users)})
+		writeJSON(w, map[string]any{"ok": true, "users": n})
 	})
 
 	// 宿主声明式角色/权限投影（P2 2026-10）：宿主权威库的全量角色清单（键/显示名/
@@ -1260,4 +1270,46 @@ func sanitizeID(s string) string {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(v)
+}
+
+// usersHoldingPerm 全部持某权限点且启用中的用户（perm 收件人展开）：
+// admin 直通 + 角色权限矩阵（role_perms 精确/* 通配）+ 用户级权限快照
+//（users.perms JSON 数组，宿主接管模式）三路合并，与 Identity.Can 同语义。
+func usersHoldingPerm(db *store.DB, perm string) []string {
+	rows, err := db.Query(`
+		SELECT DISTINCT u.username FROM users u
+		LEFT JOIN role_perms rp ON rp.role = u.role
+		WHERE u.disabled = 0 AND (
+			u.role = 'admin'
+			OR rp.perm = ? OR rp.perm = '*'
+			OR EXISTS (SELECT 1 FROM json_each(CASE WHEN u.perms != '' THEN u.perms ELSE '[]' END) je
+				WHERE je.value IN (?, '*'))
+		)`, perm, perm)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err == nil && u != "" {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
+// mergeUnique 两个用户列表去重合并（保序）。
+func mergeUnique(a, b []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(a)+len(b))
+	for _, list := range [][]string{a, b} {
+		for _, u := range list {
+			if u != "" && !seen[u] {
+				seen[u] = true
+				out = append(out, u)
+			}
+		}
+	}
+	return out
 }

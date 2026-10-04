@@ -42,8 +42,15 @@ export { icons } from './icons'
 // OsTable 列定义类型：宿主应用以强类型声明列（export type 不产生运行时代码）
 export type { TableColumn } from './OsTable.vue'
 
+import OsTabApp from './OsTabApp.vue'
+import OsChip from './OsChip.vue'
+import OsStatusDot from './OsStatusDot.vue'
+
 export {
   OsButton, OsInput, OsSelect, OsToggle, OsCheckbox, OsTextarea, OsPanel, OsModal,
   OsTabs, OsTable, OsLayout, OsToolbar, OsEmpty, OsForm, OsField, OsUpload, OsToasts, OsFilePicker, AppIcon,
   MobileNavToggle, OsTbOverflow,
+  // P4：tab 型应用聚合壳 / 信息胶囊 / 状态圆点
+  OsTabApp, OsChip, OsStatusDot,
 }
+export type { OsTabDef } from './OsTabApp.vue'
