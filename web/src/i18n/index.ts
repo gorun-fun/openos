@@ -50,6 +50,7 @@ const zh: Record<string, string> = {
   'menu.darkLight': '浅',
   'menu.wallpaper': '更换壁纸',
   'menu.lock': '锁定屏幕 / 退出登录',
+  'menu.presence': '{n} 在线',
   'common.cancel': '取消',
   'common.confirm': '确认',
   'common.close': '关闭',
@@ -242,6 +243,7 @@ const en: Record<string, string> = {
   'menu.darkLight': 'light',
   'menu.wallpaper': 'Change Wallpaper',
   'menu.lock': 'Lock Screen / Log Out',
+  'menu.presence': '{n} online',
   'common.cancel': 'Cancel',
   'common.confirm': 'OK',
   'common.close': 'Close',
@@ -428,6 +430,17 @@ export function t(key: string, params?: Record<string, string | number>): string
 }
 
 export function locale(): Locale { return state.locale }
+
+/** 本地化短日期（菜单栏时钟与桌面时钟小组件共用）：中文「10月5日 周一」、
+ *  英文「Oct 5 Mon」；weekdayFirst 供菜单栏时钟把星期提到最前（中文形态）。
+ *  读取当前 locale，在秒级时钟的每秒重算里自然跟随切换。 */
+export function shortDate(d: Date, weekdayFirst = false): string {
+  const zh = `${d.getMonth() + 1}月${d.getDate()}日 周${'日一二三四五六'[d.getDay()]}`
+  if (state.locale === 'zh-CN') return weekdayFirst ? zh.replace(/^(.+) (周.)$/, '$2 $1') : zh
+  return new Intl.DateTimeFormat('en-US', weekdayFirst
+    ? { weekday: 'short', month: 'short', day: 'numeric' }
+    : { month: 'short', day: 'numeric', weekday: 'short' }).format(d)
+}
 
 /** 切换语言：即时生效（响应式）+ 写本地缓存；服务端 user_settings 的写入由调用方
  *  负责（已登录场景），未登录（登录页切换）仅本地。 */

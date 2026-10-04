@@ -13,8 +13,16 @@ const store = useWindows()
 // ---- 窗口级错误边界：单个应用崩溃不拖垮桌面 ----
 const crashed = ref(false)
 const reloadSeq = ref(0)
+/** 发版窗口期：旧页面引用的懒加载 chunk 已被新部署删除（404），重试必然再败，
+ *  唯一恢复路径是刷新整页换取新 index.html 的引用表。 */
+const chunkStale = ref(false)
+function isChunkLoadError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err)
+  return /dynamically imported module|Importing a module script failed|error loading dynamically/i.test(msg)
+}
 onErrorCaptured((err) => {
   console.error(`[OpenOS] 应用 ${props.win.appId} 渲染出错:`, err)
+  chunkStale.value = isChunkLoadError(err)
   crashed.value = true
   return false
 })
@@ -24,20 +32,43 @@ const Placeholder = {
   render: () => h('div', { style: 'padding:24px;color:var(--os-text-secondary)' }, '未知应用：' + props.win.appId),
 }
 const ErrorPanel = {
-  render: () => h('div', { style: 'padding:32px;display:flex;flex-direction:column;gap:14px;align-items:flex-start' }, [
-    h('h3', { style: 'font-size:15px' }, '应用遇到错误'),
-    h('p', { style: 'font-size:13px;color:var(--os-text-secondary)' }, '该窗口的应用发生异常，可重试或关闭窗口；其他窗口不受影响。'),
-    h('div', { style: 'display:flex;gap:8px' }, [
-      h('button', {
-        style: 'padding:6px 16px;border:none;border-radius:8px;background:var(--os-accent);color:#fff;cursor:pointer',
-        onClick: () => { crashed.value = false; reloadSeq.value++ },
-      }, '重试'),
-      h('button', {
-        style: 'padding:6px 16px;border:1px solid var(--os-border-strong);border-radius:8px;background:transparent;color:var(--os-text);cursor:pointer',
-        onClick: () => store.close(props.win.id),
-      }, '关闭窗口'),
-    ]),
-  ]),
+  render: () => {
+    // 发版 chunk 失效：重试无意义，主推「刷新页面」
+    if (chunkStale.value) {
+      return h('div', { style: 'padding:32px;display:flex;flex-direction:column;gap:14px;align-items:flex-start' }, [
+        h('h3', { style: 'font-size:15px' }, '系统已更新'),
+        h('p', { style: 'font-size:13px;color:var(--os-text-secondary)' }, '检测到新版本已发布，当前页面的应用组件已过期。刷新页面即可加载新版本，其他窗口的数据不受影响。'),
+        h('div', { style: 'display:flex;gap:8px' }, [
+          h('button', {
+            style: 'padding:6px 16px;border:none;border-radius:8px;background:var(--os-accent);color:#fff;cursor:pointer',
+            onClick: () => location.reload(),
+          }, '刷新页面'),
+          h('button', {
+            style: 'padding:6px 16px;border:1px solid var(--os-border-strong);border-radius:8px;background:transparent;color:var(--os-text);cursor:pointer',
+            onClick: () => store.close(props.win.id),
+          }, '关闭窗口'),
+        ]),
+      ])
+    }
+    return h('div', { style: 'padding:32px;display:flex;flex-direction:column;gap:14px;align-items:flex-start' }, [
+      h('h3', { style: 'font-size:15px' }, '应用遇到错误'),
+      h('p', { style: 'font-size:13px;color:var(--os-text-secondary)' }, '该窗口的应用发生异常，可重试或关闭窗口；其他窗口不受影响。'),
+      h('div', { style: 'display:flex;gap:8px' }, [
+        h('button', {
+          style: 'padding:6px 16px;border:none;border-radius:8px;background:var(--os-accent);color:#fff;cursor:pointer',
+          onClick: () => { crashed.value = false; reloadSeq.value++ },
+        }, '重试'),
+        h('button', {
+          style: 'padding:6px 16px;border:1px solid var(--os-border-strong);border-radius:8px;background:transparent;color:var(--os-text);cursor:pointer',
+          onClick: () => store.close(props.win.id),
+        }, '关闭窗口'),
+        h('button', {
+          style: 'padding:6px 16px;border:1px solid var(--os-border-strong);border-radius:8px;background:transparent;color:var(--os-text);cursor:pointer',
+          onClick: () => location.reload(),
+        }, '刷新页面'),
+      ]),
+    ])
+  },
 }
 
 const WebAppComp = defineAsyncComponent(() => import('../apps/web/WebApp.vue'))

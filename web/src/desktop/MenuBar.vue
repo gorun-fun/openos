@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch, type Component } from 'vue'
-import { t } from '../i18n'
+import { t, shortDate } from '../i18n'
 import { useSession } from '../stores/session'
 import { useWindows } from '../stores/windows'
 import { useDesktop } from '../stores/desktop'
@@ -24,9 +24,9 @@ let timer = 0
 onMounted(() => { timer = window.setInterval(() => (now.value = new Date()), 1000) })
 onBeforeUnmount(() => clearInterval(timer))
 
-// macOS 菜单栏时间格式：周三 10月1日 09:41（星期在前）
+// macOS 菜单栏时间格式：中文「周三 10月1日 09:41」（星期在前）、英文「Wed Oct 1 09:41」
 const timeText = computed(() =>
-  `周${'日一二三四五六'[now.value.getDay()]} ${now.value.getMonth() + 1}月${now.value.getDate()}日 ${String(now.value.getHours()).padStart(2, '0')}:${String(now.value.getMinutes()).padStart(2, '0')}`,
+  `${shortDate(now.value, true)} ${String(now.value.getHours()).padStart(2, '0')}:${String(now.value.getMinutes()).padStart(2, '0')}`,
 )
 
 const activeWin = computed(() => (windows.active?.minimized ? undefined : windows.active))
@@ -181,7 +181,7 @@ defineExpose({ closeMenu })
       <button class="mb icon-btn" title="聚焦搜索（⌘/Alt+Space）" aria-label="聚焦搜索" @click="emit('spotlight')">
         <svg viewBox="0 0 16 16" class="mb-svg"><circle cx="6.8" cy="6.8" r="4.6" fill="none" stroke="currentColor" stroke-width="1.5" /><line x1="10.4" y1="10.4" x2="14.2" y2="14.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg>
       </button>
-      <span class="mb chip" :title="online.join('、')">👥 {{ online.length }} 在线</span>
+      <span class="mb chip" :title="online.join('、')">👥 {{ t('menu.presence', { n: online.length }) }}</span>
       <span class="mb chip" :title="aiOn ? 'AI 已接入' : 'AI 演示模式（设置 → AI 服务 可配置）'">{{ aiOn ? '✦ AI' : '✦ AI·demo' }}</span>
       <button class="mb chip icon" title="切换深浅色" aria-label="切换深浅色" @click="desktop.setDark(!desktop.dark)">
         {{ desktop.dark ? '🌙' : '☀️' }}

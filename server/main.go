@@ -1253,13 +1253,23 @@ func envDays(key string, def int) int {
 	return n
 }
 
-// spaHandler 前端路由回退到 index.html。
+// spaHandler 前端路由回退到 index.html；同时落静态资源缓存策略：
+// /assets/* 是 vite 内容寻址产物（文件名带 hash）→ immutable 缓存一年（回访零请求）；
+// 其余（index.html/sw.js/manifest/图标等无 hash 文件）→ no-cache，每次带条件请求
+// 再验证——否则浏览器启发式缓存持有旧 index.html，发版删除旧 chunk 后老页面
+// 懒加载应用全部 404（v0.0.43 部署时实测踩中）。
 func spaHandler(dist string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := filepath.Join(dist, filepath.Clean(r.URL.Path))
 		if _, err := os.Stat(p); err != nil && !strings.Contains(r.URL.Path, ".") {
+			w.Header().Set("Cache-Control", "no-cache")
 			http.ServeFile(w, r, filepath.Join(dist, "index.html"))
 			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/assets/") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			w.Header().Set("Cache-Control", "no-cache")
 		}
 		next.ServeHTTP(w, r)
 	})

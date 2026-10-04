@@ -14,6 +14,7 @@ import { bus } from '../bus/bus'
 import { api } from '../api/client'
 import { GRID, cellAt, findFree, gridMetrics, isFree, posOf, registerItem, unregisterItem, type GridRect } from './grid'
 import { widgetDef } from './widgetRegistry'
+import { shortDate } from '../i18n'
 
 interface Widget {
   type: string
@@ -334,7 +335,7 @@ const ghostStyle = computed(() => {
 })
 
 const clockTime = () => `${String(now.value.getHours()).padStart(2, '0')}:${String(now.value.getMinutes()).padStart(2, '0')}`
-const clockDate = () => `${now.value.getMonth() + 1}月${now.value.getDate()}日 周${'日一二三四五六'[now.value.getDay()]}`
+const clockDate = () => shortDate(now.value)
 const fmtMB = (n: number) => (n / 1048576).toFixed(1) + ' MB'
 
 defineExpose({ add, remove, cycleNoteColor, relayout })
