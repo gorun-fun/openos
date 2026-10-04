@@ -1,21 +1,30 @@
 <script setup lang="ts">
-// 启动台：全部可见应用 + 用户文件夹分组。拖动应用到另一应用/文件夹图标上释放
+// 启动台：居中悬浮玻璃弹窗（非全屏层）——头部内嵌搜索 + 「···」更多菜单，
+// 下沿一排类目胶囊标签（选中白底、未选半透明，横向滚动），正文 7 列图标网格
+// 超出面板滚动（右侧细滚动条）。拖动应用到另一应用/文件夹图标上释放
 // 自动合并成文件夹（macOS 行为）；点击文件夹展开面板（打开应用 / 改名 / 拖出或
 // 右键移出）。文件夹持久化到服务端 user_settings 的 launchpadFolders 键
 // （localStorage 仅缓存，与 Dock 同一模式）；应用卸载后成员自动失效隐藏，
-// 文件夹空了不显示（下次保存时落盘清理）。搜索时忽略文件夹结构直接命中应用。
+// 文件夹空了不显示（下次保存时落盘清理）。搜索/类目视图忽略文件夹结构直接
+// 命中应用本体（视图内建文件夹前先从既有文件夹摘除，防重复收纳）。
 import { computed, onMounted, ref, watch } from 'vue'
 import { useApps } from '../stores/apps'
+import type { AppDef } from '../api/client'
 import { useWindows } from '../stores/windows'
 import { useDock } from '../stores/dock'
 import { useSession } from '../stores/session'
 import { api } from '../api/client'
 import { toast } from '../ui/toast'
+import { osConfirm } from '../ui/confirm'
 import { useMenu, menuPos } from '../ui/menu'
 import AppIcon from '../ui/AppIcon.vue'
 import FolderIcon from '../ui/FolderIcon.vue'
 
 interface LpFolder { id: string; name: string; appIds: string[] }
+/** 网格单元：平铺/搜索/类目三视图统一为一种循环模型。 */
+type Entry =
+  | { kind: 'app'; key: string; a: AppDef }
+  | { kind: 'folder'; key: string; f: LpFolder }
 
 const emit = defineEmits<{ close: [] }>()
 const apps = useApps()
@@ -23,6 +32,8 @@ const windows = useWindows()
 const dockStore = useDock()
 const session = useSession()
 const q = ref('')
+/** 选中的类目筛选（空 = 全部）。 */
+const cat = ref('')
 
 const SETTINGS_KEY = 'launchpadFolders'
 const CACHE_KEY = () => `openos_launchpad_folders_${session.user!.username}`
@@ -82,6 +93,24 @@ const filtered = computed(() => {
   )
 })
 
+/** 现存类目（按应用顺序首见排列）。 */
+const categories = computed(() => {
+  const out: string[] = []
+  for (const a of apps.visible) if (a.category && !out.includes(a.category)) out.push(a.category)
+  return out
+})
+/** 有效选中类目：应用卸载等导致类目消失时回落「全部」。 */
+const effCat = computed(() => (cat.value && categories.value.includes(cat.value) ? cat.value : ''))
+
+/** 三视图统一网格模型：搜索 > 类目 > 平铺+文件夹。 */
+const entries = computed<Entry[]>(() => {
+  if (searching.value) return filtered.value.map((a) => ({ kind: 'app', key: a.id, a }))
+  if (effCat.value) return apps.visible.filter((a) => a.category === effCat.value).map((a) => ({ kind: 'app', key: a.id, a }))
+  const out: Entry[] = flatApps.value.map((a) => ({ kind: 'app', key: a.id, a }))
+  for (const g of gridFolders.value) out.push({ kind: 'folder', key: g.f.id, f: g.f })
+  return out
+})
+
 function open(id: string) {
   windows.open(id)
   emit('close')
@@ -104,12 +133,24 @@ function overItem(e: DragEvent, key: string, targetFolder?: string) {
   hoverClr = window.setTimeout(() => { hoverKey.value = '' }, 160)
 }
 
+/** 从所有文件夹中摘除应用（空壳顺带清理）。 */
+function sweepFromFolder(appId: string) {
+  let changed = false
+  for (const f of folders.value) {
+    if (f.appIds.includes(appId)) { f.appIds = f.appIds.filter((x) => x !== appId); changed = true }
+  }
+  if (changed) folders.value = folders.value.filter((f) => f.appIds.length)
+}
+
 /** 平铺应用上释放：与拖动源自动建新文件夹（占目标位）。 */
 function dropOnApp(e: DragEvent, appId: string) {
   e.preventDefault()
   e.stopPropagation()
   hoverKey.value = ''
   if (!dragSrc.id || dragSrc.id === appId) return
+  // 搜索/类目视图展示的可能是文件夹内成员：建夹前先从既有文件夹摘除，防重复收纳
+  sweepFromFolder(appId)
+  sweepFromFolder(dragSrc.id)
   const f: LpFolder = {
     id: 'f' + Math.random().toString(36).slice(2, 10),
     name: folderNameOf(dragSrc.id, appId),
@@ -128,6 +169,7 @@ function dropOnFolder(e: DragEvent, id: string) {
   const f = folders.value.find((x) => x.id === id)
   if (!f) return
   if (f.appIds.includes(dragSrc.id)) { toast('该应用已在文件夹中'); return }
+  sweepFromFolder(dragSrc.id) // 搜索/类目视图拖出的源可能还挂在别的文件夹里
   f.appIds.push(takeOutSrc())
   save()
 }
@@ -207,64 +249,72 @@ function pinToDock(e: MouseEvent, id: string) {
   dockStore.pinAt(id, dockStore.effective.length)
   toast(`已固定「${app.name}」到 Dock`)
 }
+
+// ---- 「···」更多菜单（右对齐按钮下方弹出） ----
+const more = useMenu('launchpad:more')
+function toggleMore(e: MouseEvent) {
+  const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
+  more.toggle(r.right - 150, r.bottom + 8)
+}
+const moreStyle = computed(() => ({
+  left: Math.max(6, Math.min(menuPos.value.x, window.innerWidth - 160)) + 'px',
+  top: Math.max(6, Math.min(menuPos.value.y, window.innerHeight - 90)) + 'px',
+}))
+async function dissolveAll() {
+  if (!folders.value.length) return
+  const n = folders.value.length
+  if (!(await osConfirm({
+    title: '解散全部文件夹',
+    body: `将解散 ${n} 个文件夹，成员应用回到启动台平铺。`,
+    danger: true,
+    confirmText: '解散',
+  }))) return
+  folders.value = []
+  openId.value = ''
+  save()
+}
 </script>
 
 <template>
   <div class="launchpad" @pointerdown.self="emit('close')" @dragover.prevent @drop="onRootDrop">
-    <div class="search-wrap">
-      <svg viewBox="0 0 16 16" class="mg"><circle cx="6.8" cy="6.8" r="4.6" fill="none" stroke="currentColor" stroke-width="1.5" /><line x1="10.4" y1="10.4" x2="14.2" y2="14.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg>
-      <input v-model="q" placeholder="搜索" autofocus @keydown.esc="emit('close')" />
-    </div>
-    <div class="grid">
-      <!-- 常规视图：平铺应用 + 文件夹 -->
-      <template v-if="!searching">
+    <div class="panel" role="dialog" aria-modal="true" aria-label="启动台">
+      <header class="lp-head">
+        <div class="search-wrap">
+          <svg viewBox="0 0 16 16" class="mg"><circle cx="6.8" cy="6.8" r="4.6" fill="none" stroke="currentColor" stroke-width="1.5" /><line x1="10.4" y1="10.4" x2="14.2" y2="14.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg>
+          <input v-model="q" placeholder="搜索" autofocus @keydown.esc="emit('close')" />
+        </div>
+        <button class="more" data-os-menu-anchor aria-label="更多操作" title="更多" @click="toggleMore">
+          <svg viewBox="0 0 16 16" width="15" height="15"><circle cx="3" cy="8" r="1.7" fill="currentColor" /><circle cx="8" cy="8" r="1.7" fill="currentColor" /><circle cx="13" cy="8" r="1.7" fill="currentColor" /></svg>
+        </button>
+      </header>
+      <nav v-if="!searching" class="cats" aria-label="应用类目">
+        <button class="cat" :class="{ on: !effCat }" @click="cat = ''">全部</button>
+        <button v-for="c in categories" :key="c" class="cat" :class="{ on: effCat === c }" @click="cat = c">{{ c }}</button>
+      </nav>
+      <div v-if="!searching" class="sep"></div>
+      <div class="grid">
         <button
-          v-for="(a, i) in flatApps" :key="a.id"
-          class="lp-item" draggable="true"
-          :class="{ 'drop-target': hoverKey === a.id }"
+          v-for="(it, i) in entries" :key="it.key"
+          class="lp-item" :draggable="it.kind === 'app'"
+          :class="{ 'drop-target': hoverKey === it.key }"
           :style="{ '--i': i }"
-          :title="`点击打开 · 拖到其他图标上合并成文件夹 / 拖到桌面创建快捷方式 / 拖到 Dock 固定`"
-          @click="open(a.id)"
-          @dragstart="onDragStart($event, a.id)"
-          @dragover="overItem($event, a.id)"
-          @drop="dropOnApp($event, a.id)"
-          @contextmenu.prevent.stop="pinToDock($event, a.id)"
+          :title="it.kind === 'app'
+            ? '点击打开 · 拖到其他图标上合并成文件夹 / 拖到桌面创建快捷方式 / 拖到 Dock 固定'
+            : `${it.f.name}（点击展开 · 拖应用到上面收入）`"
+          @click="it.kind === 'app' ? open(it.a.id) : (openId = it.f.id)"
+          @dragstart="it.kind === 'app' && onDragStart($event, it.a.id)"
+          @dragover="it.kind === 'app' ? overItem($event, it.a.id) : overItem($event, it.f.id, it.f.id)"
+          @drop="it.kind === 'app' ? dropOnApp($event, it.a.id) : dropOnFolder($event, it.f.id)"
+          @contextmenu.prevent.stop="it.kind === 'app' && pinToDock($event, it.a.id)"
         >
-          <AppIcon :app="a.id" :icon="a.icon" :size="68" />
-          <span class="name">{{ a.name }}</span>
+          <AppIcon v-if="it.kind === 'app'" :app="it.a.id" :icon="it.a.icon" :size="72" />
+          <FolderIcon v-else :entries="it.f.appIds.map((id) => ({ kind: 'app' as const, id }))" :size="72" />
+          <span class="name">{{ it.kind === 'app' ? it.a.name : it.f.name }}</span>
         </button>
-        <button
-          v-for="(g, j) in gridFolders" :key="g.f.id"
-          class="lp-item" :class="{ 'drop-target': hoverKey === g.f.id }"
-          :style="{ '--i': flatApps.length + j }"
-          :title="`${g.f.name}（点击展开 · 拖应用到上面收入）`"
-          @click="openId = g.f.id"
-          @dragover="overItem($event, g.f.id, g.f.id)"
-          @drop="dropOnFolder($event, g.f.id)"
-        >
-          <FolderIcon :entries="g.f.appIds.map((id) => ({ kind: 'app' as const, id }))" :size="68" />
-          <span class="name">{{ g.f.name }}</span>
-        </button>
-        <div v-if="!flatApps.length && !gridFolders.length" class="empty">没有应用</div>
-      </template>
-      <!-- 搜索视图：忽略文件夹结构 -->
-      <template v-else>
-        <button
-          v-for="(a, i) in filtered" :key="a.id"
-          class="lp-item" draggable="true"
-          :style="{ '--i': i }"
-          :title="`点击打开 · 拖到桌面创建快捷方式 / 拖到 Dock 固定`"
-          @click="open(a.id)"
-          @dragstart="onDragStart($event, a.id)"
-          @contextmenu.prevent.stop="pinToDock($event, a.id)"
-        >
-          <AppIcon :app="a.id" :icon="a.icon" :size="68" />
-          <span class="name">{{ a.name }}</span>
-        </button>
-        <div v-if="!filtered.length" class="empty">没有匹配的应用</div>
-      </template>
+        <div v-if="!entries.length" class="empty">{{ searching ? '没有匹配的应用' : '没有应用' }}</div>
+      </div>
+      <p class="lp-foot">点击打开 · 拖到图标上合并成文件夹 · 拖到桌面创建快捷方式 / 拖到 Dock 固定 · 右键固定到 Dock · Esc 关闭</p>
     </div>
-    <p class="hint">点击打开 · 拖到图标上合并成文件夹 · 拖到桌面创建快捷方式 / 拖到 Dock 固定 · 右键固定到 Dock · Esc 关闭</p>
 
     <!-- 文件夹面板：遮罩点击关闭；成员点击打开、拖出面板移出 -->
     <div v-if="openFolder" class="peek-mask" @pointerdown.self="openId = ''" @contextmenu.prevent.stop>
@@ -298,75 +348,135 @@ function pinToDock(e: MouseEvent, id: string) {
     >
       <button @click="ctxRemove(); menu.close()">移出文件夹</button>
     </div>
+
+    <!-- 「···」更多菜单（全局菜单单例渲染） -->
+    <div v-if="more.isOpen" class="os-menu os-menu-root" :style="moreStyle" @contextmenu.prevent.stop>
+      <button :disabled="!folders.length" @click="dissolveAll(); more.close()">解散全部文件夹</button>
+    </div>
   </div>
 </template>
 
 <style scoped>
+/* 外层：轻压暗背景（桌面壁纸清晰可见），面板整体略偏上 */
 .launchpad {
   position: fixed; inset: 0; z-index: 9600;
-  background: rgba(0, 0, 0, 0.3);
-  backdrop-filter: blur(46px) saturate(1.5) brightness(1.08);
-  -webkit-backdrop-filter: blur(46px) saturate(1.5) brightness(1.08);
-  display: flex; flex-direction: column; align-items: center;
-  padding-top: 8vh; animation: os-fade-in .18s ease;
+  background: rgba(0, 0, 0, 0.24);
+  display: flex; align-items: center; justify-content: center;
+  padding-bottom: 5vh;
+  animation: os-fade-in .16s ease;
 }
-.search-wrap { margin-bottom: 4vh; animation: lp-item-in .3s var(--os-ease-out) both; position: relative; }
-.mg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); width: 14px; height: 14px; color: rgba(255,255,255,.6); pointer-events: none; }
-input {
-  width: 280px; padding: 8px 16px 8px 34px; border-radius: 999px;
-  border: 1px solid rgba(255,255,255,.28);
-  background: rgba(255,255,255,.2); color: #fff; font-size: 14px;
-  backdrop-filter: blur(10px); transition: background .15s, border-color .15s;
+
+/* 居中悬浮玻璃面板 */
+.panel {
+  width: min(980px, 72vw); height: min(660px, 72vh); min-height: 420px;
+  display: flex; flex-direction: column; overflow: hidden;
+  border-radius: 26px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(40, 41, 46, 0.62);
+  backdrop-filter: blur(40px) saturate(1.45);
+  -webkit-backdrop-filter: blur(40px) saturate(1.45);
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  animation: lp-panel-in .22s var(--os-ease-spring);
 }
-input:focus { background: rgba(255,255,255,.3); border-color: rgba(255,255,255,.5); }
-input::placeholder { color: rgba(255,255,255,.6); }
+@keyframes lp-panel-in {
+  from { opacity: 0; transform: scale(0.96) translateY(12px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+/* 头部：内嵌搜索框 + 「···」 */
+.lp-head { flex: none; display: flex; align-items: center; gap: 10px; padding: 16px 18px 10px; }
+.search-wrap { flex: 1; max-width: 300px; position: relative; animation: lp-item-in .3s var(--os-ease-out) both; }
+.mg { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); width: 13px; height: 13px; color: rgba(255, 255, 255, 0.55); pointer-events: none; }
+.lp-head input {
+  width: 100%; padding: 7px 12px 7px 32px; border-radius: 10px;
+  border: none; background: rgba(255, 255, 255, 0.1); color: #fff; font-size: 13px;
+  transition: background .15s, box-shadow .15s;
+}
+.lp-head input:focus { background: rgba(255, 255, 255, 0.16); outline: none; box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.18); }
+.lp-head input::placeholder { color: rgba(255, 255, 255, 0.5); }
+.more {
+  flex: none; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; border: none; cursor: pointer; color: rgba(255, 255, 255, 0.75);
+  background: rgba(255, 255, 255, 0.08); transition: background .15s;
+}
+.more:hover { background: rgba(255, 255, 255, 0.16); }
+
+/* 类目胶囊标签：单行横向滚动（滚动条隐藏），选中白底反色 */
+.cats { flex: none; display: flex; gap: 8px; padding: 4px 18px 12px; overflow-x: auto; scrollbar-width: none; }
+.cats::-webkit-scrollbar { display: none; }
+.cat {
+  flex: none; padding: 5px 14px; border-radius: 999px; border: none; cursor: pointer;
+  background: rgba(255, 255, 255, 0.08); color: rgba(255, 255, 255, 0.82);
+  font-size: 12.5px; line-height: 1.4; white-space: nowrap;
+  transition: background .15s, color .15s;
+}
+.cat:hover { background: rgba(255, 255, 255, 0.14); }
+.cat.on { background: #fff; color: #1d1d1f; font-weight: 500; }
+.sep { flex: none; height: 1px; margin: 0 14px; background: rgba(255, 255, 255, 0.12); }
+
+/* 正文网格：7 列，超出面板滚动（细滚动条） */
 .grid {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-  gap: 22px 12px; width: min(880px, 88vw); overflow-y: auto; padding-bottom: 20px;
+  flex: 1; min-height: 0; overflow-y: auto;
+  display: grid; grid-template-columns: repeat(7, 1fr);
+  gap: 20px 8px; align-content: start;
+  padding: 16px 22px 10px;
+  scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
 }
+.grid::-webkit-scrollbar { width: 5px; }
+.grid::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.22); border-radius: 3px; }
+.grid::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.35); }
+.grid::-webkit-scrollbar-track { background: transparent; }
+@media (max-width: 1020px) {
+  .panel { width: 92vw; }
+  .grid { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); }
+}
+
 .lp-item {
   position: relative;
-  display: flex; flex-direction: column; align-items: center; gap: 9px;
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
   background: transparent; border: none; cursor: pointer; padding: 10px 4px; border-radius: 16px;
   transition: transform .16s var(--os-ease-spring), background .15s;
-  /* 图标依次弹入（基于网格内序号的级联延迟） */
+  /* 图标依次弹入（基于网格内序号的级联延迟，封顶防长列表拖沓） */
   animation: lp-item-in .34s var(--os-ease-out) both;
-  animation-delay: calc(var(--i, 0) * 22ms);
+  animation-delay: min(calc(var(--i, 0) * 18ms), 300ms);
 }
 @keyframes lp-item-in {
   from { opacity: 0; transform: translateY(14px) scale(.92); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
-.lp-item:hover { transform: scale(1.08); background: rgba(255,255,255,.08); }
+.lp-item:hover { transform: scale(1.08); background: rgba(255, 255, 255, 0.08); }
 .lp-item:active { transform: scale(1.02); }
-.name { color: #fff; font-size: 12.5px; text-shadow: 0 1px 4px rgba(0,0,0,.45); }
-.empty { color: rgba(255,255,255,.7); grid-column: 1 / -1; text-align: center; padding: 40px; }
-.hint { position: absolute; bottom: 100px; color: rgba(255,255,255,.55); font-size: 12px; }
+.name {
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: #fff; font-size: 12.5px; text-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+.empty { color: rgba(255, 255, 255, 0.7); grid-column: 1 / -1; text-align: center; padding: 40px; }
+.lp-foot { flex: none; margin: 0; padding: 8px 18px 14px; text-align: center; font-size: 11px; color: rgba(255, 255, 255, 0.35); user-select: none; }
 
 /* 合并目标高亮：半透明圆圈罩住目标图标（macOS 式） */
 .lp-item.drop-target { transform: scale(1.1); }
 .lp-item.drop-target::before {
-  content: ''; position: absolute; left: 50%; top: 44px;
-  width: 92px; height: 92px; transform: translate(-50%, -50%);
+  content: ''; position: absolute; left: 50%; top: 46px;
+  width: 96px; height: 96px; transform: translate(-50%, -50%);
   border-radius: 50%; pointer-events: none; z-index: 1;
-  background: rgba(255,255,255,.18); border: 1.5px solid rgba(255,255,255,.42);
-  box-shadow: 0 0 0 7px rgba(255,255,255,.07);
+  background: rgba(255, 255, 255, 0.18); border: 1.5px solid rgba(255, 255, 255, 0.42);
+  box-shadow: 0 0 0 7px rgba(255, 255, 255, 0.07);
 }
 .lp-item.drop-target > :deep(*) { position: relative; z-index: 2; }
 
-/* 文件夹面板 */
+/* 文件夹面板（覆盖全屏遮罩上居中的二级玻璃弹窗） */
 .peek-mask {
   position: absolute; inset: 0; z-index: 2;
   display: flex; align-items: center; justify-content: center;
-  background: rgba(0, 0, 0, .25); animation: os-fade-in .14s ease;
+  background: rgba(0, 0, 0, 0.25); animation: os-fade-in .14s ease;
 }
 .peek {
   width: 460px; max-width: 88vw; max-height: 70vh; overflow: visible; padding: 18px 22px 14px;
-  border-radius: 26px; border: 1px solid rgba(255,255,255,.14);
-  background: rgba(38, 40, 46, .6);
+  border-radius: 26px; border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(38, 40, 46, 0.6);
   backdrop-filter: blur(30px) saturate(1.4);
   -webkit-backdrop-filter: blur(30px) saturate(1.4);
-  box-shadow: 0 24px 70px rgba(0,0,0,.45);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
   animation: os-pop-in .18s var(--os-ease-spring);
 }
 .peek-name {
@@ -375,12 +485,15 @@ input::placeholder { color: rgba(255,255,255,.6); }
   background: transparent; color: #fff; font-size: 15px; text-align: center;
   transition: background .15s, border-color .15s;
 }
-.peek-name:hover { background: rgba(255,255,255,.1); }
-.peek-name:focus { background: rgba(255,255,255,.16); border-color: rgba(10,132,255,.6); outline: none; }
+.peek-name:hover { background: rgba(255, 255, 255, 0.1); }
+.peek-name:focus { background: rgba(255, 255, 255, 0.16); border-color: rgba(10, 132, 255, 0.6); outline: none; }
 .peek-grid {
   display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px 8px;
   min-height: 110px; align-content: start; max-height: 46vh; overflow-y: auto; padding: 2px;
+  scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
 }
-.peek-empty { grid-column: 1 / -1; padding: 30px 0; text-align: center; color: rgba(255,255,255,.55); font-size: 13px; }
-.peek-hint { margin: 14px 0 0; text-align: center; font-size: 11px; color: rgba(255,255,255,.45); }
+.peek-grid::-webkit-scrollbar { width: 5px; }
+.peek-grid::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.22); border-radius: 3px; }
+.peek-empty { grid-column: 1 / -1; padding: 30px 0; text-align: center; color: rgba(255, 255, 255, 0.55); font-size: 13px; }
+.peek-hint { margin: 14px 0 0; text-align: center; font-size: 11px; color: rgba(255, 255, 255, 0.45); }
 </style>
