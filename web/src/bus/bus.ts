@@ -5,7 +5,11 @@
 //   bus.emit('app:calc', { a: 1 })                 发布（本地 + 远程）
 //   bus.emit('app:calc', { a: 1 }, { remote: false }) 仅本地
 //   bus.remote('term:alice', 'ls')                 仅发给服务端处理器（不回声本地）
-import { getToken } from '../api/client'
+//
+// 断线处理：先探测会话活性再重连——令牌被吊销（改密/禁用/删号/角色变更）时 REST
+// 401，立即走全局登出回登录页并带提示，不再静默退避重试；网络/服务闪断则照常
+// 指数退避重连（上限 20 次）。
+import { getToken, triggerUnauthorized } from '../api/client'
 
 type Handler = (payload: any, from: string, topic: string) => void
 
@@ -59,10 +63,23 @@ class Bus {
     }
     ws.onclose = () => {
       this.ws = null
-      if (!this.closed && this.retry < 20) {
-        this.retry++
-        setTimeout(() => this.open(), Math.min(1000 * this.retry, 8000))
-      }
+      if (this.closed) return
+      // 重连前探测会话：区分「网络/服务闪断」与「令牌已被吊销」。401 时全局登出
+      // 接管（triggerUnauthorized 会带 sessionStorage 提示到登录页）；网络不可达
+      // 或会话有效则视同闪断，照常退避重连。
+      void fetch('/api/auth/me', { headers: { Authorization: 'Bearer ' + getToken() } })
+        .then((r) => {
+          if (r.status !== 401) return
+          this.closed = true // 会话已死，停止重连；重新登录后 connect() 复位
+          triggerUnauthorized()
+        })
+        .catch(() => { /* 网络不可达：视同闪断 */ })
+        .finally(() => {
+          if (!this.closed && this.retry < 20) {
+            this.retry++
+            setTimeout(() => this.open(), Math.min(1000 * this.retry, 8000))
+          }
+        })
     }
   }
 

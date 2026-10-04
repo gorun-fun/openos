@@ -155,7 +155,8 @@ func main() {
 		log.Fatalf("附件存储初始化失败: %v", err)
 	}
 	// 数据保留期（防无限增长；0 = 永久保留）：启动清理一次，此后每天一次
-	go scheduleRetention(db, attachStore)
+	// （含 vfs 到期分享链接清理）
+	go scheduleRetention(db, attachStore, fs)
 
 	mux := http.NewServeMux()
 
@@ -171,6 +172,8 @@ func main() {
 	mux.HandleFunc("GET /api/auth/logout", authSvc.Logout)
 	// 宿主应用令牌交换（仅 OPENOS_EXCHANGE_SECRET 配置后可用）
 	mux.HandleFunc("POST /api/auth/exchange", authSvc.Exchange)
+	// 业务后端验证 OpenOS JWT（认证反向互通，与令牌交换共用 X-Exchange-Secret）
+	mux.HandleFunc("POST /api/auth/introspect", authSvc.Introspect)
 	// 宿主定向事件推送（与令牌交换共用 X-Exchange-Secret）：
 	// {users: ["用户名", ...], topic: "sys:notify", payload: {...}} → 逐用户
 	// hub.PublishTo。典型用途：宿主业务事件（如加入申请待审批）即时送达桌面
@@ -582,6 +585,15 @@ func main() {
 	authed.HandleFunc("POST /api/fs/rename", fs.Guard(fs.Rename))
 	authed.HandleFunc("POST /api/fs/copy", fs.Guard(fs.Copy))
 
+	// 文件分享链接（跨用户共享）：消费端点在 authed——分享 id 是能力、登录态是身份，
+	// 前端经 /#share=<id> 片段拉起接收弹窗（见 web/src/ui/shareDialog.ts）
+	authed.HandleFunc("POST /api/fs/shares", fs.Guard(fs.CreateShare))
+	authed.HandleFunc("GET /api/fs/shares", fs.Guard(fs.ListShares))
+	authed.HandleFunc("DELETE /api/fs/shares/{id}", fs.Guard(fs.RevokeShare))
+	authed.HandleFunc("GET /api/share/{id}", fs.Guard(fs.ShareInfo))
+	authed.HandleFunc("GET /api/share/{id}/download", fs.Guard(fs.ShareDownload))
+	authed.HandleFunc("POST /api/share/{id}/save", fs.Guard(fs.ShareSave))
+
 	// 用户个性化设置
 	authed.HandleFunc("GET /api/settings", func(w http.ResponseWriter, r *http.Request) {
 		user := auth.FromContext(r).Username
@@ -841,7 +853,7 @@ func clientIP(r *http.Request) string {
 // scheduleRetention 数据保留期清理：审计日志与 AI 对话历史（含终端伪用户 __term__
 // 的孤儿数据）按天数删除。OPENOS_AUDIT_RETENTION_DAYS / OPENOS_CHAT_RETENTION_DAYS
 // 控制（默认 90 天，0 = 永久保留）。启动即清理一次，此后每天一次。
-func scheduleRetention(db *store.DB, attachStore *attach.Store) {
+func scheduleRetention(db *store.DB, attachStore *attach.Store, fs *vfs.FS) {
 	run := func() {
 		if d := envDays("OPENOS_AUDIT_RETENTION_DAYS", 90); d > 0 {
 			if n, err := db.PruneAuditBefore(time.Now().AddDate(0, 0, -d)); err == nil && n > 0 {
@@ -861,6 +873,7 @@ func scheduleRetention(db *store.DB, attachStore *attach.Store) {
 				log.Printf("保留期清理：attachments 删除 %d 个（%d 天前）", n, d)
 			}
 		}
+		fs.CleanupExpiredShares()
 	}
 	run()
 	t := time.NewTicker(24 * time.Hour)

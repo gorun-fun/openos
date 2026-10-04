@@ -253,9 +253,9 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
       @pointerdown="onTitlePointerDown" @dblclick="store.toggleMaximize(win.id)"
     >
       <div class="traffic">
-        <button class="t close" title="关闭" @click="store.close(win.id)"><span>✕</span></button>
-        <button class="t min" title="最小化" @click="onMinimizeClick"><span>−</span></button>
-        <button class="t max" title="最大化" @click="store.toggleMaximize(win.id)"><span>⤢</span></button>
+        <button type="button" class="t close" title="关闭" aria-label="关闭窗口" @click="store.close(win.id)"><span>✕</span></button>
+        <button type="button" class="t min" title="最小化" aria-label="最小化窗口" @click="onMinimizeClick"><span>−</span></button>
+        <button type="button" class="t max" title="最大化" aria-label="最大化窗口" @click="store.toggleMaximize(win.id)"><span>⤢</span></button>
       </div>
       <template v-if="!merged">
         <div class="title">{{ win.title }}</div>

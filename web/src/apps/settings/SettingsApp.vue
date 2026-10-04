@@ -7,6 +7,7 @@ import { useApps } from '../../stores/apps'
 import { api, type AppDef } from '../../api/client'
 import { bus } from '../../bus/bus'
 import { shell } from '../../shell'
+import { t, setLocale, locale, LOCALES, LOCALE_SETTINGS_KEY, type Locale } from '../../i18n'
 import { osConfirm, toast } from '../../ui'
 import {
   OsButton, OsInput, OsSelect, OsToggle, OsPanel, OsTable, OsLayout, OsTabs, OsModal,
@@ -54,6 +55,16 @@ const items = computed(() => {
 })
 
 // ---- 外观 ----
+
+// 语言：即时生效并写账号设置（多端一致；登录页切换仅本地缓存）
+const curLocale = ref<Locale>(locale())
+function onLocaleChange(v: string | undefined) {
+  if (v !== 'zh-CN' && v !== 'en-US') return
+  const l = v as Locale
+  curLocale.value = l
+  setLocale(l)
+  void api.put('/api/settings', { key: LOCALE_SETTINGS_KEY, value: l }).catch(() => {})
+}
 
 // ---- 账户 ----
 const oldPwd = ref(''), newPwd = ref(''), pwdMsg = ref('')
@@ -403,6 +414,13 @@ watch(tab, (t) => {
             <div class="g-sub">窗口铺满全屏，鼠标移到屏幕底部时 Dock 滑出</div>
           </div>
           <OsToggle :model-value="desktop.dockAutoHide" @update:model-value="(v: any) => desktop.setDockAutoHide(!!v)" />
+        </div>
+        <div class="group">
+          <div class="g-text">
+            <div class="g-title">语言 / Language</div>
+            <div class="g-sub">界面语言（当前覆盖：登录页、菜单栏与系统提示；应用内文案渐进接入）</div>
+          </div>
+          <OsSelect :model-value="curLocale" :options="LOCALES.map((l) => ({ value: l.value, label: l.label }))" @update:model-value="onLocaleChange" />
         </div>
       </div>
       <h2 class="sec">壁纸</h2>

@@ -553,6 +553,55 @@ func randomHex(n int) string {
 	return hex.EncodeToString(buf)
 }
 
+// Introspect POST /api/auth/introspect —— 业务后端验证 OpenOS JWT（认证反向互通）。
+//
+// 宿主/业务后端拿到前端携带的 OpenOS JWT 后，服务端到服务端调用本端点确认令牌
+// 活性并取回身份，建立「OpenOS 用户 ↔ 业务账号」映射（如酒店后端把 OpenOS 壳内
+// 应用的请求映射到 staff）。协议为 RFC 7662 风格的子集：
+//   - 守护与令牌交换同一把 OPENOS_EXCHANGE_SECRET（X-Exchange-Secret 头）；未配置
+//     时端点 503，独立部署安全面不变；
+//   - 判定与 REST/WS 同源（签名/有效期/用户存在/角色未变/token_version/禁用态），
+//     被吊销令牌（改密/禁用/删号/角色变更）立即 active:false；
+//   - 响应恒 200：有效 {"active":true,sub,username,role,displayName,exp,iat}，
+//     无效 {"active":false}（不区分原因，保持协议简单）；
+//   - 逐请求一跳代价可观，调用方应缓存（建议 TTL 取 min(exp-now, 60s)，对齐服务端
+//     用户态 10s 缓存的吊销时延）。
+func (s *Service) Introspect(w http.ResponseWriter, r *http.Request) {
+	if s.exchangeSecret == "" {
+		jsonError(w, http.StatusServiceUnavailable, "令牌内省未启用（需配置 OPENOS_EXCHANGE_SECRET）")
+		return
+	}
+	ip := s.clientIP(r)
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Exchange-Secret")), []byte(s.exchangeSecret)) != 1 {
+		s.db.Audit("?", "auth.introspect.deny", "ip="+ip, ip)
+		jsonError(w, http.StatusUnauthorized, "密钥错误")
+		return
+	}
+	var req struct {
+		Token string `json:"token"`
+	}
+	if err := jsonDecode(r, &req); err != nil || req.Token == "" {
+		jsonError(w, 400, "参数错误")
+		return
+	}
+	c, err := s.Verify(req.Token)
+	if err != nil {
+		writeJSON(w, map[string]any{"active": false})
+		return
+	}
+	exists, role, tv, disabled := s.currentUserRole(c.Sub)
+	if !exists || role != c.Role || tv != c.TV || disabled {
+		writeJSON(w, map[string]any{"active": false})
+		return
+	}
+	info, _ := s.db.GetUserAuth(c.Sub)
+	writeJSON(w, map[string]any{
+		"active": true, "sub": c.Sub, "username": c.Sub,
+		"role": role, "displayName": info.DisplayName,
+		"exp": c.Exp, "iat": c.Iat,
+	})
+}
+
 // initialTokenVersion 新建用户的起始 token_version：取当前 Unix 秒，
 // 防止「删除用户后同名重建（tv 从 0 重新计数）导致删除前签发的旧令牌复活」。
 func initialTokenVersion() int64 { return time.Now().Unix() }

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch, type Component } from 'vue'
+import { t } from '../i18n'
 import { useSession } from '../stores/session'
 import { useWindows } from '../stores/windows'
 import { useDesktop } from '../stores/desktop'
@@ -115,19 +116,19 @@ defineExpose({ closeMenu })
     <nav class="left">
       <!-- 平时只保留一个系统图标；左侧其余菜单跟随当前应用（macOS 风格） -->
       <div class="menu-anchor">
-        <button class="mb logo" data-os-menu-anchor :title="shell.brand.name" @click="toggle('os')">{{ shell.brand.logo }}</button>
+        <button class="mb logo" data-os-menu-anchor :title="shell.brand.name" :aria-label="shell.brand.name" @click="toggle('os')">{{ shell.brand.logo }}</button>
         <div class="dropdown os-menu-root" v-if="menuOpen === 'os'">
-          <button @click="showAbout = true; closeMenu()">关于 {{ shell.brand.name }}…</button>
-          <button @click="windows.open('settings'); closeMenu()">系统设置…</button>
-          <button @click="emit('launchpad'); closeMenu()">启动台</button>
-          <button @click="windows.open('welcome'); closeMenu()">使用指南…</button>
+          <button @click="showAbout = true; closeMenu()">{{ t('menu.about') }} {{ shell.brand.name }}…</button>
+          <button @click="windows.open('settings'); closeMenu()">{{ t('menu.settings') }}</button>
+          <button @click="emit('launchpad'); closeMenu()">{{ t('menu.launchpad') }}</button>
+          <button @click="windows.open('welcome'); closeMenu()">{{ t('menu.guide') }}</button>
           <div class="sep" />
           <button @click="desktop.setDark(!desktop.dark); closeMenu()">
-            切换深色模式（当前{{ desktop.dark ? '深' : '浅' }}）
+            {{ t('menu.dark', { mode: t(desktop.dark ? 'menu.darkDark' : 'menu.darkLight') }) }}
           </button>
-          <button @click="desktop.setWallpaper(desktop.wallpaper + 1); closeMenu()">更换壁纸</button>
+          <button @click="desktop.setWallpaper(desktop.wallpaper + 1); closeMenu()">{{ t('menu.wallpaper') }}</button>
           <div class="sep" />
-          <button @click="logout">锁定屏幕 / 退出登录</button>
+          <button @click="logout">{{ t('menu.lock') }}</button>
         </div>
       </div>
 
@@ -177,17 +178,17 @@ defineExpose({ closeMenu })
       <!-- 宿主应用注入的菜单栏扩展（门店切换器/业务状态角标等），见 createOpenOS({menubarExtras})；支持数组多槽 -->
       <component :is="x" v-for="(x, i) in extras" :key="i" />
       <!-- 聚焦搜索（⌘/Alt+Space） -->
-      <button class="mb icon-btn" title="聚焦搜索（⌘/Alt+Space）" @click="emit('spotlight')">
+      <button class="mb icon-btn" title="聚焦搜索（⌘/Alt+Space）" aria-label="聚焦搜索" @click="emit('spotlight')">
         <svg viewBox="0 0 16 16" class="mb-svg"><circle cx="6.8" cy="6.8" r="4.6" fill="none" stroke="currentColor" stroke-width="1.5" /><line x1="10.4" y1="10.4" x2="14.2" y2="14.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg>
       </button>
       <span class="mb chip" :title="online.join('、')">👥 {{ online.length }} 在线</span>
       <span class="mb chip" :title="aiOn ? 'AI 已接入' : 'AI 演示模式（设置 → AI 服务 可配置）'">{{ aiOn ? '✦ AI' : '✦ AI·demo' }}</span>
-      <button class="mb chip icon" title="切换深浅色" @click="desktop.setDark(!desktop.dark)">
+      <button class="mb chip icon" title="切换深浅色" aria-label="切换深浅色" @click="desktop.setDark(!desktop.dark)">
         {{ desktop.dark ? '🌙' : '☀️' }}
       </button>
       <span class="mb user">{{ session.user?.displayName || session.user?.username }}</span>
       <!-- 时钟即通知中心入口（macOS 习惯）：点击唤出右侧通知面板，未读时显数字角标 -->
-      <button class="mb time" data-os-nc-clock title="通知中心" @click="notifications.togglePanel()">
+      <button class="mb time" data-os-nc-clock title="通知中心" aria-label="通知中心" @click="notifications.togglePanel()">
         {{ timeText }}
         <span v-if="notifications.unread" class="nc-badge">{{ notifications.unread > 99 ? '99+' : notifications.unread }}</span>
       </button>

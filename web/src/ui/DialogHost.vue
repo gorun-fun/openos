@@ -28,10 +28,10 @@ function onCardMount(el: any) {
 <template>
   <div v-for="d in dialogStack" :key="d.id" class="os-dialog-mask" :style="{ zIndex: d.z }"
        @pointerdown.self="d.backdropClose && d.cancel()">
-    <div class="os-dialog" :style="{ width: d.width + 'px' }" :ref="onCardMount">
+    <div class="os-dialog" :style="{ width: d.width + 'px' }" :ref="onCardMount" role="dialog" aria-modal="true" :aria-label="d.title">
       <header v-if="d.title">
         <span class="os-dialog-title">{{ d.title }}</span>
-        <button class="os-dialog-x" title="关闭" @click="d.cancel()"></button>
+        <button class="os-dialog-x" title="关闭" aria-label="关闭" @click="d.cancel()"></button>
       </header>
       <div class="os-dialog-body">
         <component v-if="compOf(d)" :is="compOf(d)" :params="d.params" :close="d.close" :cancel="d.cancel" />

@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { AUTH_NOTICE_KEY, api } from '../api/client'
+import { consumeShareHash, openShareDialog } from '../ui/shareDialog'
+import { setLocale, locale, LOCALE_SETTINGS_KEY } from '../i18n'
 import { useSession } from '../stores/session'
 import { useDesktop } from '../stores/desktop'
 import { useApps } from '../stores/apps'
@@ -11,6 +14,8 @@ import MenuBar from './MenuBar.vue'
 import Dock from './Dock.vue'
 import Launchpad from './Launchpad.vue'
 import Spotlight from './Spotlight.vue'
+import AppSwitcher from './AppSwitcher.vue'
+import { switcherState, switcherOpen, switcherStep, switcherCommit, switcherCancel } from './appSwitcher'
 import WindowFrame from './WindowFrame.vue'
 import Shortcuts from './Shortcuts.vue'
 import Widgets from './Widgets.vue'
@@ -46,9 +51,21 @@ const overlayList = computed(() => {
 const offs: (() => void)[] = []
 
 onMounted(async () => {
+  // 成功进入桌面即清除会话失效提示（防 SSO 往返后残留到下一次登出）
+  try { sessionStorage.removeItem(AUTH_NOTICE_KEY) } catch { /* ignore */ }
   desktop.load()
   await apps.refresh()
   bus.connect(session.user!.username)
+  // 分享链接接收：/#share=<id> 片段（未登录时先过登录，SPA 内登录片段保留）
+  const shareId = consumeShareHash()
+  if (shareId) void openShareDialog(shareId)
+
+  // 语言同步：服务端 user_settings 的 locale 优先（多端一致），未设置则保持本地
+  try {
+    const kv = await api.get<Record<string, string>>('/api/settings')
+    const saved = kv?.[LOCALE_SETTINGS_KEY]
+    if ((saved === 'zh-CN' || saved === 'en-US') && saved !== locale()) setLocale(saved)
+  } catch { /* ignore */ }
 
   // 通知中心：加载历史/偏好 + 订阅总线 sys:notify（服务端定向与其他端广播）
   offs.push(notifications.install())
@@ -80,6 +97,7 @@ onMounted(async () => {
 
   window.addEventListener('resize', onResize)
   window.addEventListener('keydown', onShortcut)
+  window.addEventListener('keyup', onShortcutKeyUp)
   // iOS 软键盘弹出不改 innerHeight 也不触发 window resize：visualViewport 跟随
   // （移动形态下全屏窗口收缩到键盘上方，桌面形态回调直接返回）
   window.visualViewport?.addEventListener('resize', onVVChange)
@@ -93,6 +111,7 @@ onBeforeUnmount(() => {
   offs.forEach((off) => off())
   window.removeEventListener('resize', onResize)
   window.removeEventListener('keydown', onShortcut)
+  window.removeEventListener('keyup', onShortcutKeyUp)
   window.visualViewport?.removeEventListener('resize', onVVChange)
   window.visualViewport?.removeEventListener('scroll', onVVChange)
   window.removeEventListener('popstate', onPopState)
@@ -227,6 +246,7 @@ function onShortcut(e: KeyboardEvent) {
   if (e.key === 'Escape') {
     launchpadOpen.value = false
     spotOpen.value = false
+    switcherCancel()
     return
   }
   // 聚焦搜索：⌘/Ctrl/Alt + Space（macOS 为 ⌘Space；浏览器内 Alt 最稳）。
@@ -237,6 +257,19 @@ function onShortcut(e: KeyboardEvent) {
     return
   }
   if (e.key === 'F4') { launchpadOpen.value = !launchpadOpen.value; e.preventDefault(); return } // 启动台
+  // 应用切换器：⌘/Alt + Tab（输入框内也生效——OS 级语义；打开后 Tab/方向键步进，
+  // 松开修饰键提交，见 onShortcutKeyUp 与 desktop/appSwitcher.ts）
+  if (e.key === 'Tab' && (e.altKey || e.metaKey)) {
+    e.preventDefault()
+    e.stopPropagation()
+    if (switcherState.open) switcherStep(e.shiftKey ? -1 : 1)
+    else switcherOpen()
+    return
+  }
+  if (switcherState.open) {
+    if (e.key === 'ArrowLeft') { switcherStep(-1); e.preventDefault(); return }
+    if (e.key === 'ArrowRight') { switcherStep(1); e.preventDefault(); return }
+  }
   if (!e.altKey || inField) return
   const w = windows.active
   switch (e.key) {
@@ -245,6 +278,11 @@ function onShortcut(e: KeyboardEvent) {
     case 'Enter': if (w) { windows.toggleMaximize(w.id); e.preventDefault(); } break
     case '`': windows.cycle(); e.preventDefault(); break
   }
+}
+
+// 切换器提交：松开修饰键（Alt/Meta）即切换到选中应用
+function onShortcutKeyUp(e: KeyboardEvent) {
+  if (switcherState.open && (e.key === 'Alt' || e.key === 'Meta')) switcherCommit()
 }
 
 // ---- 窗口状态持久化（同用户刷新后恢复） ----
@@ -378,7 +416,8 @@ function ctxCycleNoteColor() {
 
     <Dock v-if="!isMobile" @launchpad="launchpadOpen = true" />
     <Launchpad v-if="!isMobile && launchpadOpen" @close="launchpadOpen = false" />
-    <!-- 移动形态悬浮胶囊（系统导航：回桌面/多任务/更多，可拖成悬浮球） -->
+    <!-- 应用切换器（⌘/Alt+Tab overlay；桌面形态专用） -->
+    <AppSwitcher v-if="!isMobile" />    <!-- 移动形态悬浮胶囊（系统导航：回桌面/多任务/更多，可拖成悬浮球） -->
     <MobilePill v-if="isMobile && !showHome" @home="goHome" />
 
     <Spotlight v-if="spotOpen" @close="spotOpen = false" />

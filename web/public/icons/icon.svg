@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- OpenOS 应用图标：深青渐变 + 显示器（内缩 12% 满足 maskable 安全区） -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#16323d"/>
+      <stop offset="1" stop-color="#2c5364"/>
+    </linearGradient>
+    <linearGradient id="scr" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#9fe3ff"/>
+      <stop offset="1" stop-color="#4fb3d9"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <g>
+    <rect x="116" y="128" width="280" height="190" rx="22" fill="#0d1f27"/>
+    <rect x="132" y="144" width="248" height="158" rx="12" fill="url(#scr)"/>
+    <rect x="236" y="318" width="40" height="34" fill="#22414e"/>
+    <rect x="176" y="352" width="160" height="22" rx="11" fill="#31505e"/>
+    <circle cx="168" cy="223" r="13" fill="#ffffff" opacity=".92"/>
+    <circle cx="168" cy="223" r="24" fill="none" stroke="#ffffff" stroke-width="5" opacity=".45"/>
+    <rect x="208" y="196" width="132" height="14" rx="7" fill="#ffffff" opacity=".8"/>
+    <rect x="208" y="224" width="96" height="12" rx="6" fill="#ffffff" opacity=".55"/>
+    <rect x="208" y="246" width="112" height="12" rx="6" fill="#ffffff" opacity=".4"/>
+  </g>
+</svg>

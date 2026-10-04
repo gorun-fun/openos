@@ -228,3 +228,20 @@ button { font-family: inherit; }
   /* 融合窗体工具栏：移动形态无红绿灯，去掉 84px 悬浮位 */
   .os-tb { padding-left: 12px; }
 }
+
+/* ---- 无障碍基线 ----
+   ① 键盘焦点可见：全系统统一 :focus-visible 焦点环（鼠标操作不显环、Tab 导航显环，
+     组件自带 focus 样式不受影响——:focus-visible 只在键盘导航时命中）
+   ② 减弱动态：系统开启「减少动态效果」时收敛动画（窗口/弹层/滑入转场趋近瞬时） */
+:focus-visible {
+  outline: 2px solid var(--os-accent);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

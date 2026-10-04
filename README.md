@@ -10,7 +10,7 @@
 |---|---|
 | 🪟 窗体管理 | 拖拽、八向缩放、红绿灯、**边缘吸附（上=最大化/左右=半屏，带预览）**、最小化飞入 Dock 动画、焦点层级、窗口状态跨会话恢复、**最大化直角全屏形态** |
 | 🔎 聚焦搜索 | **Spotlight 拟合（⌘/Alt+Space 或菜单栏放大镜）**：应用 + 文件递归搜索 + 即时计算器 + 系统操作，文件结果带右侧预览面板（种类/大小/时间/缩略图） |
-| 🚀 桌面体验 | 启动台（F4，带搜索）、Dock 邻居放大、**Dock 可定制（拖动排序 / 拖出或右键取消固定 / 从启动台·桌面快捷方式拖入固定，未固定的运行应用临时驻留）**、**Dock 废纸篓（满/空状态、右键清倒）**、完整菜单栏（系统/窗口/帮助/关于、快捷键字形、macOS 时间格式）、快捷键（Alt+W/M/↩/\`）、窗口级错误边界、401 全局登出 |
+| 🚀 桌面体验 | 启动台（F4，带搜索）、Dock 邻居放大、**Dock 可定制（拖动排序 / 拖出或右键取消固定 / 从启动台·桌面快捷方式拖入固定，未固定的运行应用临时驻留）**、**Dock 废纸篓（满/空状态、右键清倒）**、完整菜单栏（系统/窗口/帮助/关于、快捷键字形、macOS 时间格式）、快捷键（Alt+W/M/↩/\`）、**应用切换器（⌘/Alt+Tab：按住循环选择、松开切换，macOS 风格大图标浮层）**、窗口级错误边界、401 全局登出 |
 | 🚌 事件总线 | WebSocket 主题订阅/发布，`*` 通配；本地即时分发 + 跨端广播；断线自动重连并重放订阅；服务端处理器同总线挂载 |
 | 🧩 开放能力 | ① 组件型：`OpenOS.registerApp()`（支持 template 字符串）② 声明式：JSON Schema 注册即得新应用（**带鉴权 REST / POST / 点路径 / 总线推送刷新**）③ Os* 业务组件库：**表格分页排序与单元格渲染插槽、表单校验（OsForm/OsField）、上传（OsUpload 带进度）、全局 Toast、打开/存储文件对话框（`fileDialog` 复用文件管理窗口选择；OsFilePicker 为窗口内 Sheet 形态）** |
 | ✦ Goder - AI助手 | **完整 AI 编程 IDE 内置**（goder 嵌入式集成：项目/会话/聊天/审查/终端/事件台，每用户独立 gh server，与 grf-play 同款集成方式），**默认置于桌面** |
@@ -18,7 +18,7 @@
 | 🔔 通知中心 | **系统级通知（仿 macOS）**：任何应用经 `OpenOS.notify()` 或总线 `sys:notify` 发送 → 右上角横幅（悬停暂停/点击跳转来源应用）+ **菜单栏时钟唤出的通知面板**（历史回看、未读红点、提示声/勿扰开关、一键清除）；历史与偏好按用户持久化；goder 的 `os_notify` 同走此通道 |
 | 📅 日历 | **中国节假日同步（内置已发布年份 + holiday-cn/timor 双源在线更新，调休「休/班」标记）**、农历/传统节日副行（干支/生肖）、日程管理（标题/日期/时间/提前提醒：事件时刻~提前1天）、**提醒到期经通知中心横幅弹出（应用关闭也提醒）**；桌面日历小组件（今日大字 + 迷你月历，点日期直达） |
 | 📦 内置应用 | **双模式终端（虚拟 ⇄ 真实 shell，ANSI 彩色，Tab 补全，一体式工具栏）**、**访达式文件管理（见下）**、计算器（圆形按键/明暗主题/退格）、系统设置（彩色边栏 + 分组行 + 壁纸缩略图）、**通用网页应用容器（iframe 直嵌 / 服务端代理两形态，管理界面可零代码收录站点）** |
-| 🗂 文件（访达拟合） | **图标/列表/分栏/画廊四视图**、**右键菜单（打开/打开方式/快速查看/显示简介/拷贝/剪切/复制副本）**、**多选（⌘点选/Shift 范围/⌘A）**、**键盘导航（方向键/⏎重命名/空格快速预览/⌫ 移到废纸篓）**、**拖拽移动（拖入文件夹/侧栏目录/废纸篓，⌥ 拖拽复制）**、**废纸篓（移入/清倒/Dock 联动）**、图片缩略图、底部路径栏、原位重命名、`/api/fs/search` 递归搜索与 `/api/fs/copy` 复制端点 |
+| 🗂 文件（访达拟合） | **图标/列表/分栏/画廊四视图**、**右键菜单（打开/打开方式/快速查看/显示简介/拷贝/剪切/复制副本/分享链接）**、**多选（⌘点选/Shift 范围/⌘A）**、**键盘导航（方向键/⏎重命名/空格快速预览/⌫ 移到废纸篓）**、**拖拽移动（拖入文件夹/侧栏目录/废纸篓，⌥ 拖拽复制）**、**废纸篓（移入/清倒/Dock 联动）**、图片缩略图、底部路径栏、原位重命名、`/api/fs/search` 递归搜索与 `/api/fs/copy` 复制端点、**分享链接（跨用户共享，见「文件分享链接」）** |
 | 📑 办公应用 | **文档 = Markdown 编辑器（编辑/分栏/预览，⌘S/另存为/打开…，自动保存，md 源码保真）**；**表格 = CSV/TSV（动态行列、边缘自动扩张、⌘S/另存为/打开…、Excel 剪贴板互通、公式引擎）**；**幻灯片 = HTML 格式（画布直接富文本编辑、深浅主题、演示模式、导出独立 HTML 双击即可放映、兼容旧 .slides.json 自动升级）**；PDF（文件空间/本机打开、翻页缩放）——三者均直接读写服务端文件并与文件应用双击联动 |
 | 👥 多用户多角色 | admin/user/guest，角色×应用授权矩阵实时生效，**角色变更/删除用户令牌即时吊销** |
 | 🔐 安全 | pbkdf2-20000（旧 hash 透明升级）、JWT 带版本号、登录防爆破锁定、IP 限流、安全响应头、审计日志、最后管理员保护、路径越权防护 |
@@ -119,6 +119,22 @@ export OPENOS_AI_MODEL=glm-4-flash
 - **聊天室消息历史**：总线 `chat:room` 的消息由服务端处理器落库（`chat_room_messages` 表，From/TS 由 Hub 注入不可伪造；附件存内嵌快照，附件本体可能先被保留期清理）；`GET /api/chat/history?before=<id>&limit=50`（登录可用，倒序分页、正序返回，limit 上限 100）查询；保留期随 `OPENOS_CHAT_RETENTION_DAYS`（默认 90 天）清理。同一用户多标签页 = 多条连接，应用侧应按连接计数（在线名单以快照纠偏为准）。
 - **系统附件**（`server/internal/attach`）：平台级文件分享能力，聊天附件等共用——`POST /api/attachments`（multipart 字段 `file`，单文件 ≤10MB，登录）上传返回 `{id,name,mime,size}`（id 为 128bit 随机不可枚举，mime 以内容嗅探为准）；`GET /api/attachments/{id}?token=<jwt>` 下载（`<img>/<a>` 标签带不了 Authorization header，鉴权走查询参数同 `/ws`；`api.upload()` 客户端方法自动携带登录态）。**安全边界**：Content-Type 只对图片白名单（png/jpeg/gif/webp/bmp/avif）内联，其余（含 SVG/HTML——可携带脚本）一律 `application/octet-stream` 下载 + `nosniff`，附件服务不可变成 HTML 注入源；保留期清理 `OPENOS_ATTACH_RETENTION_DAYS`（默认 30 天，0=永久），文件存 `<data>/attachments/`。
 
+### 文件分享链接（跨用户共享）
+
+多用户之间「把文件给别人」的通道（`server/internal/vfs/share.go`）：文件应用内
+右键单个文件 → **分享链接…**，生成 `<origin>/#share=<id>` 复制到剪贴板（默认 7 天
+有效，上限 30 天）；接收方打开链接（未登录先过登录）弹出系统级接收弹窗，可
+**存入我的文档**（走 SaveToDocs：配额/同名幂等/fs:changed 刷新全部继承）或下载。
+文件应用侧栏「分享」分组可查看自己的有效分享并随时撤销。
+
+- 端点：`POST /api/fs/shares`（创建）/ `GET /api/fs/shares`（我的）/ `DELETE /api/fs/shares/{id}`
+  （撤销）；消费端 `GET /api/share/{id}`（元信息）、`GET /api/share/{id}/download`、
+  `POST /api/share/{id}/save` —— 均在登录 mux 上，**分享 id（128bit 随机不可枚举）
+  是授权凭据、登录态是身份门槛，二者缺一不可**；
+- 安全边界：下载恒 `attachment` + `nosniff`（分享链接可进入任意场景，绝不内联渲染，
+  与附件服务同一注入防线）；底稿文件被删/移动后链接即刻 404，到期由保留期任务清理；
+- 已知限制：SSO 模式全程跳转（IdP 回跳）可能丢失 `#share=` 片段，本地账号登录不受影响。
+
 ### 前端总线 API
 
 ```ts
@@ -130,7 +146,25 @@ bus.remote('term:admin', 'ls')                     // 仅发服务端处理器
 ```
 
 订阅任意主题（含业务自定义主题，如 `hotel:rooms`）时会自动向服务端补发远程订阅，
-跨端推送即订即达；本地最后一个消费者移除后自动退订。
+跨端推送即订即达；本地最后一个消费者移除后自动退订。断线自动重连（指数退避，
+上限 20 次），**重连前先探测会话**（`/api/auth/me`）：令牌被吊销（改密/禁用/删号）
+时立即回登录页并带失效提示（经 sessionStorage 传递，登录成功时清除；REST 401 走
+同一提示，不区分触发通道），网络/服务
+闪断则照常退避——总线不会因会话已死而静默装死。
+
+### 桌面快捷键与应用切换器
+
+| 快捷键 | 行为 |
+|---|---|
+| ⌘/Ctrl/Alt + Space | 聚焦搜索（Spotlight） |
+| F4 | 启动台 |
+| **⌘/Alt + Tab** | **应用切换器**：按住循环选择（Shift 反向、左右箭头微调）、松开修饰键切换（`web/src/desktop/appSwitcher.ts`） |
+| Alt + \` | 同应用窗口循环 |
+| Alt + W / M / ↩ | 关闭 / 最小化 / 最大化当前窗口 |
+
+浏览器约束：macOS 的 ⌘Tab 与 Windows 的 Win+Tab 被操作系统消费，网页拿不到，
+因此切换器以 **Alt+Tab 为主绑定**（macOS 为 Option+Tab；Windows 全屏 kiosk 下
+Alt+Tab 亦可到达页面）。多窗口并行（goder + 文件 + 终端）时切换效率对齐桌面系统。
 
 ## goder 工作台（内置 AI 编程 IDE）
 
@@ -366,6 +400,51 @@ curl -X POST http://127.0.0.1:8081/api/auth/exchange \
 自愈可直接调它换新令牌，无需每次回 SSO 重新交换（openos 令牌仍有效、仅酒店会话过期
 等场景）；独立部署下前端已内置每 12 小时 + 回前台的滑动续期，长开桌面不掉线。
 
+**认证反向互通（业务后端验证 OpenOS JWT）**——`POST /api/auth/introspect`：
+
+交换是「宿主 SSO → OpenOS 身份」的正向链路；反向（宿主的业务后端验证前端带来的
+OpenOS JWT、映射到自己的账号体系，如 staff）走内省端点（RFC 7662 风格），守护与
+交换同一把 `OPENOS_EXCHANGE_SECRET`，未配置时端点 503：
+
+```go
+// openosToken = 前端业务应用随 API 提交的 OpenOS 令牌
+//（壳内应用经 OpenOS.authToken() 取，Authorization: Bearer <openos-jwt>）
+func introspect(openosToken string) (id struct {
+	Active      bool   `json:"active"`
+	Username    string `json:"username"`
+	Role        string `json:"role"`
+	DisplayName string `json:"displayName"`
+	Exp         int64  `json:"exp"`
+}, err error) {
+	body, _ := json.Marshal(map[string]string{"token": openosToken})
+	req, _ := http.NewRequest("POST", "http://127.0.0.1:8081/api/auth/introspect", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Exchange-Secret", os.Getenv("OPENOS_EXCHANGE_SECRET"))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return id, err
+	}
+	defer resp.Body.Close()
+	if err = json.NewDecoder(resp.Body).Decode(&id); err != nil {
+		return id, err
+	}
+	if !id.Active {
+		return id, errors.New("openos 会话已失效")
+	}
+	return id, nil
+}
+```
+
+- 判定与 REST/WS 同源（签名/有效期/用户存在/角色未变/token_version/禁用态），被吊销
+  令牌（改密/禁用/删号/角色变更）立即 `active:false`；
+- 响应恒 200：有效 `{"active":true,"sub","username","role","displayName","exp","iat"}`，
+  无效 `{"active":false}`；
+- 逐请求一跳有代价，业务后端应缓存结论（建议 TTL 取 `min(exp-now, 60s)`，对齐服务端
+  用户态 10s 缓存的吊销时延）；
+- 高信任同机部署也可本地 HS256 验签（claims 为 `sub/role/tv/exp/iat`，显式配置
+  `OPENOS_JWT_SECRET` 时两方共享同一密钥即可），但持有签发密钥等于可伪造任意令牌——
+  跨信任边界一律走内省。
+
 **批量用户同步**：`POST /api/users/sync`（admin）幂等推送用户清单——不存在则开通
 （随机密码），存在则按字段更新（角色/显示名/禁用态，变化即热吊销）；最后一名管理员
 的降级/禁用会被跳过并在响应 `skipped` 中说明。配合 exchange 的惰性开通，宿主可选
@@ -434,9 +513,48 @@ const off = bus.on('app:hotel.finance:changed', (p) => refresh(p.date))
 ```
 
 同 bundle 的宿主应用（方式三）也可以直接共享 Pinia store，按耦合偏好二选一；
-独立部署/声明式应用之间则一律走「后端 REST + 总线推送」。弹窗回传值
-（`openDialog` 的 Promise）是联动的第三种形态——适合「让用户在 B 里选一次，A 拿结果」
-的交互（内置范本：`ui/fileDialog` 文件选择即此模式）。
+独立部署/声明式应用之间则一律走「后端 REST + 总线推送」。
+
+**③ 拉起窗口等结果——让 B 应用开一个完整窗口办事，A 拿结果继续**
+
+弹窗（①）是系统级模态浮层；当 B 的能力需要一个独立窗口（浏览/多步操作），
+用 `OpenOS.launch`——它是 `open()` 的「可等待」版本，也是 `ui/fileDialog`
+（文件选择）模式的通用化，任何应用（含商店 bundle 应用）都可做目标端：
+
+```ts
+// 订单应用：拉起房态管理窗口办理入住，办完拿结果继续本应用流程
+const stay = await OpenOS.launch('roommgmt', { view: 'checkin', roomId: 42 },
+                                 { title: '办理入住', width: 760, height: 560, from: 'orders' })
+if (stay) toast(`入住成功：房号 ${stay.roomNo}`, { type: 'success' })
+```
+
+目标应用从窗口 props 的**保留键 `__launch`** 识别拉起态，完成后回执：
+
+```vue
+<script setup lang="ts">
+// 房态管理主窗口（bundle 应用同款，API 换 window.OpenOS）
+import { launchOf, resolveLaunch } from '@/ui'
+const props = defineProps<{ win: WinState }>()
+const launched = launchOf(props.win.props)   // 普通 open() 打开时为 null，行为不变
+// ……办理流程；用户确认后：
+resolveLaunch(launched.reqId, { roomNo: '8203', stayId: 's-1024' })
+// 用户点取消：resolveLaunch(launched.reqId, null)
+</script>
+```
+
+协议要点：
+
+- `props` 业务参数应用自定义（现有约定：`path`/`url`/`view`…），框架只追加
+  保留键 `__launch: { reqId, from }`，与既有消费方式互不影响；
+- `resolveLaunch(reqId, result)` 幂等，只生效一次；result 建议 JSON 可序列化；
+  回执不自动关窗，目标应用按需自行 `useWindows().close(props.win.id)`
+  （内置范本 FilesApp 的选择窗口即确认/取消后自关）；
+- **关窗即取消**：窗口被关闭而未应答时框架兜底 resolve null（应用无须自行处理
+  卸载钩子）；目标应用不感知本协议时，launch 退化为「等窗口关闭」——永不悬空；
+- 每次 launch 的 reqId 唯一：同应用同参数的多次拉起各开各的窗口、各自应答
+  （不走 `open()` 的同参数去重）；
+- `from` 缺省取调用时焦点窗口的应用 id，供目标应用区分来源；`opts.from` 可显式指定；
+- `hidden: true` 的详情窗口类应用是典型目标端（不出现在启动台/Dock，只被拉起）。
 
 ### 方式四：网页应用（iframe 集成，收录现成站点）
 
@@ -613,6 +731,29 @@ document.cookie 双落空，`--disable-features` 关不掉）：
 **安全边界**：`--disable-web-security` 意味着窗口内跨源脚本可互访，专用 profile 仅用于
 打开 OpenOS；CDP 端口只绑 127.0.0.1；窗口内等于本机真实浏览器会话，勿指向不可信的
 OpenOS 实例。无站点隔离下桌面页与嵌入应用共享渲染进程，重应用可能拖慢整页。
+
+## PWA 与国际化
+
+**PWA（安装到主屏/桌面）**：`web/public/` 提供 `manifest.webmanifest`、`sw.js` 与
+图标（192/512/maskable），index.html 注入 manifest/theme-color/apple-touch-icon；
+`createOpenOS()` 在**生产构建**下注册 service worker（dev 不注册，避免热更新被缓存
+干扰）。策略刻意保守：`/api`、`/ws`、`/goder-api`、`/app`、`/vendor` 一律网络直通
+（动态数据绝不缓存），导航 network-first（离线可打开登录页），静态资源
+stale-while-revalidate。宿主集成注意：宿主 dist 需带上 `public/`（sw.js + manifest +
+图标）并保持根路径部署，否则注册静默降级为普通网页。
+
+**国际化（i18n）**：`web/src/i18n/` 提供轻量运行时多语言——响应式 `t()`（渲染期
+调用，切换即时重渲染）、`setLocale()`（写本地缓存 + 由调用方持久化到
+user_settings 的 `locale` 键，多端一致）、`extendMessages()`（宿主词条注入）。
+当前覆盖壳面（登录页、菜单栏系统菜单、系统提示与分享弹窗）与公共词条，应用内
+文案按 `t('key')` 约定**渐进接入**（中文为一等语言，缺 key 回落中文再回落 key 本身）。
+入口：登录页底部语言切换（未登录仅本地生效）与「系统设置 → 外观 → 语言」；
+宿主可 `createOpenOS({ i18n: { locale, messages } })` 锁定初始语言并覆盖词条。
+
+**无障碍基线**：全局 `:focus-visible` 焦点环（键盘导航可见、鼠标操作不打扰）、
+`prefers-reduced-motion` 动画收敛、壳面交互控件 aria 标签（红绿灯/菜单栏图标钮/
+登录表单/弹窗 role=dialog/轻提示 role=status）。新增交互控件约定：图标按钮必须带
+`aria-label`，弹窗容器 `role="dialog" aria-modal="true"`。
 
 ## 项目结构
 

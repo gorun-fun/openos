@@ -6,7 +6,7 @@ const state = toastState()
 </script>
 
 <template>
-  <div class="os-toasts">
+  <div class="os-toasts" role="status" aria-live="polite">
     <transition-group name="os-toast">
       <div v-for="t in state.list" :key="t.id" class="os-toast os-glass" :class="t.type">
         <span v-if="t.type === 'success'" class="dot ok" />

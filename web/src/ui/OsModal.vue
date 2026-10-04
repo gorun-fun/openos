@@ -5,7 +5,7 @@ const emit = defineEmits<{ ok: []; cancel: [] }>()
 
 <template>
   <div class="os-modal-mask" @pointerdown.self="emit('cancel')">
-    <div class="os-modal">
+    <div class="os-modal" role="dialog" aria-modal="true" :aria-label="title">
       <h3>{{ title }}</h3>
       <div class="content"><slot /></div>
       <footer>

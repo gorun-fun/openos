@@ -2,8 +2,15 @@ package vfs
 
 import (
 	"encoding/base64"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
+	"openos/server/internal/auth"
 	"openos/server/internal/bus"
 	"openos/server/internal/store"
 )
@@ -103,5 +110,97 @@ func TestSaveToDocs(t *testing.T) {
 	fs.db.QueryRow(`SELECT is_binary,content FROM files WHERE owner=? AND path=?`, "bob", p3).Scan(&isBin, &content)
 	if isBin != 1 || content != base64.StdEncoding.EncodeToString([]byte{0x89, 'P', 'N', 'G'}) {
 		t.Fatalf("二进制存储形态错误: isBin=%d", isBin)
+	}
+}
+
+func TestShares(t *testing.T) {
+	f := newFS(t)
+	f.EnsureHome("alice") // 建 home 与「文档」等目录
+	f.db.Exec(`INSERT INTO files(owner,path,is_dir,content) VALUES('alice','/home/alice/notes.md',0,'hello')`)
+
+	do := func(method, target, body, user, pv string, h func(http.ResponseWriter, *http.Request)) (*httptest.ResponseRecorder, map[string]any) {
+		var rd io.Reader
+		if body != "" {
+			rd = strings.NewReader(body)
+		}
+		req := httptest.NewRequest(method, target, rd)
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		req.SetPathValue("id", pv) // 直调 handler 须经 SetPathValue 模拟路由填充
+		req = auth.WithIdentity(req, &auth.Identity{Username: user, Role: "user"})
+		w := httptest.NewRecorder()
+		h(w, req)
+		var m map[string]any
+		json.Unmarshal(w.Body.Bytes(), &m)
+		return w, m
+	}
+
+	// 目录不能分享
+	if w, _ := do("POST", "/api/fs/shares", `{"path":"/home/alice/文档"}`, "alice", "", f.CreateShare); w.Code != 400 {
+		t.Fatalf("dir share should 400, got %d", w.Code)
+	}
+	// 创建 → 拿到 id
+	w, m := do("POST", "/api/fs/shares", `{"path":"/home/alice/notes.md"}`, "alice", "", f.CreateShare)
+	if w.Code != 200 {
+		t.Fatalf("create share: %d %s", w.Code, w.Body.String())
+	}
+	id, _ := m["id"].(string)
+	if len(id) != 32 {
+		t.Fatalf("share id should be 128bit hex, got %q", id)
+	}
+	// bob 查看元信息 + 下载
+	if w, m = do("GET", "/api/share/"+id, "", "bob", id, f.ShareInfo); w.Code != 200 || m["owner"] != "alice" || m["name"] != "notes.md" {
+		t.Fatalf("share info: %d %v", w.Code, m)
+	}
+	if w, _ = do("GET", "/api/share/"+id+"/download", "", "bob", id, f.ShareDownload); w.Code != 200 || w.Body.String() != "hello" {
+		t.Fatalf("share download: %d %q", w.Code, w.Body.String())
+	}
+	if disp := w.Header().Get("Content-Disposition"); !strings.Contains(disp, "attachment") {
+		t.Fatalf("download must be attachment, got %q", disp)
+	}
+	// bob 存入自己的文档（SaveToDocs 幂等/配额继承）
+	f.EnsureHome("bob")
+	if w, m = do("POST", "/api/share/"+id+"/save", "", "bob", id, f.ShareSave); w.Code != 200 {
+		t.Fatalf("share save: %d %s", w.Code, w.Body.String())
+	}
+	if m["path"] != "/home/bob/文档/notes.md" {
+		t.Fatalf("save target: %v", m)
+	}
+	// bob 不能撤销 alice 的分享
+	if w, _ = do("DELETE", "/api/fs/shares/"+id, "", "bob", id, f.RevokeShare); w.Code != 403 {
+		t.Fatalf("bob revoke should 403, got %d", w.Code)
+	}
+	// alice 的分享列表
+	if w, m = do("GET", "/api/fs/shares", "", "alice", "", f.ListShares); w.Code != 200 {
+		t.Fatalf("list shares: %d", w.Code)
+	}
+	if lst, ok := m["id"].([]any); ok || w.Body.String() == "" {
+		_ = lst
+	}
+	if !strings.Contains(w.Body.String(), id) {
+		t.Fatalf("list should contain share id: %s", w.Body.String())
+	}
+	// alice 撤销 → bob 一律 404
+	if w, _ = do("DELETE", "/api/fs/shares/"+id, "", "alice", id, f.RevokeShare); w.Code != 200 {
+		t.Fatalf("revoke: %d", w.Code)
+	}
+	if w, _ = do("GET", "/api/share/"+id, "", "bob", id, f.ShareInfo); w.Code != 404 {
+		t.Fatalf("revoked info should 404, got %d", w.Code)
+	}
+	// 底稿删除 → 链接失聪
+	w, m = do("POST", "/api/fs/shares", `{"path":"/home/alice/notes.md"}`, "alice", "", f.CreateShare)
+	id2, _ := m["id"].(string)
+	f.db.Exec(`DELETE FROM files WHERE owner='alice' AND path='/home/alice/notes.md'`)
+	if w, _ = do("GET", "/api/share/"+id2, "", "bob", id2, f.ShareInfo); w.Code != 404 {
+		t.Fatalf("dead link should 404, got %d", w.Code)
+	}
+	// 过期清理
+	f.db.Exec(`INSERT INTO shares(id,owner,path,name,size,expires_at) VALUES('dead','alice','/home/alice/x','x',1,?)`, time.Now().Add(-time.Hour).UTC().Format(sqliteTime))
+	f.CleanupExpiredShares()
+	var n int
+	f.db.QueryRow(`SELECT COUNT(*) FROM shares WHERE id='dead'`).Scan(&n)
+	if n != 0 {
+		t.Fatal("expired share should be cleaned")
 	}
 }

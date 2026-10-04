@@ -14,7 +14,8 @@
 // 通信：OpenOS.bus 与桌面事件总线互通；OpenOS.ui 暴露基础组件库；
 // 通知：OpenOS.toast（轻提示）/ OpenOS.notify（系统通知中心）；
 // 文件与窗口：OpenOS.fs / OpenOS.windows；日程：OpenOS.calendar；
-// 跨应用弹窗：OpenOS.registerDialog / OpenOS.openDialog（见 ui/dialogService.ts）。
+// 跨应用弹窗：OpenOS.registerDialog / OpenOS.openDialog（见 ui/dialogService.ts）；
+// 跨应用拉起等结果：OpenOS.launch / resolveLaunch / launchOf（见 ui/launch.ts）。
 import { bus } from '../bus/bus'
 import * as ui from '../ui'
 import * as vueSDK from 'vue'
@@ -27,6 +28,7 @@ import { api, fsApi, getToken, type SessionUser } from '../api/client'
 import { notify } from '../stores/notifications'
 import { useCalendar, todayStr, REMIND_OPTIONS, type CalMark, type RemindOffset } from '../stores/calendar'
 import { registerDialog, unregisterDialog, openDialog, dialogRegistry, type DialogDef } from '../ui/dialogService'
+import { launch, resolveLaunch, launchOf } from '../ui/launch'
 import { openPath } from '../apps/openWith'
 
 export interface RegisterOptions {
@@ -85,6 +87,17 @@ export const OpenOS = {
   open(appId: string, props?: any) {
     return useWindows().open(appId, props)
   },
+  /**
+   * 拉起目标应用窗口并等待业务结果（open 的可等待版，独立窗口形态的跨应用联动）：
+   * 目标应用从窗口 props 的保留键 __launch 识别（OpenOS.launchOf）并以
+   * OpenOS.resolveLaunch(reqId, result) 回执；取消/关窗/应用不感知协议时 resolve null。
+   * const stay = await OpenOS.launch('roommgmt', { view: 'checkin', roomId }, { title: '办理入住' })
+   */
+  launch,
+  /** 目标应用回执 launch：完成传业务结果，取消传 null；幂等，重复调用只生效一次。 */
+  resolveLaunch,
+  /** 目标应用侧辅助：从窗口 props 提取拉起信封（launchOf(props.win.props)），普通 open() 打开时为 null。 */
+  launchOf,
   /** 打开一个 VFS 文件：按扩展名分发到对应应用（md/txt→文档、csv→表格、
    *  html→幻灯片、pdf→PDF、图片→文件应用快速预览），映射与文件应用一致。 */
   openFile(path: string): string | null {

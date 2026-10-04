@@ -1,4 +1,7 @@
 // REST API 客户端：自动携带 JWT，统一错误处理，401 全局登出。
+// （i18n 的 t() 反向引用于此——i18n 模块保持零依赖避免环，见 src/i18n/index.ts）
+import { t } from '../i18n'
+
 const TOKEN_KEY = 'openos_token'
 
 export function getToken(): string { return localStorage.getItem(TOKEN_KEY) || '' }
@@ -9,6 +12,20 @@ export function clearToken() { localStorage.removeItem(TOKEN_KEY) }
 let onUnauthorized: (() => void) | null = null
 export function setUnauthorizedHandler(fn: () => void) { onUnauthorized = fn }
 
+/** 触发全局登出（清令牌 + 带 sessionStorage 提示 + 回调）；REST 401 与总线断线
+ *  探测共用——提示由登录页读后即清（跨 location.reload / SSO 跳转存活）。 */
+export function triggerUnauthorized() {
+  try {
+    sessionStorage.setItem(AUTH_NOTICE_KEY, t('login.expired'))
+  } catch { /* 隐私模式等存储受限时静默降级 */ }
+  clearToken()
+  onUnauthorized?.()
+}
+
+/** 会话失效提示的传递键：总线探测到被踢时写入 sessionStorage，登录页读后即清
+ *  （跨 location.reload / SSO 跳转存活，见 bus.ts）。 */
+export const AUTH_NOTICE_KEY = 'openos_auth_notice'
+
 export class ApiError extends Error {
   status: number
   constructor(status: number, msg: string) { super(msg); this.status = status }
@@ -18,8 +35,7 @@ async function handleResp<T>(resp: Response, path: string): Promise<T> {
   if (resp.status === 401) {
     // 登录过期 / 凭证被吊销：清理并回到登录页（登录接口本身除外）
     if (!path.includes('/api/auth/login')) {
-      clearToken()
-      onUnauthorized?.()
+      triggerUnauthorized()
       throw new ApiError(401, '登录已过期')
     }
   }
@@ -88,6 +104,8 @@ export interface AppDef {
   height: number
 }
 export interface VFile { path: string; isDir: boolean; isBinary?: boolean; size: number; updatedAt: string }
+/** 我创建的分享（GET /api/fs/shares） */
+export interface ShareDef { id: string; path: string; name: string; size: number; createdAt: string; expiresAt: string }
 
 // 带鉴权的原始文件 URL（fetch 用；<img>/<iframe> 需另走 blob）
 export function rawFileUrl(path: string): string {
@@ -111,6 +129,14 @@ export const fsApi = {
   usage: () => api.get<{ used: number; quota: number }>(`/api/fs/usage`),
   search: (q: string, limit = 50) => api.get<VFile[]>(`/api/fs/search?q=${encodeURIComponent(q)}&limit=${limit}`),
   copy: (from: string, to: string) => api.post<{ ok: string }>(`/api/fs/copy`, { from, to }),
+  // ---- 文件分享链接（跨用户共享；消费端 openShareDialog / #share=<id>）----
+  createShare: (path: string, days?: number) =>
+    api.post<{ id: string; url: string; expiresAt: string; days: number }>('/api/fs/shares', { path, days }),
+  listShares: () => api.get<ShareDef[]>('/api/fs/shares'),
+  revokeShare: (id: string) => api.del<{ ok: string }>(`/api/fs/shares/${encodeURIComponent(id)}`),
+  shareInfo: (id: string) =>
+    api.get<{ path: string; name: string; owner: string; size: number }>(`/api/share/${encodeURIComponent(id)}`),
+  saveShare: (id: string) => api.post<{ path: string }>(`/api/share/${encodeURIComponent(id)}/save`),
   upload: async (dir: string, files: File[]): Promise<{ saved: string[] }> => {
     const fd = new FormData()
     fd.append('dir', dir)

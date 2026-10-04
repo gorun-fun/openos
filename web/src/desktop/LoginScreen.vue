@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { AUTH_NOTICE_KEY } from '../api/client'
+import { t, setLocale, locale, LOCALES } from '../i18n'
 import { useSession } from '../stores/session'
 import { useDesktop } from '../stores/desktop'
 import { shell } from '../shell'
@@ -14,6 +16,13 @@ const loading = ref(false)
 const sso = computed(() => (shell.login.mode === 'sso' ? shell.login : null))
 // 宿主 SSO 回跳失败时带 sso_error 参数，展示错误并保留手动重试（不再自动跳转）
 const ssoError = ref(new URLSearchParams(location.search).get('sso_error') || '')
+// 强制登出（REST 401 / 总线被踢）带来的提示：只读不删——登出链路会先经 SPA 状态
+// 切换挂载一次登录页、随后 location.reload 再挂载一次，提前删除会让刷新后的实例
+// 拿不到提示；改由登录成功与桌面挂载（Desktop.vue）负责清除。
+const kickedNotice = (() => {
+  try { return sessionStorage.getItem(AUTH_NOTICE_KEY) || '' } catch { return '' }
+})()
+if (kickedNotice) error.value = kickedNotice
 
 async function login() {
   if (!username.value || !password.value || loading.value) return
@@ -21,8 +30,9 @@ async function login() {
   error.value = ''
   try {
     await session.login(username.value, password.value)
+    try { sessionStorage.removeItem(AUTH_NOTICE_KEY) } catch { /* ignore */ }
   } catch (e: any) {
-    error.value = e.message || '登录失败'
+    error.value = e.message || t('login.failed')
   } finally {
     loading.value = false
   }
@@ -57,17 +67,25 @@ function switchServer() {
       <template v-if="sso">
         <div v-if="ssoError" class="error">{{ ssoError }}</div>
         <button :disabled="loading" @click="ssoLogin">
-          {{ loading ? '跳转中…' : (sso.label || '使用统一身份登录') }}
+          {{ loading ? t('login.ssoRedirecting') : (sso.label || t('login.ssoBtn')) }}
         </button>
-        <p class="sso-hint">将跳转至统一登录页面，完成后自动返回</p>
+        <p class="sso-hint">{{ t('login.ssoHint') }}</p>
       </template>
 
       <form v-else @submit.prevent="login">
-        <input v-model="username" placeholder="用户名" autocomplete="username" />
-        <input v-model="password" type="password" placeholder="密码" autocomplete="current-password" />
+        <input v-model="username" :placeholder="t('login.username')" :aria-label="t('login.username')" autocomplete="username" />
+        <input v-model="password" type="password" :placeholder="t('login.password')" :aria-label="t('login.password')" autocomplete="current-password" />
         <div v-if="error" class="error">{{ error }}</div>
-        <button type="submit" :disabled="loading">{{ loading ? '登录中…' : '登 录' }}</button>
+        <button type="submit" :disabled="loading">{{ loading ? t('login.submitting') : t('login.submit') }}</button>
       </form>
+
+      <!-- 语言切换（登录前未知用户，仅本地生效；登录后以账号设置为准） -->
+      <div class="lang-row">
+        <button
+          v-for="l in LOCALES" :key="l.value" :class="{ on: locale() === l.value }"
+          @click="setLocale(l.value)"
+        >{{ l.label }}</button>
+      </div>
 
       <div v-if="!sso" class="hint">
         <span @click="username = 'admin'; password = 'admin123'">admin / admin123（管理员）</span>
@@ -150,6 +168,12 @@ button:disabled { opacity: .6; cursor: default; }
   background: rgba(255,80,80,.22); border: 1px solid rgba(255,120,120,.4);
   border-radius: 8px; padding: 6px 10px;
 }
+.lang-row { display: flex; gap: 6px; margin-top: 14px; }
+.lang-row button {
+  border: 1px solid rgba(255,255,255,.25); background: rgba(255,255,255,.08); color: #fff;
+  font-size: 11px; padding: 3px 10px; border-radius: 999px; cursor: pointer; opacity: .8;
+}
+.lang-row button.on { background: rgba(255,255,255,.3); opacity: 1; font-weight: 600; }
 .hint { margin-top: 20px; display: flex; flex-direction: column; gap: 5px; font-size: 11px; opacity: .78; }
 .hint span {
   cursor: pointer; width: fit-content; margin: 0 auto; padding: 2px 10px; border-radius: 999px;

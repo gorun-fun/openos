@@ -178,6 +178,16 @@ CREATE TABLE IF NOT EXISTS chat_room_messages (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_chat_room_id ON chat_room_messages(id DESC);
+CREATE TABLE IF NOT EXISTS shares (
+  id TEXT PRIMARY KEY,
+  owner TEXT NOT NULL,
+  path TEXT NOT NULL,
+  name TEXT NOT NULL,
+  size INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_shares_owner ON shares(owner, created_at DESC);
 `
 
 // builtinApps 内置应用清单。icon 为前端渲染标识。

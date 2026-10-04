@@ -38,6 +38,7 @@ import { installMenuGuard } from './ui/menu'
 import { installTooltip } from './ui/tooltip'
 import { installAppNotifiers } from './desktop/appNotifier'
 import { registerDialog, type DialogDef } from './ui/dialogService'
+import { initLocale, setLocale, extendMessages, type Locale } from './i18n'
 
 export interface CreateOpenOSOptions {
   /** 编译期注册的宿主应用组件（key = appId，值为懒加载 loader），与内置应用合并 */
@@ -77,6 +78,12 @@ export interface CreateOpenOSOptions {
   /** 注册自定义桌面小组件（右键菜单「添加小组件」自动出现） */
   widgets?: Record<string, Omit<WidgetDef, 'type'> & Partial<Pick<WidgetDef, 'type'>>>
   /**
+   * 国际化（可选，见 web/src/i18n）：messages 按 locale 深合并覆盖内置词条
+   * （自定义「品牌名/提示文案」等），locale 指定初始语言（用户仍可在
+   * 系统设置 → 外观里自行切换，按账号持久化）。
+   */
+  i18n?: { locale?: Locale; messages?: Partial<Record<Locale, Record<string, string>>> }
+  /**
    * 声明宿主应用的窗体外观（键 = appId）：'merged' = 融合工具栏窗体（无独立标题栏，
    * 应用自绘工具栏承担标题行，红绿灯悬浮其上）；缺省 'default' 标准标题栏。
    * 与 OpenOS.registerApp 的 chrome 参数同义，供编译期 apps 注册的应用声明。
@@ -112,6 +119,12 @@ function applyTheme(accent: string) {
 }
 
 export function createOpenOS(opts: CreateOpenOSOptions = {}): VueApp | null {
+  // 0.5 i18n：宿主词条注入 → 恢复本地缓存语言（响应式 t() 见 src/i18n）
+  if (opts.i18n?.messages) {
+    for (const [l, dict] of Object.entries(opts.i18n.messages)) extendMessages(l as Locale, dict || {})
+  }
+  initLocale()
+  if (opts.i18n?.locale) setLocale(opts.i18n.locale)
   // 0. 全局右键守卫：默认屏蔽浏览器原生菜单（登录页与桌面全阶段生效），
   //    应用自定义菜单在组件内 stopPropagation 接管，详见 ui/menu.ts
   installMenuGuard()
@@ -177,6 +190,13 @@ export function createOpenOS(opts: CreateOpenOSOptions = {}): VueApp | null {
   const app = createApp(App)
   app.use(createPinia())
   app.mount(opts.root || '#app')
+
+  // PWA：生产构建注册 service worker（public/sw.js——API/总线直通网络、仅静态资源
+  // 缓存；dev 不注册避免热更新被缓存干扰）。宿主 dist 需带上 public/（sw.js +
+  // manifest + 图标）并保持根路径部署，否则注册失败（静默降级为普通网页）。
+  if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(() => { /* 静默降级：普通网页 */ })
+  }
   return app
 }
 
@@ -204,3 +224,6 @@ export { registerWidget, widgetDefs, widgetDef } from './desktop/widgetRegistry'
 export type { WidgetDef } from './desktop/widgetRegistry'
 export { registerIcons } from './desktop/icons'
 export type { IconDef } from './desktop/icons'
+// i18n：宿主从 '@openos/framework' 直接导入（词条注入/切换/取词）
+export { t, setLocale, locale, initLocale, extendMessages, LOCALES, LOCALE_SETTINGS_KEY } from './i18n'
+export type { Locale } from './i18n'

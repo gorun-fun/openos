@@ -6,10 +6,11 @@ import type { WinState } from '../../stores/windows'
 import { useWindows } from '../../stores/windows'
 import { useApps } from '../../stores/apps'
 import { useSession } from '../../stores/session'
-import { fsApi, downloadFile, fetchRawBlob, type VFile } from '../../api/client'
+import { fsApi, downloadFile, fetchRawBlob, type VFile, type ShareDef } from '../../api/client'
 import { bus } from '../../bus/bus'
 import { OsInput, OsButton, OsEmpty, OsModal, MobileNavToggle, OsTbOverflow, toast, useMenu, menuPos, icons, resolveFileDialog, type FileDialogRequest } from '../../ui'
 import { openPath, openWithApps, isImage, fileEmoji, kindOf, extOf, fmtSize, IMAGE_EXTS, parentOf } from '../openWith'
+import { t } from '../../i18n'
 import { renderMarkdown } from '../../lib/md'
 import { parseCSV } from '../sheets/engine'
 import { blankDeck } from '../slides/format'
@@ -175,10 +176,42 @@ async function refreshAll() {
 }
 onMounted(() => {
   refreshAll()
+  loadShares()
   // 打开即快速预览（聚焦搜索/打开方式把图片交给文件应用时）
   const pv = props.win.props?.preview
   if (pv) quickLook({ path: pv, isDir: false, size: 0, updatedAt: '' })
 })
+
+// ---- 分享链接（跨用户共享）：右键创建 → 剪贴板；侧栏「我的分享」可撤销 ----
+const myShares = ref<ShareDef[]>([])
+const sharesOpen = ref(false)
+async function loadShares() {
+  try { myShares.value = await fsApi.listShares() } catch { myShares.value = [] }
+}
+async function shareSelection() {
+  ctxMenu.close()
+  const p = primary.value
+  if (!p) return
+  try {
+    const r = await fsApi.createShare(p)
+    const url = `${location.origin}/#share=${r.id}`
+    await navigator.clipboard.writeText(url).catch(() => {})
+    toast(t('share.copied', { days: r.days }), { type: 'success' })
+    loadShares()
+  } catch (e: any) { toast(e.message || '创建分享失败', { type: 'error' }) }
+}
+async function copyShareLink(s: ShareDef) {
+  const url = `${location.origin}/#share=${s.id}`
+  await navigator.clipboard.writeText(url).catch(() => {})
+  toast(t('share.copied', { days: 7 }))
+}
+async function revokeShare(s: ShareDef) {
+  try {
+    await fsApi.revokeShare(s.id)
+    toast(t('share.revoked'))
+    loadShares()
+  } catch (e: any) { toast(e.message || '撤销失败', { type: 'error' }) }
+}
 
 // 其他窗口保存/删除后自动刷新
 const off = bus.on('fs:changed', refreshAll)
@@ -811,6 +844,18 @@ watch(() => columnPaths.value.length, async () => {
             <span class="ic">📁</span><span class="lb">{{ baseName(d.path) }}</span>
           </button>
         </template>
+        <!-- 我的分享：点击复制链接、右侧 ✕ 撤销（到期自动回收） -->
+        <div class="side-head share-head" @click="sharesOpen = !sharesOpen" title="展开/收起我的分享">
+          分享<span class="share-count" v-if="myShares.length">{{ myShares.length }}</span>
+          <span class="share-caret" :class="{ open: sharesOpen }">▸</span>
+        </div>
+        <template v-if="sharesOpen">
+          <div v-if="!myShares.length" class="side-item share-empty">{{ t('share.none') }}</div>
+          <div v-for="s in myShares" :key="s.id" class="side-item share-item" :title="s.path" @click="copyShareLink(s)">
+            <span class="ic">🔗</span><span class="lb">{{ s.name }}</span>
+            <button class="share-x" title="撤销分享" @click.stop="revokeShare(s)">✕</button>
+          </div>
+        </template>
         <div class="side-head" />
         <button class="side-item trash" :class="{ active: isActive(trashPath), drop: dragOverDir === trashPath }"
           @click="enter(trashPath)" @dragover="onSideDragOver($event, trashPath)" @dragleave="dragOverDir = ''" @drop="onSideDrop($event, trashPath)">
@@ -984,6 +1029,8 @@ watch(() => columnPaths.value.length, async () => {
         <div class="sep" />
         <button v-if="selPaths.length === 1" @click="ctxMenu.close(); startRename(primary)">重新命名<span class="hint">⏎</span></button>
         <button @click="ctxMenu.close(); doDownload()">下载</button>
+        <button v-if="selPaths.length === 1 && selectedFile && !selectedFile.isDir && !inTrash"
+          @click="shareSelection()">分享链接…</button>
         <button class="danger" @click="ctxMenu.close(); deleteSelection()">{{ inTrash ? '立即删除…' : '移到废纸篓' }}</button>
       </template>
 
@@ -1097,6 +1144,24 @@ watch(() => columnPaths.value.length, async () => {
 .side-item.active { background: var(--os-selected); color: var(--os-accent); }
 .side-item.drop { outline: 2px solid var(--os-accent); outline-offset: -2px; background: var(--os-selected); }
 .side-item.trash { margin-top: 2px; }
+/* 我的分享：可折叠分组 + 单项撤销 */
+.share-head { display: flex; align-items: center; gap: 5px; cursor: pointer; user-select: none; }
+.share-head:hover { color: var(--os-text); }
+.share-count {
+  font-size: 10px; background: var(--os-accent); color: #fff; border-radius: 8px;
+  padding: 0 5px; line-height: 15px;
+}
+.share-caret { margin-left: auto; font-size: 10px; transition: transform .15s ease; }
+.share-caret.open { transform: rotate(90deg); }
+.share-item .lb { flex: 1; min-width: 0; }
+.share-x {
+  flex: none; border: none; background: none; color: var(--os-text-secondary);
+  font-size: 11px; cursor: pointer; padding: 2px 4px; border-radius: 5px; visibility: hidden;
+}
+.share-item:hover .share-x { visibility: visible; }
+.share-x:hover { color: var(--os-danger, #d33); background: var(--os-hover); }
+.share-empty { cursor: default; color: var(--os-text-secondary); font-size: 12px; }
+.share-empty:hover { background: none; }
 
 .content { flex: 1; min-width: 0; overflow-y: auto; outline: none; }
 .content.view-icon {
