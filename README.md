@@ -378,6 +378,7 @@ notify({ title: '系统公告', body: '今晚 22:00 例行维护', broadcast: tr
 //      / OpenOS.open/close / OpenOS.toast / OpenOS.notify / OpenOS.me() / OpenOS.authToken()
 //      / OpenOS.vue（Vue 具名导出，商店 bundle 应用写组件逻辑用）
 //      / OpenOS.openFile(path)（VFS 文件按扩展名分发对应应用打开，与文件应用同关联表）
+//      / OpenOS.can(perm)（功能级权限判定：admin 直通 / `*` 通配 / 精确匹配，应用内功能门控）
 OpenOS.registerApp('todo', {
   name: '待办', width: 420, height: 400,
   component: {

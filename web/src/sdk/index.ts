@@ -15,7 +15,8 @@
 // 通知：OpenOS.toast（轻提示）/ OpenOS.notify（系统通知中心）；
 // 文件与窗口：OpenOS.fs / OpenOS.windows；日程：OpenOS.calendar；
 // 跨应用弹窗：OpenOS.registerDialog / OpenOS.openDialog（见 ui/dialogService.ts）；
-// 跨应用拉起等结果：OpenOS.launch / resolveLaunch / launchOf（见 ui/launch.ts）。
+// 跨应用拉起等结果：OpenOS.launch / resolveLaunch / launchOf（见 ui/launch.ts）；
+// 功能权限：OpenOS.can(perm)（应用内功能门控，见 ui/perms.ts）。
 import { bus } from '../bus/bus'
 import * as ui from '../ui'
 import * as vueSDK from 'vue'
@@ -30,6 +31,7 @@ import { useCalendar, todayStr, REMIND_OPTIONS, type CalMark, type RemindOffset 
 import { registerDialog, unregisterDialog, openDialog, dialogRegistry, type DialogDef } from '../ui/dialogService'
 import { registerAgentTool, unregisterAgentTool, agentTools, type AgentToolDef } from '../desktop/agentTools'
 import { launch, resolveLaunch, launchOf } from '../ui/launch'
+import { can } from '../ui/perms'
 import { openPath } from '../apps/openWith'
 
 export interface RegisterOptions {
@@ -142,6 +144,10 @@ export const OpenOS = {
   me(): SessionUser | null {
     return useSession().user
   },
+  /** 功能级权限判定：admin 角色直通 / 权限集含 `*` 通配 / 其余精确匹配（与
+   *  ui/perms.ts 的 can()、服务端 RequirePerm 同语义）。商店 bundle 应用按它
+   *  控制应用内功能入口：OpenOS.can('room.view') 为 false 时隐藏对应按钮/页签。 */
+  can,
   /** 当前登录令牌（拼 <img>/<a> 等带不了 Authorization header 的 URL 用，如附件下载）。
    *  ⚠ 令牌属长期凭证——优先用 authTicket()（30s 一次性短票），新代码勿再用本接口拼 URL。 */
   authToken(): string {
