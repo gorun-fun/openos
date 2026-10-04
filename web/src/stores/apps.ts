@@ -35,6 +35,7 @@ export const appChrome: Record<string, 'default' | 'merged'> = {
   calendar: 'merged',
   goder: 'merged',
   store: 'merged',
+  welcome: 'merged',
 }
 
 interface State {

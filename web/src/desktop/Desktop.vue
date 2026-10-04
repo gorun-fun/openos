@@ -4,7 +4,7 @@ import { AUTH_NOTICE_KEY, api } from '../api/client'
 import { consumeShareHash, openShareDialog } from '../ui/shareDialog'
 import { setLocale, locale, LOCALE_SETTINGS_KEY } from '../i18n'
 import { useSession } from '../stores/session'
-import { useDesktop } from '../stores/desktop'
+import { useDesktop, WELCOME_HIDDEN_KEY } from '../stores/desktop'
 import { useApps } from '../stores/apps'
 import { useWindows, viewport } from '../stores/windows'
 import { useNotifications } from '../stores/notifications'
@@ -60,11 +60,14 @@ onMounted(async () => {
   const shareId = consumeShareHash()
   if (shareId) void openShareDialog(shareId)
 
-  // 语言同步：服务端 user_settings 的 locale 优先（多端一致），未设置则保持本地
+  // 语言同步：服务端 user_settings 的 locale 优先（多端一致），未设置则保持本地；
+  // 顺带读取「使用指南不再自动打开」偏好（WelcomeApp「不再显示」按钮写入）
+  let welcomeHidden = false
   try {
     const kv = await api.get<Record<string, string>>('/api/settings')
     const saved = kv?.[LOCALE_SETTINGS_KEY]
     if ((saved === 'zh-CN' || saved === 'en-US') && saved !== locale()) setLocale(saved)
+    welcomeHidden = kv?.[WELCOME_HIDDEN_KEY] === '1'
   } catch { /* ignore */ }
 
   // 通知中心：加载历史/偏好 + 订阅总线 sys:notify（服务端定向与其他端广播）
@@ -86,9 +89,9 @@ onMounted(async () => {
     installAgentBridge(),
   )
 
-  // 恢复上次会话的窗口（按用户持久化），首次进入打开欢迎窗口
+  // 恢复上次会话的窗口（按用户持久化），首次进入打开欢迎窗口（「不再显示」时跳过）
   const restored = restoreWindows()
-  if (!restored && windows.list.length === 0) windows.open('welcome')
+  if (!restored && windows.list.length === 0 && !welcomeHidden) windows.open('welcome')
 
   // 快捷方式/小组件都已挂载登记，统一重排一次：吸附网格、解决重叠
   await nextTick()
@@ -442,10 +445,11 @@ function ctxCycleNoteColor() {
       :style="{ left: ctxPos.x + 'px', top: ctxPos.y + 'px' }"
       @contextmenu.prevent.stop
     >
-      <!-- 右键快捷方式 -->
+      <!-- 右键快捷方式（文件夹多出重命名/解散两项） -->
       <template v-if="ctx?.kind === 'shortcut'">
         <button @click="ctxOpenShortcut(); menu.close()">打开</button>
-        <button @click="ctxRemoveShortcut(); menu.close()">移除快捷方式</button>
+        <button v-if="ctx.key.startsWith('folder:')" @click="shortcutsRef?.renameFolder(ctx.key); menu.close()">重命名文件夹</button>
+        <button @click="ctxRemoveShortcut(); menu.close()">{{ ctx.key.startsWith('folder:') ? '解散文件夹（内容放回桌面）' : '移除快捷方式' }}</button>
       </template>
 
       <!-- 右键小组件 -->

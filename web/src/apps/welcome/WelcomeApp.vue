@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { useWindows } from '../../stores/windows'
 import { OsButton, AppIcon } from '../../ui'
+import { api } from '../../api/client'
+import { toast } from '../../ui/toast'
+import { WELCOME_HIDDEN_KEY } from '../../stores/desktop'
 import type { WinState } from '../../stores/windows'
 
-defineProps<{ win: WinState }>()
+const props = defineProps<{ win: WinState }>()
 const windows = useWindows()
 
 const features = [
@@ -24,40 +27,66 @@ const quick = [
   { id: 'notes', label: '便签' }, { id: 'store', label: '应用商店' },
   { id: 'settings', label: '设置' },
 ]
+
+/** 「不再显示」：偏好写入服务端 user_settings（随用户跨端生效）并关窗；
+ *  仅跳过登录后的自动打开，菜单栏「使用指南」仍可随时手动打开。 */
+async function dismiss() {
+  try {
+    await api.put('/api/settings', { key: WELCOME_HIDDEN_KEY, value: '1' })
+    windows.close(props.win.id)
+    toast('已设置登录后不再自动打开，可从菜单栏「使用指南」随时查看')
+  } catch (e: any) {
+    toast('设置失败：' + (e?.message || '网络异常'), { type: 'error' })
+  }
+}
 </script>
 
 <template>
   <div class="welcome">
-    <header>
-      <div class="logo">🖥️</div>
-      <h1>欢迎使用 OpenOS</h1>
-      <p>前后端分离的仿 macOS 网页桌面 · Go + Vite · 事件总线驱动</p>
-      <div class="quick">
-        <button v-for="q in quick" :key="q.id" class="qbtn" @click="windows.open(q.id)">
-          <AppIcon :app="q.id" :size="34" />
-          <span>{{ q.label }}</span>
-        </button>
-      </div>
-    </header>
+    <!-- 融合工具栏（chrome:'merged'）：整条可拖动窗口，右上角「不再显示」 -->
+    <div class="os-tb" data-os-drag>
+      <div class="os-tb-title">使用指南</div>
+      <span class="grow" />
+      <button class="os-tb-btn dismiss" title="登录后不再自动打开" @click="dismiss">不再显示</button>
+    </div>
 
-    <section class="features">
-      <article v-for="f in features" :key="f.title">
-        <div class="ic">{{ f.icon }}</div>
-        <div class="ft">
-          <h3>{{ f.title }}</h3>
-          <p>{{ f.desc }}</p>
+    <div class="welcome-body">
+      <header>
+        <div class="logo">🖥️</div>
+        <h1>欢迎使用 OpenOS</h1>
+        <p>前后端分离的仿 macOS 网页桌面 · Go + Vite · 事件总线驱动</p>
+        <div class="quick">
+          <button v-for="q in quick" :key="q.id" class="qbtn" @click="windows.open(q.id)">
+            <AppIcon :app="q.id" :size="34" />
+            <span>{{ q.label }}</span>
+          </button>
         </div>
-      </article>
-    </section>
+      </header>
 
-    <footer>
-      提示：<code>⌘/Alt+Space</code> 聚焦搜索 · <code>F4</code> 启动台 · 桌面右键添加小组件 · 终端输入 <code>open sheets</code>
-    </footer>
+      <section class="features">
+        <article v-for="f in features" :key="f.title">
+          <div class="ic">{{ f.icon }}</div>
+          <div class="ft">
+            <h3>{{ f.title }}</h3>
+            <p>{{ f.desc }}</p>
+          </div>
+        </article>
+      </section>
+
+      <footer>
+        提示：<code>⌘/Alt+Space</code> 聚焦搜索 · <code>F4</code> 启动台 · 桌面右键添加小组件 · 终端输入 <code>open sheets</code>
+      </footer>
+    </div>
   </div>
 </template>
 
 <style scoped>
-.welcome { width: 100%; overflow-y: auto; padding: 34px 38px 24px; background: var(--os-window); }
+.welcome {
+  width: 100%; display: flex; flex-direction: column; background: var(--os-window);
+}
+.grow { flex: 1; }
+.dismiss { font-size: 12px; }
+.welcome-body { flex: 1; min-height: 0; overflow-y: auto; padding: 34px 38px 24px; }
 header { text-align: center; margin-bottom: 26px; }
 .logo { font-size: 54px; line-height: 1; }
 h1 { font-size: 23px; margin-top: 12px; }

@@ -220,8 +220,44 @@ watch([() => itemMenu.isOpen, menuPos], ([open]) => {
   })
 })
 
-// ---- 邻居放大（macOS Dock）：指针距离连续衰减，直接写 DOM 避免 Vue 重渲抖动 ----
+// ---- 自适应缩小：图标过多时等比缩小图标与间距，保证 Dock 恒为一排（macOS 行为）----
+// 缩放因子 k 写入根元素 --dock-k（图标/内边距/gap 统一乘 k，总宽随 k 线性变化），
+// AppIcon 尺寸是 prop 故单独用 iconSize 跟随。宽度测量走离屏克隆（强制基准尺寸），
+// 避免重置真实 DOM 再测量造成的视觉闪烁。
 const dockEl = ref<HTMLElement>()
+const BASE_ICON = 42
+const iconSize = ref(BASE_ICON)
+
+function measureNatural(): number {
+  const root = dockEl.value
+  if (!root) return 0
+  const clone = root.cloneNode(true) as HTMLElement
+  clone.style.cssText += 'position:fixed;left:-9999px;top:0;visibility:hidden;max-width:none;'
+  clone.style.setProperty('--dock-k', '1')
+  // 克隆里 AppIcon 仍是当前 iconSize 的内联 px，归位基准；清掉邻居放大的 transform 残留
+  for (const el of clone.querySelectorAll<HTMLElement>('.app-icon')) {
+    el.style.width = el.style.height = BASE_ICON + 'px'
+  }
+  for (const el of clone.querySelectorAll<HTMLElement>('.dock-item')) el.style.transform = ''
+  document.body.appendChild(clone)
+  const w = clone.getBoundingClientRect().width
+  clone.remove()
+  return w
+}
+
+function refit() {
+  const root = dockEl.value
+  if (!root) return
+  const natural = measureNatural()
+  if (!natural) return
+  const avail = window.innerWidth * 0.92 // 与 .dock 的 max-width 一致
+  // Dock 总宽 = 常数项（border/分隔线）+ 线性项（图标/间距），解一元一次得 k，上限 1（只缩不放）
+  const k = Math.min(1, (avail - 4) / Math.max(1, natural - 4))
+  root.style.setProperty('--dock-k', String(k))
+  iconSize.value = Math.round(BASE_ICON * k * 10) / 10
+}
+
+// ---- 邻居放大（macOS Dock）：指针距离连续衰减，直接写 DOM 避免 Vue 重渲抖动 ----
 let rafId = 0
 let mouseX: number | null = null
 
@@ -230,6 +266,7 @@ function applyMagnify() {
   const root = dockEl.value
   if (!root) return
   const items = root.querySelectorAll<HTMLElement>('.dock-item')
+  const radius = Math.max(70, iconSize.value * 3.6) // 影响半径随图标缩小收敛，避免小图标一次放大一串
   for (const el of items) {
     if (mouseX == null) {
       el.style.transform = ''
@@ -239,7 +276,7 @@ function applyMagnify() {
     // 用未放大时的基准位置计算（放大后的 rect 会漂移，需去抖：以 rect 中心近似 + 宽度还原）
     const base = rect.left + rect.width / 2
     const dist = Math.abs(base - mouseX)
-    const influence = Math.max(0, 1 - dist / 150) // 影响半径 150px
+    const influence = Math.max(0, 1 - dist / radius)
     const scale = 1 + 0.42 * Math.pow(influence, 1.7)
     const lift = -(scale - 1) * 24 // 放大同时向上抬起
     el.style.transform = `translateY(${lift.toFixed(1)}px) scale(${scale.toFixed(3)})`
@@ -323,7 +360,20 @@ onMounted(() => {
   const unwatch = apps.$subscribe(() => requestAnimationFrame(applyMagnify))
   onBeforeUnmount(unwatch)
 })
-onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
+// 应用数量 / 废纸篓显隐变化后重算缩放（flush post 保证 DOM 已更新），窗口 resize 同步
+watch(
+  () => displayApps.value.length * 2 + (hasFilesApp.value ? 1 : 0),
+  () => requestAnimationFrame(refit),
+  { flush: 'post' },
+)
+onMounted(() => {
+  refit()
+  window.addEventListener('resize', refit)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', refit)
+  if (rafId) cancelAnimationFrame(rafId)
+})
 </script>
 
 <template>
@@ -375,7 +425,7 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
           @dragend="itemDragEnd"
           @contextmenu.prevent.stop="onItemContext($event, a.id)"
         >
-          <AppIcon :app="a.id" :icon="a.icon" :size="42" />
+          <AppIcon :app="a.id" :icon="a.icon" :size="iconSize" />
           <span class="dot" v-if="windows.runningAppIds.includes(a.id)" />
         </button>
       </template>
@@ -457,15 +507,20 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
   /* relative：dock-tip 以 Dock 本体为定位基准（x 坐标按「项中心 - dock 左缘」计算，
      若基准退化为全宽的 dock-area，tip 会向左偏 dock 居中后的左侧留白宽度） */
   position: relative;
-  display: flex; flex-wrap: wrap; justify-content: center; gap: 6px;
-  padding: 8px 10px; border-radius: 22px;
+  /* nowrap：恒一排，图标过多时由 --dock-k 等比缩小（refit 离屏测量计算）；
+     图标/内边距/gap 统一乘 k，总宽随 k 线性变化 */
+  display: flex; flex-wrap: nowrap; justify-content: center;
+  gap: calc(6px * var(--dock-k, 1));
+  padding: calc(8px * var(--dock-k, 1)) calc(10px * var(--dock-k, 1));
+  border-radius: 22px;
   border: 1px solid var(--os-border);
   box-shadow: 0 14px 44px rgba(0,0,0,.28), inset 0 1px 0 var(--os-highlight-edge);
   pointer-events: auto; max-width: 92vw; overflow: visible;
   align-items: flex-end;
 }
 .dock-item {
-  position: relative; border: none; background: transparent; padding: 2px; cursor: pointer;
+  position: relative; border: none; background: transparent;
+  padding: calc(2px * var(--dock-k, 1)); cursor: pointer;
   border-radius: 12px; flex: none;
   transition: transform .16s cubic-bezier(.25,.1,.25,1);
   display: flex; align-items: flex-end; transform-origin: bottom center;
@@ -476,7 +531,8 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
 .dock-item.dragging { opacity: .3; }
 /* 外部拖入（启动台/桌面快捷方式）的落点插槽 */
 .dock-slot {
-  flex: none; width: 46px; height: 46px; border-radius: 12px;
+  flex: none; width: calc(46px * var(--dock-k, 1)); height: calc(46px * var(--dock-k, 1));
+  border-radius: 12px;
   border: 1.5px dashed rgba(10, 132, 255, .6);
   background: rgba(10, 132, 255, .14);
   pointer-events: none;
@@ -487,14 +543,15 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
 }
 /* 启动台按钮：与新 AppIcon 同一套 squircle 语言（圆角裁切 + 投影） */
 .launcher-icon {
-  display: block; width: 42px; height: 42px; border-radius: 23%; overflow: hidden;
+  display: block; width: calc(42px * var(--dock-k, 1)); height: calc(42px * var(--dock-k, 1));
+  border-radius: 23%; overflow: hidden;
   box-shadow: 0 1px 2px rgba(0,0,0,.18), 0 4px 10px rgba(0,0,0,.22);
 }
 .launcher-icon svg { display: block; width: 100%; height: 100%; }
-.dock-sep { width: 1px; align-self: stretch; background: var(--os-border-strong); margin: 4px 3px; flex: none; }
+.dock-sep { width: 1px; align-self: stretch; background: var(--os-border-strong); margin: calc(4px * var(--dock-k, 1)) calc(3px * var(--dock-k, 1)); flex: none; }
 /* 废纸篓图标：与 AppIcon 同一套 squircle 投影语言 */
 .trash-icon {
-  display: block; width: 42px; height: 42px;
+  display: block; width: calc(42px * var(--dock-k, 1)); height: calc(42px * var(--dock-k, 1));
   filter: drop-shadow(0 1px 2px rgba(0, 0, 0, .18)) drop-shadow(0 4px 10px rgba(0, 0, 0, .22));
 }
 .dock-trash-menu { position: fixed; bottom: 86px; right: 24px; min-width: 150px; transform-origin: bottom right; }

@@ -20,6 +20,10 @@ export const DEFAULT_WALLPAPERS: string[] = [
   'radial-gradient(110% 100% at 20% 15%, rgba(120, 90, 255, 0.45) 0%, rgba(120, 90, 255, 0) 55%), linear-gradient(160deg, #1b2a5e 0%, #31427e 55%, #4e4376 100%)',
 ]
 
+/** 使用指南「不再显示」偏好键（服务端 user_settings，随用户跨端生效）：
+ *  WelcomeApp 标题栏「不再显示」按钮写入，Desktop 登录后自动打开前读取。 */
+export const WELCOME_HIDDEN_KEY = 'welcome.hidden'
+
 interface State {
   wallpaper: number
   dark: boolean
