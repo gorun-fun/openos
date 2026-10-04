@@ -6,13 +6,13 @@
 //
 // 便签小组件与便签应用（NotesApp）共用 notes 仓库：每张便签可单独钉到桌面，
 // 尺寸为网格的整数倍（sc×sr 格，精确到像素对齐），右下角把手缩放时吸附网格。
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useSession } from '../stores/session'
 import { useWindows } from '../stores/windows'
 import { useNotes, NOTE_COLORS } from '../stores/notes'
 import { bus } from '../bus/bus'
 import { api } from '../api/client'
-import { GRID, cellAt, findFree, gridMetrics, isFree, posOf, registerItem, unregisterItem } from './grid'
+import { GRID, cellAt, findFree, gridMetrics, isFree, posOf, registerItem, unregisterItem, type GridRect } from './grid'
 import { widgetDef } from './widgetRegistry'
 
 interface Widget {
@@ -244,6 +244,8 @@ function trackPointer(el: HTMLElement, e: PointerEvent, move: (ev: PointerEvent)
 
 // ---- 拖动：跟手移动（响应式位置），释放后吸附到最近空格 ----
 const dragging = ref<{ key: string; x: number; y: number } | null>(null)
+/** 拖动落点预览：松手后小组件将吸附到的格子（虚线框，与 up 的吸附计算严格同源）。 */
+const ghost = ref<GridRect | null>(null)
 function onHandleDown(e: PointerEvent, w: Widget) {
   const el = (e.currentTarget as HTMLElement).parentElement!
   const startX = e.clientX, startY = e.clientY
@@ -253,9 +255,14 @@ function onHandleDown(e: PointerEvent, w: Widget) {
     const x = Math.min(Math.max(4, origX + ev.clientX - startX), window.innerWidth - el.offsetWidth - 4)
     const y = Math.min(Math.max(34, origY + ev.clientY - startY), window.innerHeight - el.offsetHeight - 4)
     dragging.value = { key: keyOf(w), x, y }
+    // 落点预览与释放吸附同源：同一指针位置算出的就是真实落格（预览即结果）
+    const cell = cellAt(ev.clientX - el.offsetWidth / 2, ev.clientY - 10)
+    const sp = spanOf(w)
+    ghost.value = findFree(cell.c, cell.r, sp.sc, sp.sr, 'widget', keyOf(w))
   }
   const up = (ev: PointerEvent) => {
     dragging.value = null
+    ghost.value = null
     const cell = cellAt(ev.clientX - el.offsetWidth / 2, ev.clientY - 10)
     const sp = spanOf(w)
     const rect = findFree(cell.c, cell.r, sp.sc, sp.sr, 'widget', keyOf(w))
@@ -314,6 +321,18 @@ function widgetStyle(w: Widget) {
   return s
 }
 
+/** 落点预览框几何：与便签小组件同一套格子换算（sc×sr 格减格间隙，精确对齐网格）。 */
+const ghostStyle = computed(() => {
+  if (!ghost.value) return {}
+  const p = posOf(ghost.value)
+  return {
+    left: p.x + 'px',
+    top: p.y + 'px',
+    width: ghost.value.sc * GRID.cw - 8 + 'px',
+    height: ghost.value.sr * GRID.ch - 8 + 'px',
+  }
+})
+
 const clockTime = () => `${String(now.value.getHours()).padStart(2, '0')}:${String(now.value.getMinutes()).padStart(2, '0')}`
 const clockDate = () => `${now.value.getMonth() + 1}月${now.value.getDate()}日 周${'日一二三四五六'[now.value.getDay()]}`
 const fmtMB = (n: number) => (n / 1048576).toFixed(1) + ' MB'
@@ -323,6 +342,8 @@ defineExpose({ add, remove, cycleNoteColor, relayout })
 
 <template>
   <div class="widgets">
+    <!-- 拖动落点预览：松手后小组件将吸附的格子（虚线框；在 DOM 上先于各小组件，垫在其下） -->
+    <div v-if="ghost" class="drop-ghost" :style="ghostStyle" aria-hidden="true" />
     <div
       v-for="w in list" :key="keyOf(w)"
       class="widget"
@@ -373,6 +394,13 @@ defineExpose({ add, remove, cycleNoteColor, relayout })
 
 <style scoped>
 .widgets { position: absolute; inset: 0; pointer-events: none; }
+/* 拖动落点预览：松手后小组件将吸附的格子（与图标层 Shortcuts 的 ghost 同款虚线格框） */
+.drop-ghost {
+  position: absolute; pointer-events: none;
+  border-radius: 16px;
+  border: 1.5px dashed rgba(255,255,255,.5);
+  background: rgba(255,255,255,.07);
+}
 .widget {
   position: absolute; pointer-events: auto; border-radius: 16px;
   background: rgba(28, 28, 32, 0.55);
