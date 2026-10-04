@@ -166,6 +166,16 @@ func (m *Manager) Stop() {
 func (m *Manager) waitHealthy(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
+		// 先确认子进程仍存活（绑定失败立即退出）：健康探测若打到同端口的
+		// 他人实例（如本机独立 openos/孤儿进程），会把故障误判为健康
+		m.mu.Lock()
+		cmd := m.cmd
+		m.mu.Unlock()
+		if cmd != nil && cmd.Process != nil {
+			if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+				return fmt.Errorf("openos 子进程已退出（端口被占用？addr=%s）", m.cfg.Addr)
+			}
+		}
 		resp, err := m.client.Get("http://" + m.cfg.Addr + "/api/health")
 		if err == nil {
 			io.Copy(io.Discard, resp.Body)
@@ -338,6 +348,8 @@ func (m *Manager) DeleteUser(username string) error {
 }
 
 // RoleDecl declare 声明的单个角色（权威在宿主库，openos 侧只读投影）。
+// Apps 为 nil 表示该角色的应用授权不在宿主权威内（openos role_apps 运行期
+// 唯一存储的场景，如 grf-hotel），声明不动应用授权；非 nil（含空数组）才全量覆盖。
 type RoleDecl struct {
 	Key   string   `json:"key"`
 	Label string   `json:"label"`
