@@ -1,0 +1,44 @@
+# ci/host-template.yml — openos 宿主（grf-hotel / grf-os / 未来宿主）的 CI 公共模板。
+#
+# 宿主 .gitlab-ci.yml 经 include 消费（同 GitLab 实例）：
+#
+#   include:
+#     - project: share/openos
+#       ref: main
+#       file: ci/host-template.yml
+#
+#   variables:
+#     HOST_IMAGE: ${REGISTRY}/grf-hotel        # 宿主镜像名
+#     HOST_PORT: "8082"                        # compose 映射端口
+#     HOST_APP_DIR: /app/grf-hotel             # 发布机工作目录
+#     MARKET_DIR: /data/download/hotel/market  # App 货架（可选，app-release 用）
+#
+# 提供的具名任务（宿主按需 rules 引用或直接重写 script）：
+#   .host-deploy       — 部署锚点（SSH 变量沿用 openos 同套：DEPLOY_HOSTS/DEPLOY_USER/
+#                        DEPLOY_SSH_PRIVATE_KEY/DEPLOY_REGISTRY）
+#   .openos-prebuilt   — 预编译 openos-server 下载片段（P7：替代源码 go build，
+#                        消掉最重的 modernc sqlite 编译；OPENOS_TAG 必填，
+#                        产物 dist/openos-server + sha256 校验，失败即中止）
+#
+# 缓存 id 约定（Runner 宿主 BuildKit 挂载跨项目共享）：
+#   宿主独有源码用 <host>-npm/vite/gomod/gobuild 隔离；goder 三件套阶段与
+#   openos/grf-play 共用 goder-*；**openos-server 已改预编译下载的宿主不再需要
+#   openos-gomod/gobuild 挂载**（那是源码编译时代的产物）。
+
+# 预编译 openos-server 下载（before_script 片段；依赖 alpine bash/sha256sum/curl）
+.openos-prebuilt: &openos_prebuilt
+  - |
+    if [ -z "$OPENOS_TAG" ]; then
+      echo "OPENOS_TAG 未设置（消费哪个 openos 发行版）" >&2; exit 1
+    fi
+    PLAT=linux-$( [ "$(uname -m)" = aarch64 ] && echo arm64 || echo amd64 )
+    BASE="https://download.gorun.fun/openos/dist/${OPENOS_TAG}"
+    mkdir -p .run/prebuilt
+    curl -fsSL -o .run/prebuilt/manifest.json "$BASE/manifest.json"
+    WANT=$(python3 -c "import json;print(json.load(open('.run/prebuilt/manifest.json'))['openos-server-${PLAT}'])" 2>/dev/null \
+      || grep -o "\"openos-server-${PLAT}\": \"[a-f0-9]*\"" .run/prebuilt/manifest.json | cut -d'"' -f4)
+    curl -fsSL -o .run/prebuilt/openos-server "$BASE/openos-server-${PLAT}"
+    echo "$WANT  .run/prebuilt/openos-server" | sha256sum -c -
+    chmod +x .run/prebuilt/openos-server && .run/prebuilt/openos-server --help >/dev/null 2>&1 || true
+    # Dockerfile 的 OPENOS_BIN 构建参数指向它（宿主 Dockerfile 相应改为
+    # COPY .run/prebuilt/openos-server /app/openos-server，删除 openos 编译阶段）

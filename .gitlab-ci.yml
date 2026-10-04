@@ -1,9 +1,20 @@
 # ============================================================================
 # OpenOS 持续集成 / 持续交付（与 grf-gateway 同套 Runner/仓库/发布机）
-# 触发方式：推送 tag（git tag v1.0.0 && git push origin v1.0.0）
+# 触发方式：推送 tag（git tag v1.0.0 && git push origin v1.0.0）→ 构建/推送/部署
+#           推送 main / MR → test（go test + vue-tsc，无 Docker 构建，分钟级）
 # 流程：    编译打包为 Docker 镜像 -> 推送到私有仓库 -> SSH 部署到 DEPLOY_HOSTS 各主机
+#           （tag 附带 dist 产物发布：多平台 openos-server 二进制 + goder 三件套 +
+#            manifest.json sha256 清单 → download.gorun.fun/openos/dist/<tag>/，
+#            宿主 CI 经 hostsdk/预编译消费，免每次源码编译 modernc sqlite——P7）
 # 镜像仓库：10.8.0.6:5000（Registry 容器仅绑定该地址；构建/推送与发布机拉取共用）
 # ============================================================================
+
+# 同分支新流水线自动取消旧流水线（main 连推场景省 Runner 时间）
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_COMMIT_BRANCH == "main"'
 
 # 使用 Docker 执行器（或已挂载 /var/run/docker.sock 的执行器）
 # 基础镜像：docker CLI；通过挂载的主机 Docker socket 直连守护进程
@@ -29,9 +40,28 @@ variables:
   DEPLOY_USER: root
 
 stages:
+  - test
   - build
   - push
   - deploy
+  - dist
+
+# ---- 快速验证（main / MR；容器内跑测试，具名卷跨流水线复用编译缓存） ----
+test:
+  stage: test
+  tags:
+    - docker
+  script:
+    # Go 单元测试（auth/bus/vfs/store/osmcp/webproxy/market）：具名卷 openos-gocache
+    # 挂在 Runner 宿主上跨流水线复用（modernc sqlite 冷编译是大头）
+    - docker run --rm -v "$CI_PROJECT_DIR/server:/src" -w /src -e GOPROXY=https://goproxy.cn,direct -e GOCACHE=/gocache -v openos-gocache:/gocache golang:1.26-alpine go test ./...
+    # 前端类型检查（vue-tsc --noEmit 是仓库唯一前端静态校验）
+    - docker run --rm -v "$CI_PROJECT_DIR/web:/web" -w /web -v openos-npmcache:/npmcache -e npm_config_cache=/npmcache node:22-alpine sh -c "npm install --no-audit --no-fund && npm run typecheck"
+  rules:
+    - if: '$CI_COMMIT_TAG'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
 
 # 多阶段 Dockerfile 内已完成：前端构建（Vite/Vue3）-> 后端编译（Go 纯静态）-> 精简运行镜像打包
 # goder 源码与 gh 发行版在构建前取进上下文（.run/，Dockerfile 以 COPY 消费）：
@@ -105,5 +135,52 @@ deploy:
         # 非当前版本的 tag；rmi 不带 -f，仍被其他容器占用的镜像会被拒绝，不动其他应用
         ssh ${DEPLOY_USER}@${HOST} "docker images --format '{{.Repository}}:{{.Tag}}' ${DEPLOY_REGISTRY}/openos | grep -v ':${CI_COMMIT_TAG}\$' | xargs -r docker rmi || true"
       done
+  rules:
+    - if: '$CI_COMMIT_TAG'
+
+# ---- dist 产物发布（tag；宿主预编译消费通道，P7） ----
+# 多平台 openos-server 二进制（darwin/linux × amd64/arm64，CGO_ENABLED=0）+
+# goder 三件套（goder-serve/goder.js/gh，从当次镜像提取，与部署产物严格同源）+
+# manifest.json（各文件 sha256）→ scp 到 10.8.0.5:/data/download/openos/dist/<tag>/。
+# 宿主 CI/ensure 脚本按 tag 下载（校验 sha256）替代源码编译 openos-server。
+publish-dist:
+  stage: dist
+  tags:
+    - docker
+  needs: ["push-image"]
+  before_script:
+    - sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
+    - apk add --no-cache openssh-client
+    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    - cp "$DEPLOY_SSH_PRIVATE_KEY" ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - ssh-keyscan -H 10.8.0.5 >> ~/.ssh/known_hosts 2>/dev/null
+  script:
+    - mkdir -p dist-out
+    # 1) 多平台服务端二进制（版本号注入；Go 具名卷缓存）
+    - |
+      for GOOS in darwin linux; do
+        for GOARCH in amd64 arm64; do
+          docker run --rm -v "$CI_PROJECT_DIR:/work" -w /work/server -e GOPROXY=https://goproxy.cn,direct -e GOCACHE=/gocache -v openos-gocache:/gocache -e GOOS=$GOOS -e GOARCH=$GOARCH -e CGO_ENABLED=0 golang:1.26-alpine go build -trimpath -ldflags "-s -w -X openos/server/internal/store.Version=${CI_COMMIT_TAG}" -o /work/dist-out/openos-server-${GOOS}-${GOARCH} .
+        done
+      done
+    # 2) goder 三件套：从当次构建镜像提取（与部署产物同源，不再单独构建）
+    - docker create --name osdist ${IMAGE_BASE}:${CI_COMMIT_TAG} || true
+    - docker cp osdist:/app/goder/goder-serve dist-out/goder-serve 2>/dev/null || true
+    - docker cp osdist:/app/goder/goder.js dist-out/goder.js 2>/dev/null || true
+    - docker cp osdist:/app/goder/gh dist-out/gh 2>/dev/null || true
+    - docker rm -f osdist >/dev/null 2>&1 || true
+    # 3) manifest.json（sha256 清单；宿主下载后必校验）
+    - |
+      cd dist-out && { echo '{'; FIRST=1
+      for f in *; do
+        [ "$f" = manifest.json ] && continue
+        [ $FIRST = 1 ] || echo ','
+        printf '  "%s": "%s"' "$f" "$(sha256sum "$f" | cut -d" " -f1)"
+        FIRST=0
+      done; echo; echo '}'; } > manifest.json && cat manifest.json
+    # 4) 上传（货架机同源：download.gorun.fun = 10.8.0.5:/data/download）
+    - ssh ${DEPLOY_USER}@10.8.0.5 "mkdir -p /data/download/openos/dist/${CI_COMMIT_TAG}"
+    - scp dist-out/* ${DEPLOY_USER}@10.8.0.5:/data/download/openos/dist/${CI_COMMIT_TAG}/
   rules:
     - if: '$CI_COMMIT_TAG'

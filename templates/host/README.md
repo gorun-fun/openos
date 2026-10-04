@@ -91,3 +91,13 @@ createOpenOS({
 | `OPENOS_EXCHANGE_ROLES` | 允许 exchange 的角色白名单（强烈建议） |
 | `OPENOS_MARKET_URL` | 宿主货架 catalog.json（App 热发布 + 商店共用） |
 | `OPENOS` | 调试：指向本地 openos 工作树绕过快照拉取 |
+
+## CI 提速（P7）
+
+openos tag 流水线会发布 **dist 产物**到 `https://download.gorun.fun/openos/dist/<tag>/`
+（多平台 openos-server 二进制 + goder-serve/goder.js/gh + manifest.json sha256 清单）。
+宿主 CI 可用 `ci/host-template.yml` 的 `.openos-prebuilt` 片段按 tag 下载并校验，
+替代源码编译 openos-server（消掉最重的 modernc sqlite 编译；Dockerfile 相应把
+openos 编译阶段换成 `COPY .run/prebuilt/openos-server /app/openos-server`）。
+宿主也可 `include: project: share/openos, file: ci/host-template.yml` 复用部署/
+货架 job 骨架与缓存 id 约定。
