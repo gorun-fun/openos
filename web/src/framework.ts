@@ -71,7 +71,13 @@ export interface CreateOpenOSOptions {
   /** 挂载点，默认 #app */
   root?: string | Element
   /** 主题定制：accent 覆盖全局强调色（按钮/选中/焦点环等派生色自动计算） */
-  theme?: { accent?: string }
+  /**
+   * 主题定制（P5 升级）：accent 强调色；dark 初始深浅色（'auto' 跟随系统
+   * prefers-color-scheme，'dark'/'light' 强制初始值——用户仍可在设置里切换）；
+   * tokens 为 CSS 变量级覆盖（键 = --os- 令牌名，可省略前缀，如
+   * { 'radius': '10px', '--os-shadow': '…' }）——换肤/品牌对齐不必 fork 组件库。
+   */
+  theme?: { accent?: string; dark?: 'auto' | 'dark' | 'light'; tokens?: Record<string, string> }
   /** 壁纸列表（CSS background 值），覆盖内置 6 张；设置页可选列表同步变化 */
   wallpapers?: string[]
   /** Dock 应用排序（appId 列表，未列出的排在其后按服务器顺序） */
@@ -114,17 +120,35 @@ export interface CreateOpenOSOptions {
   agentTools?: AgentToolDef[]
 }
 
-/** 应用主题强调色：设置 --os-accent 及其派生令牌（选中/焦点/渐变），立即生效。 */
-function applyTheme(accent: string) {
-  if (!accent) return
+/** 应用主题：accent 强调色（派生令牌 color-mix 现算）+ CSS 变量级 tokens 覆盖。 */
+function applyTheme(accent?: string, tokens?: Record<string, string>) {
   const s = document.documentElement.style
-  s.setProperty('--os-accent', accent)
-  // 派生色用 color-mix 现算（现代浏览器均支持），无需引入颜色库
-  s.setProperty('--os-accent-hover', `color-mix(in srgb, ${accent} 85%, #fff)`)
-  s.setProperty('--os-accent-grad', `linear-gradient(180deg, color-mix(in srgb, ${accent} 72%, #fff) 0%, ${accent} 100%)`)
-  s.setProperty('--os-accent-soft', `color-mix(in srgb, ${accent} 28%, transparent)`)
-  s.setProperty('--os-selected', `color-mix(in srgb, ${accent} 14%, transparent)`)
-  s.setProperty('--os-focus-ring', `0 0 0 3.5px color-mix(in srgb, ${accent} 25%, transparent)`)
+  if (accent) {
+    s.setProperty('--os-accent', accent)
+    // 派生色用 color-mix 现算（现代浏览器均支持），无需引入颜色库
+    s.setProperty('--os-accent-hover', `color-mix(in srgb, ${accent} 85%, #fff)`)
+    s.setProperty('--os-accent-grad', `linear-gradient(180deg, color-mix(in srgb, ${accent} 72%, #fff) 0%, ${accent} 100%)`)
+    s.setProperty('--os-accent-soft', `color-mix(in srgb, ${accent} 28%, transparent)`)
+    s.setProperty('--os-selected', `color-mix(in srgb, ${accent} 14%, transparent)`)
+    s.setProperty('--os-focus-ring', `0 0 0 3.5px color-mix(in srgb, ${accent} 25%, transparent)`)
+  }
+  // 令牌覆盖：键补全 --os- 前缀（'radius' 与 '--os-radius' 等价）
+  for (const [k, v] of Object.entries(tokens || {})) {
+    if (!k || v == null) continue
+    s.setProperty(k.startsWith('--') ? k : `--os-${k}`, String(v))
+  }
+}
+
+/** 宿主深浅色策略：'auto' 跟随系统、'dark'/'light' 强制初始值（写入前由
+ *  desktop store 尚未挂载，直接落 documentElement 类 + localStorage 缓存键，
+ *  store load 时会以服务端/本地值校正）。 */
+function applyDarkPolicy(mode?: 'auto' | 'dark' | 'light') {
+  if (!mode) return
+  const dark = mode === 'auto'
+    ? window.matchMedia('(prefers-color-scheme: dark)').matches
+    : mode === 'dark'
+  document.documentElement.classList.toggle('dark', dark)
+  try { localStorage.setItem('openos_dark', dark ? '1' : '0') } catch { /* 存储受限 */ }
 }
 
 export function createOpenOS(opts: CreateOpenOSOptions = {}): VueApp | null {
@@ -173,7 +197,8 @@ export function createOpenOS(opts: CreateOpenOSOptions = {}): VueApp | null {
       registerWidget({ type, ...def })
     }
   }
-  if (opts.theme?.accent) applyTheme(opts.theme.accent)
+  applyTheme(opts.theme?.accent, opts.theme?.tokens)
+  applyDarkPolicy(opts.theme?.dark)
   if (opts.tokenFragment !== undefined) {
     shell.tokenFragment = opts.tokenFragment
   } else if (opts.login?.mode === 'sso') {

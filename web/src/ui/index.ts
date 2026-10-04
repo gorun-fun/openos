@@ -43,6 +43,8 @@ export { icons } from './icons'
 export type { TableColumn } from './OsTable.vue'
 
 import OsTabApp from './OsTabApp.vue'
+import OsRadio from './OsRadio.vue'
+import OsProgress from './OsProgress.vue'
 import OsChip from './OsChip.vue'
 import OsStatusDot from './OsStatusDot.vue'
 
@@ -50,7 +52,7 @@ export {
   OsButton, OsInput, OsSelect, OsToggle, OsCheckbox, OsTextarea, OsPanel, OsModal,
   OsTabs, OsTable, OsLayout, OsToolbar, OsEmpty, OsForm, OsField, OsUpload, OsToasts, OsFilePicker, AppIcon,
   MobileNavToggle, OsTbOverflow,
-  // P4：tab 型应用聚合壳 / 信息胶囊 / 状态圆点
-  OsTabApp, OsChip, OsStatusDot,
+  // P4：tab 型应用聚合壳 / 信息胶囊 / 状态圆点；P5：单选组 / 进度条
+  OsTabApp, OsChip, OsStatusDot, OsRadio, OsProgress,
 }
 export type { OsTabDef } from './OsTabApp.vue'
