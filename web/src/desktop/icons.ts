@@ -182,6 +182,18 @@ export const APP_ICONS: Record<string, IconDef> = {
       <path d="M26.5 28.5 L32 34 L37.5 28.5" fill="none" stroke="#2f7ce8" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"/>
       <path d="M22.5 41.5 H41.5" stroke="#2f7ce8" stroke-width="4.2" stroke-linecap="round"/>`),
   },
+  // 反馈：蓝紫渐变底 + 白色对话气泡（气泡内三点 + 右上星形，iMessage 语义）
+  feedback: {
+    label: '反馈',
+    svg: shell('fb', '#6ea8ff', '#5b5bf0', `
+      <path d="M18 17.5 h28 a6.5 6.5 0 0 1 6.5 6.5 v11 a6.5 6.5 0 0 1 -6.5 6.5 h-15 l-9.5 8.5 v-8.5 h-3.5 a6.5 6.5 0 0 1 -6.5 -6.5 v-11 a6.5 6.5 0 0 1 6.5 -6.5 Z" fill="#fff"/>
+      <g fill="#5b5bf0">
+        <circle cx="23.5" cy="29.5" r="2.7"/>
+        <circle cx="32" cy="29.5" r="2.7"/>
+        <circle cx="40.5" cy="29.5" r="2.7"/>
+      </g>
+      <path d="M53 8 l1.6 3.9 3.9 1.6 -3.9 1.6 -1.6 3.9 -1.6 -3.9 -3.9 -1.6 3.9 -1.6 Z" fill="#fff" opacity=".95"/>`),
+  },
   // 第三方应用默认图标：浅灰底 + 四色应用矩阵
   default: {
     label: '应用',

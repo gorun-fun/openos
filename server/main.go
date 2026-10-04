@@ -261,6 +261,113 @@ func main() {
 		}
 		writeJSON(w, map[string]any{"ok": "1", "path": p})
 	})
+
+	// ---- 用户反馈（反馈应用）----
+	// 类别/状态白名单（前端同词表渲染标签）。
+	var feedbackCategories = map[string]string{
+		"suggest": "功能建议", "issue": "问题报告", "experience": "体验反馈", "other": "其他",
+	}
+	var feedbackStatuses = map[string]string{
+		"pending": "待处理", "processing": "处理中", "resolved": "已解决", "closed": "已关闭",
+	}
+	// 提交反馈（登录即可）：广播 sys:feedback 让打开中的反馈应用即时刷新，
+	// 并给在线管理员发通知中心提醒（不在线自然无投递，下次打开应用即见）。
+	authed.HandleFunc("POST /api/feedback", func(w http.ResponseWriter, r *http.Request) {
+		id := auth.FromContext(r)
+		var req struct{ Category, Content string }
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+			http.Error(w, "参数错误", 400)
+			return
+		}
+		req.Content = strings.TrimSpace(req.Content)
+		name, ok := feedbackCategories[req.Category]
+		if !ok {
+			http.Error(w, "类别不合法", 400)
+			return
+		}
+		if l := len([]rune(req.Content)); l < 5 || l > 4000 {
+			http.Error(w, "反馈内容需 5~4000 字", 400)
+			return
+		}
+		fid, err := db.InsertFeedback(id.Username, req.Category, req.Content)
+		if err != nil {
+			http.Error(w, "提交失败，请稍后再试", 500)
+			return
+		}
+		db.Audit(id.Username, "feedback.submit", name, "")
+		hub.Publish("sys:feedback", map[string]any{"kind": "new", "id": fid})
+		for _, admin := range db.AdminUsernames() {
+			if admin == id.Username {
+				continue
+			}
+			hub.PublishTo(admin, "sys:notify", map[string]any{
+				"title": "收到新反馈",
+				"body":  id.Username + " 提交了「" + name + "」",
+				"appId": "feedback",
+			})
+		}
+		writeJSON(w, map[string]any{"ok": "1", "id": fid})
+	})
+	// 反馈列表：管理员看全部（?mine=1 只看本人），其他角色只看本人。
+	authed.HandleFunc("GET /api/feedback", func(w http.ResponseWriter, r *http.Request) {
+		id := auth.FromContext(r)
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		if limit <= 0 || limit > 200 {
+			limit = 100
+		}
+		all := id.Role == "admin" && r.URL.Query().Get("mine") != "1"
+		list, err := db.ListFeedback(id.Username, all, limit)
+		if err != nil {
+			http.Error(w, "查询失败", 500)
+			return
+		}
+		writeJSON(w, list) // 空列表恒为 [] 而非 null（ListFeedback 已保证）
+	})
+	// 处理反馈（admin）：改状态 / 回复；回复或状态有变化时通知提交者。
+	authed.HandleFunc("PUT /api/feedback/{id}", auth.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fid, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+		if err != nil {
+			http.Error(w, "参数错误：需要数字 id", 400)
+			return
+		}
+		var req struct{ Status, Reply string }
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+			http.Error(w, "参数错误", 400)
+			return
+		}
+		if _, ok := feedbackStatuses[req.Status]; !ok {
+			http.Error(w, "状态不合法", 400)
+			return
+		}
+		if l := len([]rune(req.Reply)); l > 2000 {
+			http.Error(w, "回复过长（上限 2000 字）", 400)
+			return
+		}
+		before, _ := db.FeedbackByID(fid)
+		updated, err := db.UpdateFeedback(fid, req.Status, req.Reply)
+		if err != nil || !updated {
+			http.Error(w, "反馈不存在或更新失败", http.StatusNotFound)
+			return
+		}
+		admin := auth.FromContext(r)
+		db.Audit(admin.Username, "feedback.update", strconv.FormatInt(fid, 10), feedbackStatuses[req.Status])
+		hub.Publish("sys:feedback", map[string]any{"kind": "update", "id": fid})
+		// 提交者收到处理结果通知（管理员自己给自己的反馈处理不重复打扰）
+		if before.Username != "" && before.Username != admin.Username &&
+			(before.Reply != req.Reply || before.Status != req.Status) {
+			body := "状态已更新为「" + feedbackStatuses[req.Status] + "」"
+			if strings.TrimSpace(req.Reply) != "" {
+				body += "，管理员已回复"
+			}
+			hub.PublishTo(before.Username, "sys:notify", map[string]any{
+				"title": "你的反馈有新进展",
+				"body":  body,
+				"appId": "feedback",
+			})
+		}
+		writeJSON(w, map[string]any{"ok": "1"})
+	})).ServeHTTP)
+
 	// 附件上传（multipart 字段 file，单文件 ≤10MB；Content-Type 边界由浏览器生成，
 	// 此处不可预置 json）——MaxBytesReader 硬限请求体（10MB 文件 + multipart 开销）
 	authed.HandleFunc("POST /api/attachments", func(w http.ResponseWriter, r *http.Request) {

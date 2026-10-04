@@ -1,10 +1,12 @@
 <script setup lang="ts">
 // 桌面快捷方式：应用/文件/文件夹图标，双击打开（文件夹弹出内容面板）；可从启动台
-// 拖入创建，也可拖入操作系统文件（自动上传到个人空间并生成快捷方式）。
+// 拖入创建、文件应用拖出文件/目录创建（引用不移动原文件），也可拖入操作系统文件
+// （自动上传到个人空间并生成快捷方式）。文件快捷方式的 id 是 VFS 绝对路径，原文件
+// 之后被移动/删除快捷方式即失效（openPath 报错提示），与启动台引用应用同一模型。
 // 位置为全桌面网格（左上角锚定），释放后吸附格子并与其他快捷方式/小组件互不覆盖。
 // 拖动图标到另一图标上释放 = 自动创建文件夹收纳两者（macOS 行为）；文件夹成员可
 // 拖出到桌面空白处移出、拖到其他文件夹图标上移动；右键可重命名 / 解散（成员散回桌面）。
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useWindows } from '../stores/windows'
 import { useApps } from '../stores/apps'
 import { useSession } from '../stores/session'
@@ -13,14 +15,16 @@ import AppIcon from '../ui/AppIcon.vue'
 import FolderIcon from '../ui/FolderIcon.vue'
 import { toast } from '../ui/toast'
 import { GRID, cellUnder, findFree, isFree, posOf, registerItem, unregisterItem } from './grid'
+import { onKey, KEY_PRIORITY, isTextFieldEvent, type KeyCtx } from '../ui/keys'
 
-export interface FolderItem { kind: 'app' | 'file'; id: string; name: string }
+export interface FolderItem { kind: 'app' | 'file'; id: string; name: string; dir?: boolean }
 export interface Shortcut {
   kind: 'app' | 'file' | 'folder'
   id: string        // app id / 文件绝对路径 / 文件夹随机 id（f 前缀）
   name: string
   col: number
   row: number
+  dir?: boolean     // 文件快捷方式专属：目标是目录（双击用文件应用定位而非关联应用打开）
   items?: FolderItem[] // 文件夹专属：成员列表
 }
 
@@ -95,14 +99,15 @@ function place(s: Shortcut, c: number, r: number) {
   registerItem(keyOf(s), { c: s.col, r: s.row, sc: 1, sr: 1, kind: 'shortcut' })
 }
 
-/** 在桌面坐标处添加快捷方式（网格吸附，冲突时顺延到最近空位）。 */
-function addAt(kind: Shortcut['kind'], id: string, name: string, x: number, y: number) {
-  if (list.value.some((s) => s.kind === kind && s.id === id)) return
+/** 在桌面坐标处添加快捷方式（网格吸附，冲突时顺延到最近空位）。返回是否真正创建（重复项跳过）。 */
+function addAt(kind: Shortcut['kind'], id: string, name: string, x: number, y: number, dir?: boolean): boolean {
+  if (list.value.some((s) => s.kind === kind && s.id === id)) return false
   const cell = cellUnder(x, y)
-  const s: Shortcut = { kind, id, name, col: 0, row: 0 }
+  const s: Shortcut = { kind, id, name, col: 0, row: 0, dir }
   list.value.push(s)
   place(s, cell.c, cell.r)
   save()
+  return true
 }
 
 /** 供外部（桌面拖放 / 右键菜单）调用。 */
@@ -117,11 +122,13 @@ function style(s: Shortcut) {
 function open(s: Shortcut) {
   if (s.kind === 'folder') { peekId.value = s.id; return }
   if (s.kind === 'app') windows.open(s.id)
-  else openPath(s.id) // 统一关联表：md→文档、csv→表格、html→幻灯片、图片→预览
+  else openItem({ kind: 'file', id: s.id, name: s.name, dir: s.dir })
 }
 
 function openItem(it: FolderItem) {
   if (it.kind === 'app') windows.open(it.id)
+  // 目录 → 文件应用定位（Spotlight 同款语义）；文件 → 统一关联表：md→文档、csv→表格、html→幻灯片、图片→预览
+  else if (it.dir) windows.open('files', { path: it.id })
   else openPath(it.id)
   peekId.value = ''
 }
@@ -145,7 +152,7 @@ function removeByKey(key: string) {
 }
 /** 成员落回桌面顶层（吸附到 c/r 附近空位）。 */
 function scatter(it: FolderItem, c: number, r: number) {
-  const ns: Shortcut = { kind: it.kind, id: it.id, name: it.name, col: 0, row: 0 }
+  const ns: Shortcut = { kind: it.kind, id: it.id, name: it.name, col: 0, row: 0, dir: it.dir }
   list.value.push(ns)
   place(ns, c, r)
 }
@@ -175,6 +182,61 @@ function relayout() {
   save()
 }
 
+// ---- 桌面选中层键盘（统一键盘中枢 ui/keys.ts 的 desktop 层） ----
+// 焦点在桌面层级（不在应用窗口/弹窗/菜单/输入框内）时接管：方向键按网格最近邻
+// 移动选中、Enter 打开选中项、Delete/Backspace 移除（与右键「移除快捷方式」一致，
+// 文件夹照常解散散回桌面）。文件夹展开面板打开期间不接管（面板自有交互）。
+let offKeys: (() => void) | undefined
+onMounted(() => { offKeys = onKey('bubble', KEY_PRIORITY.desktop, onDesktopKey) })
+onBeforeUnmount(() => { offKeys?.(); offKeys = undefined })
+
+function onDesktopKey({ info, ev }: KeyCtx) {
+  if (!ev || info.alt || info.ctrl || info.meta) return false
+  if (peekId.value || isTextFieldEvent(ev)) return false
+  const host = document.activeElement as HTMLElement | null
+  if (host?.closest('.window, .os-modal-mask, .os-menu-root, [role="dialog"]')) return false
+  switch (info.key) {
+    case 'ArrowUp': case 'ArrowDown': case 'ArrowLeft': case 'ArrowRight': {
+      if (!list.value.length) return false
+      navigate(info.key.slice(5).toLowerCase() as 'up' | 'down' | 'left' | 'right')
+      return true
+    }
+    case 'Enter': {
+      const cur = selectedOf()
+      if (!cur) return false
+      open(cur)
+      return true
+    }
+    case 'Delete': case 'Backspace': {
+      const cur = selectedOf()
+      if (!cur) return false
+      removeByKey(cur.kind + ':' + cur.id)
+      return true
+    }
+  }
+  return false
+}
+
+const selectedOf = () => list.value.find((s) => s.kind + ':' + s.id === selected.value)
+
+/** 方向键网格最近邻：主轴距离优先、副轴距离次之（Finder 桌面行为）；无选中时取首项。 */
+function navigate(dir: 'up' | 'down' | 'left' | 'right') {
+  const cur = selectedOf()
+  if (!cur) { const first = list.value[0]; selected.value = first.kind + ':' + first.id; return }
+  const horiz = dir === 'left' || dir === 'right'
+  const sign = dir === 'left' || dir === 'up' ? -1 : 1
+  let best: Shortcut | null = null
+  let bestScore = Infinity
+  for (const s of list.value) {
+    if (s === cur) continue
+    const main = horiz ? s.col - cur.col : s.row - cur.row
+    if (main * sign <= 0) continue // 必须在目标方向上
+    const score = Math.abs(main) * 1000 + Math.abs(horiz ? s.row - cur.row : s.col - cur.col)
+    if (score < bestScore) { bestScore = score; best = s }
+  }
+  if (best) selected.value = best.kind + ':' + best.id
+}
+
 // ---- 拖拽 ----
 function dragStart(e: DragEvent, s: Shortcut) {
   e.dataTransfer?.setData('application/x-openos-shortcut', JSON.stringify(s))
@@ -199,7 +261,7 @@ function readDragItem(e: DragEvent): (FolderItem & { fromFolder?: string }) | nu
   if (raw) {
     try {
       const s = JSON.parse(raw)
-      if (s && (s.kind === 'app' || s.kind === 'file')) return { kind: s.kind, id: s.id, name: s.name, fromFolder: s.fromFolder }
+      if (s && (s.kind === 'app' || s.kind === 'file')) return { kind: s.kind, id: s.id, name: s.name, dir: s.dir, fromFolder: s.fromFolder }
     } catch { /* ignore */ }
     return null
   }
@@ -209,7 +271,7 @@ function readDragItem(e: DragEvent): (FolderItem & { fromFolder?: string }) | nu
 }
 
 /** 把源从原位置（顶层或某文件夹）摘除；源不在场（如来自启动台）时仅返回成员数据。 */
-function takeOut(d: { kind: 'app' | 'file'; id: string; name: string; fromFolder?: string }): FolderItem {
+function takeOut(d: { kind: 'app' | 'file'; id: string; name: string; dir?: boolean; fromFolder?: string }): FolderItem {
   if (d.fromFolder) {
     const src = list.value.find((s) => s.kind === 'folder' && s.id === d.fromFolder)
     if (src?.items) {
@@ -218,7 +280,7 @@ function takeOut(d: { kind: 'app' | 'file'; id: string; name: string; fromFolder
         src.items = src.items.filter((x) => x !== it)
         if (!src.items.length) removeFolderShell(src)
       }
-      return { kind: d.kind, id: d.id, name: it?.name || d.name }
+      return { kind: d.kind, id: d.id, name: it?.name || d.name, dir: it?.dir ?? d.dir }
     }
   }
   const top = list.value.find((s) => s.kind === d.kind && s.id === d.id)
@@ -226,7 +288,7 @@ function takeOut(d: { kind: 'app' | 'file'; id: string; name: string; fromFolder
     unregisterItem(keyOf(top))
     list.value = list.value.filter((x) => x !== top)
   }
-  return { kind: d.kind, id: d.id, name: d.name }
+  return { kind: d.kind, id: d.id, name: d.name, dir: d.dir }
 }
 
 /** 移除空文件夹壳（成员被全部拖走时）。 */
@@ -250,7 +312,7 @@ function dropOnShortcut(e: DragEvent, target: Shortcut) {
   } else {
     if (d.kind === target.kind && d.id === target.id) return // 拖到自己身上
     const member = takeOut(d)
-    const keep: FolderItem = { kind: target.kind, id: target.id, name: target.name }
+    const keep: FolderItem = { kind: target.kind, id: target.id, name: target.name, dir: target.dir }
     unregisterItem(keyOf(target))
     list.value = list.value.filter((x) => x !== target)
     const folder: Shortcut = {
@@ -353,7 +415,7 @@ async function dropShortcut(e: DragEvent) {
       </template>
       <FolderIcon v-else-if="s.kind === 'folder'" :entries="s.items || []" :size="48" />
       <template v-else>
-        <span class="file-icon">{{ fileEmoji(s.id) }}</span>
+        <span class="file-icon">{{ fileEmoji(s.id, s.dir) }}</span>
       </template>
       <span class="name">{{ s.name }}</span>
     </div>
@@ -373,7 +435,7 @@ async function dropShortcut(e: DragEvent) {
             @click="openItem(it)" @dragstart="peekDragStart($event, it)"
           >
             <AppIcon v-if="it.kind === 'app'" :app="it.id" :size="56" />
-            <span v-else class="file-icon">{{ fileEmoji(it.id) }}</span>
+            <span v-else class="file-icon">{{ fileEmoji(it.id, it.dir) }}</span>
             <span class="name">{{ it.name }}</span>
           </button>
           <div v-if="!peekItems.length" class="peek-empty">文件夹是空的，拖图标进来吧</div>

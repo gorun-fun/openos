@@ -35,6 +35,7 @@ import { shell, type ShellBrand } from './shell'
 import { setToken } from './api/client'
 import { registerWidget, type WidgetDef } from './desktop/widgetRegistry'
 import { installMenuGuard } from './ui/menu'
+import { installKeys } from './ui/keys'
 import { installTooltip } from './ui/tooltip'
 import { installAppNotifiers } from './desktop/appNotifier'
 import { registerDialog, type DialogDef } from './ui/dialogService'
@@ -128,6 +129,8 @@ export function createOpenOS(opts: CreateOpenOSOptions = {}): VueApp | null {
   // 0. 全局右键守卫：默认屏蔽浏览器原生菜单（登录页与桌面全阶段生效），
   //    应用自定义菜单在组件内 stopPropagation 接管，详见 ui/menu.ts
   installMenuGuard()
+  // 统一键盘中枢：window capture/bubble/keyup 三链 + sys:key 总线分发（见 ui/keys.ts）
+  installKeys()
   // 全局快速 tooltip：接管原生 title 的悬停提示（约 400ms 弹出，见 ui/tooltip.ts）
   installTooltip()
   // 后台应用通知：应用未打开时的消息提醒（聊天等，见 desktop/appNotifier.ts）

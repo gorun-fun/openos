@@ -14,6 +14,7 @@
 // closest 也无法跨越边界，天然跳过——goder 内部 UI 不受接管。
 //
 // 安装：createOpenOS() 里随 installMenuGuard 一起调用 installTooltip()。
+import { onKey, KEY_PRIORITY } from './keys'
 
 const SHOW_DELAY = 400 // 首次悬停的显示延迟（原生约 1~2s）
 const QUICK_DELAY = 60 // 连续浏览（800ms 内再次悬停）的快速延迟
@@ -56,7 +57,8 @@ export function installTooltip() {
   document.addEventListener('focusout', () => hide(), true)
 
   document.addEventListener('pointerdown', () => hide(), true)
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hide() }, true)
+  // Esc 顺带隐藏提示：纯副作用不消费按键（键仍按级联继续，如同时收起启动台）
+  onKey('capture', KEY_PRIORITY.tip, ({ info }) => { if (info.key === 'Escape') hide(); return false })
   document.addEventListener('wheel', () => hide(), { capture: true, passive: true })
   window.addEventListener('resize', () => hide())
   document.addEventListener('visibilitychange', () => { if (document.hidden) hide() })

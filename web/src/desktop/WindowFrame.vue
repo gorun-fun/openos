@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, h, onErrorCaptured, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { computed, defineAsyncComponent, h, nextTick, onErrorCaptured, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import type { WinState } from '../stores/windows'
 import { MENUBAR_H, useWindows, viewport, type SnapZone } from '../stores/windows'
 import { builtinComponents, runtimeComponents, appChrome, useApps } from '../stores/apps'
@@ -81,6 +81,40 @@ watch(() => props.win.appId, resolveComp)
 const focused = computed(() => store.activeId === props.win.id)
 // 融合工具栏窗体：应用自绘标题行（红绿灯悬浮其上，可拖拽/双击最大化），窗口内容占满整高
 const merged = computed(() => appChrome[props.win.appId] === 'merged')
+
+// ---- 窗口激活即接管键盘焦点 ----
+// 把焦点路由到应用内容根：带 tabindex 的应用根元素（文件/表格/计算器等键盘直输
+// 应用）直接聚焦，点击标题栏后按键不再丢失；应用内部已有焦点（输入框等）时不打扰；
+// 无 tabindex 根的应用聚焦 .body 兜底（按键进入桌面层判定而非悬挂在别处）。
+// iframe 应用（WebApp）点击内部后焦点天然属于子帧，本路由不介入。
+const bodyEl = ref<HTMLElement>()
+// 键盘焦点目标：应用根自身带 tabindex（计算器/表格等键盘直输应用）优先；
+// 否则取首个带 tabindex 的非输入子孙（文件应用根是 div.files 包装层、
+// 真正的键盘根是内层 main.content）；再否则 .body 兜底
+function keyTarget(body: HTMLElement): HTMLElement {
+  const root = body.firstElementChild as HTMLElement | null
+  if (root?.hasAttribute('tabindex')) return root
+  return body.querySelector<HTMLElement>('[tabindex]:not(input):not(textarea):not(select)') || body
+}
+function routeKeyFocus() {
+  const body = bodyEl.value
+  if (!body) return
+  // 焦点已在应用内部（输入框等）时不打扰；此前兜底落在 .body 的升级到应用根
+  const cur = document.activeElement
+  if (cur && cur !== body && body.contains(cur)) return
+  const target = keyTarget(body)
+  if (target !== cur) target.focus({ preventScroll: true })
+}
+// 触发点两路：focused 变 true（新开窗口时 setup 即 true 无转换，须 immediate 补
+// 一次，nextTick 等 .body 就位）与内容根元素出现（应用是 defineAsyncComponent，
+// 挂载时 DOM 常未渲染——MutationObserver 观察子树根变化后再路由一次）
+watch(focused, (on) => { if (on) void nextTick(routeKeyFocus) }, { immediate: true })
+let bodyObs: MutationObserver | undefined
+onMounted(() => {
+  bodyObs = new MutationObserver(() => { if (store.activeId === props.win.id) routeKeyFocus() })
+  bodyEl.value && bodyObs.observe(bodyEl.value, { childList: true })
+})
+onBeforeUnmount(() => { bodyObs?.disconnect() })
 
 // ---- 拖动（含边缘吸附）与缩放 ----
 const MIN_W = 300, MIN_H = 200
@@ -262,7 +296,7 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
         <div class="titlebar-space" />
       </template>
     </header>
-    <div class="body">
+    <div ref="bodyEl" class="body" tabindex="-1">
       <ErrorPanel v-if="crashed" />
       <component :is="comp" :win="win" :key="reloadSeq" v-else-if="comp" />
     </div>

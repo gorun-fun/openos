@@ -540,12 +540,16 @@ async function onDrop(e: DragEvent) {
   refreshAll()
 }
 
-// ---- 拖拽（移动到文件夹 / 侧栏目录 / 废纸篓） ----
+// ---- 拖拽（移动到文件夹 / 侧栏目录 / 废纸篓；拖出窗口到桌面 = 建快捷方式） ----
 const dragOverDir = ref('')
 function onDragStart(e: DragEvent, f: VFile) {
   if (!hasSel(f.path)) setSelection([f.path])
   const paths = hasSel(f.path) ? selPaths.value : [f.path]
   e.dataTransfer?.setData('application/x-openos-paths', JSON.stringify(paths))
+  // 并行明细（含是否目录）：桌面层建快捷方式时只拿得到路径字符串，目录双击要走文件应用定位
+  const known = new Map<string, boolean>()
+  for (const list of [entries.value, ...colCache.values()]) for (const x of list) known.set(x.path, !!x.isDir)
+  e.dataTransfer?.setData('application/x-openos-entries', JSON.stringify(paths.map((p) => ({ p, d: known.get(p) || false }))))
   if (e.dataTransfer) e.dataTransfer.effectAllowed = 'copyMove'
 }
 function onItemDragOver(e: DragEvent, f: VFile) {
@@ -603,6 +607,8 @@ function onKeydown(e: KeyboardEvent) {
   if (renaming.value || creating.value) return
   const meta = e.metaKey || e.ctrlKey
   if (meta && e.key.toLowerCase() === 'a') { e.preventDefault(); setSelection(shown.value.map((f) => f.path)); return }
+  // ⇧⌘N 新建文件夹（菜单提示早已标注，此处接线）
+  if (meta && e.shiftKey && e.code === 'KeyN') { e.preventDefault(); creating.value = 'dir'; newName.value = ''; return }
   if (meta && e.key.toLowerCase() === 'c') { e.preventDefault(); doCopy(); return }
   if (meta && e.key.toLowerCase() === 'x') { e.preventDefault(); doCut(); return }
   if (meta && e.key.toLowerCase() === 'v') { e.preventDefault(); doPaste(); return }

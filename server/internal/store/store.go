@@ -188,6 +188,17 @@ CREATE TABLE IF NOT EXISTS shares (
   expires_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_shares_owner ON shares(owner, created_at DESC);
+CREATE TABLE IF NOT EXISTS feedback (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT NOT NULL,
+  category TEXT NOT NULL DEFAULT 'other',
+  content TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  reply TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_user ON feedback(username, id DESC);
 `
 
 // builtinApps 内置应用清单。icon 为前端渲染标识。
@@ -205,6 +216,7 @@ var builtinApps = []AppDef{
 	{ID: "calendar", Name: "日历", Icon: "calendar", Category: "工具", Builtin: true, Width: 980, Height: 660},
 	{ID: "welcome", Name: "使用指南", Icon: "welcome", Category: "系统", Builtin: true, Width: 760, Height: 580},
 	{ID: "store", Name: "应用商店", Icon: "store", Category: "系统", Builtin: true, Width: 980, Height: 640},
+	{ID: "feedback", Name: "反馈", Icon: "feedback", Category: "系统", Builtin: true, Width: 860, Height: 600},
 }
 
 // vfsAppIDs 依赖虚拟文件系统/终端的内置应用（OPENOS_VFS=off 时整体下架，
@@ -221,9 +233,9 @@ const marketAppID = "store"
 
 // 默认角色 → 应用授权矩阵。
 var defaultRoleApps = map[string][]string{
-	"admin": {"terminal", "files", "calculator", "settings", "docs", "sheets", "slides", "pdf", "goder", "notes", "calendar", "welcome", "store"},
-	"user":  {"terminal", "files", "calculator", "docs", "sheets", "slides", "pdf", "goder", "notes", "calendar", "welcome", "store"},
-	"guest": {"calculator", "notes", "calendar", "welcome"},
+	"admin": {"terminal", "files", "calculator", "settings", "docs", "sheets", "slides", "pdf", "goder", "notes", "calendar", "welcome", "store", "feedback"},
+	"user":  {"terminal", "files", "calculator", "docs", "sheets", "slides", "pdf", "goder", "notes", "calendar", "welcome", "store", "feedback"},
+	"guest": {"calculator", "notes", "calendar", "welcome", "feedback"},
 }
 
 // StorageQuota 每用户虚拟文件空间上限（字节，按内容长度估算）。
@@ -642,6 +654,93 @@ func (db *DB) ChatRoomHistory(before int64, limit int) ([]ChatRoomMessage, error
 // PruneChatRoomBefore 删除截止时间前的聊天室消息。
 func (db *DB) PruneChatRoomBefore(cutoff time.Time) (int64, error) {
 	return db.pruneBefore("chat_room_messages", cutoff)
+}
+
+// ---- 用户反馈（反馈应用：全员可提交，管理员处理） ----
+
+// Feedback 反馈行（category/status 白名单校验在 main 路由层）。
+type Feedback struct {
+	ID        int64  `json:"id"`
+	Username  string `json:"username"`
+	Category  string `json:"category"`
+	Content   string `json:"content"`
+	Status    string `json:"status"`
+	Reply     string `json:"reply"`
+	CreatedAt string `json:"createdAt"`
+	UpdatedAt string `json:"updatedAt"`
+}
+
+// InsertFeedback 提交反馈（状态恒为 pending，入库时间由默认值生成）。
+func (db *DB) InsertFeedback(username, category, content string) (int64, error) {
+	res, err := db.Exec(`INSERT INTO feedback(username,category,content) VALUES(?,?,?)`,
+		username, category, content)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// ListFeedback 反馈列表（倒序）：all=false 只看本人，all=true 全部（admin 视角）。
+func (db *DB) ListFeedback(username string, all bool, limit int) ([]Feedback, error) {
+	q := `SELECT id,username,category,content,status,reply,created_at,updated_at FROM feedback`
+	args := []any{}
+	if !all {
+		q += ` WHERE username=?`
+		args = append(args, username)
+	}
+	q += ` ORDER BY id DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Feedback{}
+	for rows.Next() {
+		var f Feedback
+		if err := rows.Scan(&f.ID, &f.Username, &f.Category, &f.Content, &f.Status, &f.Reply, &f.CreatedAt, &f.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// FeedbackByID 按 id 取反馈（管理员处理时回读提交者，用于定向通知）。
+func (db *DB) FeedbackByID(id int64) (Feedback, bool) {
+	var f Feedback
+	err := db.QueryRow(`SELECT id,username,category,content,status,reply,created_at,updated_at
+		FROM feedback WHERE id=?`, id).
+		Scan(&f.ID, &f.Username, &f.Category, &f.Content, &f.Status, &f.Reply, &f.CreatedAt, &f.UpdatedAt)
+	return f, err == nil
+}
+
+// UpdateFeedback 管理员处理反馈：更新状态与回复（updated_at 一并刷新）。
+func (db *DB) UpdateFeedback(id int64, status, reply string) (bool, error) {
+	res, err := db.Exec(`UPDATE feedback SET status=?, reply=?, updated_at=datetime('now') WHERE id=?`,
+		status, reply, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// AdminUsernames 全部管理员用户名（新反馈通知接收方；不含禁用账号）。
+func (db *DB) AdminUsernames() []string {
+	rows, err := db.Query(`SELECT username FROM users WHERE role='admin' AND disabled=0`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err == nil {
+			out = append(out, u)
+		}
+	}
+	return out
 }
 
 // InsertAttachment 附件元数据入库（文件已落盘；入库失败由调用方清理文件）。

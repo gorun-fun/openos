@@ -184,6 +184,12 @@ button { font-family: inherit; }
 .os-menu button:hover:not(:disabled) { background: var(--os-accent); color: #fff; }
 .os-menu button:disabled { opacity: .4; cursor: default; }
 .os-menu button.danger:hover:not(:disabled) { background: #e5484d; }
+/* 键盘导航焦点（menu.ts 方向键把 DOM 焦点移到菜单项按钮）：与悬停同款高亮，
+   覆盖全部菜单形态（.os-menu / 菜单栏 .dropdown 都带 os-menu-root）；
+   不叠加全局焦点环——高亮本身即定位指示 */
+.os-menu-root button:focus-visible:not(:disabled) { background: var(--os-accent); color: #fff; box-shadow: none; }
+.os-menu-root button.danger:focus-visible:not(:disabled) { background: #e5484d; }
+.os-menu-root button:focus-visible:not(:disabled) .hint { color: rgba(255, 255, 255, .75); }
 .os-menu .sep { height: 1px; margin: 4px 8px; background: var(--os-border); }
 .os-menu .grp { padding: 5px 10px 3px; font-size: 11px; font-weight: 600; color: var(--os-text-secondary); }
 .os-menu .hint { margin-left: auto; font-size: 11px; color: var(--os-text-secondary); }

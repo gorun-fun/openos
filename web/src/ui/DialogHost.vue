@@ -4,19 +4,42 @@
 // 卡片居中（视觉语言与 OsModal 一致），Esc/点遮罩默认取消最上层弹窗。
 import { computed, onBeforeUnmount, onMounted } from 'vue'
 import { dialogStack, dialogRegistry, type DialogState } from './dialogService'
+import { onKey, KEY_PRIORITY, type KeyCtx } from './keys'
 
 // 组件在 registerDialog 时已解析（loader → defineAsyncComponent），此处直接取用
 function compOf(d: DialogState) {
   return dialogRegistry.get(d.dialogId)?.component
 }
 
-// Esc 关闭最上层弹窗（组件内部需要拦截 Esc 时，在 keydown 里 stopPropagation 即可）
 const top = computed(() => dialogStack[dialogStack.length - 1])
-function onKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape' && top.value?.escClose) top.value.cancel()
+// 键盘：统一键盘中枢的 dialog 层（最高优先级，见 ui/keys.ts）——Esc 取消最上层
+// 弹窗（escClose 时），Tab 焦点圈锁在最上层卡片内（模态语义，不跑到弹窗后方）
+function onKeydown({ info }: KeyCtx) {
+  const t = top.value
+  if (!t) return false
+  if (info.key === 'Escape' && t.escClose) { t.cancel(); return true }
+  if (info.key === 'Tab') { trapTab(info.shift); return true }
+  return false
 }
-onMounted(() => window.addEventListener('keydown', onKeydown, true))
-onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
+let offKeys: (() => void) | undefined
+onMounted(() => { offKeys = onKey('capture', KEY_PRIORITY.dialog, onKeydown) })
+onBeforeUnmount(() => { offKeys?.(); offKeys = undefined })
+
+/** Tab 焦点圈：焦点在卡片内时首尾环绕，在卡片外（或无处）时收进首个可聚焦元素 */
+function trapTab(backward: boolean) {
+  const cards = document.querySelectorAll<HTMLElement>('.os-dialog')
+  const card = cards[cards.length - 1]
+  if (!card) return
+  const focusables = [...card.querySelectorAll<HTMLElement>(
+    'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex="-1"])',
+  )].filter((el) => el.getClientRects().length)
+  if (!focusables.length) return
+  const idx = focusables.indexOf(document.activeElement as HTMLElement)
+  const next = backward
+    ? focusables[idx <= 0 ? focusables.length - 1 : idx - 1]
+    : focusables[idx === focusables.length - 1 ? 0 : idx + 1]
+  next.focus({ preventScroll: true })
+}
 
 // 弹窗打开后把焦点移入卡片内首个输入控件（无输入类控件则不动，避免按钮焦点环）
 function onCardMount(el: any) {

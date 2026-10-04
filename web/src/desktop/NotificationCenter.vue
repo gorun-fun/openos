@@ -7,6 +7,7 @@ import { useNotifications } from '../stores/notifications'
 import { useWindows } from '../stores/windows'
 import { useApps } from '../stores/apps'
 import AppIcon from '../ui/AppIcon.vue'
+import { onKey, KEY_PRIORITY, type KeyCtx } from '../ui/keys'
 
 const nc = useNotifications()
 const windows = useWindows()
@@ -62,16 +63,19 @@ function onDocDown(e: PointerEvent) {
   if (t.closest('.nc-panel') || t.closest('[data-os-nc-clock]')) return
   nc.closePanel()
 }
-function onKey(e: KeyboardEvent) {
-  if (e.key === 'Escape' && nc.panelOpen) nc.closePanel()
+// Esc：统一键盘中枢 overlay 层（原 document 冒泡监听迁入），面板开着才消费
+function onEscKey({ info }: KeyCtx) {
+  if (info.key === 'Escape' && nc.panelOpen) { nc.closePanel(); return true }
+  return false
 }
+let offKeys: (() => void) | undefined
 onMounted(() => {
   document.addEventListener('pointerdown', onDocDown, true)
-  document.addEventListener('keydown', onKey)
+  offKeys = onKey('capture', KEY_PRIORITY.overlay, onEscKey)
 })
 onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', onDocDown, true)
-  document.removeEventListener('keydown', onKey)
+  offKeys?.(); offKeys = undefined
   for (const id of [...timers.keys()]) clearToastTimer(id)
 })
 

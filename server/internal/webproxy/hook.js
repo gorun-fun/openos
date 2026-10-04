@@ -208,6 +208,40 @@
     }
   } catch (e) { /* 忽略 */ }
 
+  // ---- 全局快捷键转发：iframe 聚焦后宿主 window 收不到帧内按键 ----
+  // 仅转发系统级组合（F4 启动台 / ⌘·Ctrl+Space 聚焦搜索 / Win·⌘ 单击松开切换
+  // 启动台），普通按键与打字内容绝不外发。宿主 WebApp 校验消息来源（e.source 须
+  // 是其某个标签页的 contentWindow）后交统一键盘中枢（ui/keys.ts）分发。
+  try {
+    if (window.top !== window.self) {
+      var kSolo = false;
+      var kSend = function (ev, e, extra) {
+        try {
+          var msg = {
+            type: 'openos:key', ev: ev, key: e.key, code: e.code,
+            alt: e.altKey, ctrl: e.ctrlKey, meta: e.metaKey, shift: e.shiftKey,
+          };
+          if (extra) for (var k in extra) msg[k] = extra[k];
+          window.parent.postMessage(msg, '*');
+        } catch (e2) { /* 忽略 */ }
+      };
+      var kIsMeta = function (e) {
+        return e.key === 'Meta' || e.key === 'OS' || e.code === 'MetaLeft' || e.code === 'MetaRight';
+      };
+      document.addEventListener('keydown', function (e) {
+        kSolo = kIsMeta(e) && !e.altKey && !e.ctrlKey && !e.shiftKey;
+        if (e.key === 'F4') kSend('down', e);
+        else if (e.code === 'Space' && (e.metaKey || e.ctrlKey || e.altKey)) kSend('down', e);
+      }, true);
+      document.addEventListener('keyup', function (e) {
+        var solo = kSolo && kIsMeta(e);
+        kSolo = false;
+        if (solo) kSend('up', e, { soloMeta: true });
+      }, true);
+      window.addEventListener('blur', function () { kSolo = false; });
+    }
+  } catch (e) { /* 忽略 */ }
+
   // ---- history（SPA 路由的地址空间）----
   // 还原模式下 SPA 路由工作在目标站地址空间：pushState/replaceState 的地址原样
   // 传递（仅维持 __os_px 标记），不加代理前缀——加前缀会让 SPA 随后读到的

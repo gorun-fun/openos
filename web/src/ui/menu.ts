@@ -17,6 +17,7 @@
 // - 组件在自己的 contextmenu 处理器中 preventDefault + stopPropagation 后
 //   调 open()，守卫便不再介入（否则守卫会把刚打开的菜单又关掉）。
 import { computed, reactive, ref } from 'vue'
+import { onKey, KEY_PRIORITY, isTextFieldEvent } from './keys'
 
 /** 当前显示中的菜单 owner（空串 = 无菜单） */
 const owner = ref('')
@@ -48,7 +49,7 @@ export function useMenu(o: string) {
   })
 }
 
-// ---- 统一关闭：惰性注册一次，capture 阶段保证先于任何组件的 stopPropagation ----
+// ---- 统一关闭：惰性注册一次（capture 层保证先于任何组件的 stopPropagation） ----
 let watched = false
 function ensureCloseWatch() {
   if (watched) return
@@ -66,12 +67,49 @@ function ensureCloseWatch() {
   document.addEventListener('pointerdown', (e) => {
     if (owner.value && !inside(e)) closeMenu()
   }, true)
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && owner.value) closeMenu()
-  }, true)
+  // 键盘：统一键盘中枢的 menu 层（见 ui/keys.ts）——Esc 关闭、方向键/Home/End
+  // 在菜单项间移动焦点（焦点落在按钮上后 Enter/Space 走原生激活，无需接管）
+  onKey('capture', KEY_PRIORITY.menu, ({ info, ev }) => {
+    if (!owner.value || !ev) return false
+    if (info.key === 'Escape') { closeMenu(); return true }
+    const root = menuRootEl()
+    if (!root) return false
+    // 菜单内含输入框（如筛选）时方向键/Tab 留给输入语义
+    if (isTextFieldEvent(ev) && root.contains(document.activeElement)) return false
+    const items = menuItems(root)
+    if (!items.length) return false
+    const move = (n: number) => {
+      const el = items[(n + items.length) % items.length]
+      el.focus()
+      el.scrollIntoView({ block: 'nearest' })
+      return true
+    }
+    const idx = items.indexOf(document.activeElement as HTMLElement)
+    switch (info.key) {
+      case 'ArrowDown': return move(idx < 0 ? 0 : idx + 1)
+      case 'ArrowUp': return move(idx < 0 ? items.length - 1 : idx - 1)
+      case 'Home': return move(0)
+      case 'End': return move(items.length - 1)
+      case 'Tab': closeMenu(); return true // 菜单是瞬时浮层，Tab 收起而非跑到菜单后方
+    }
+    return false
+  })
   // 滚动（含内部容器，capture 捕获）与窗口缩放后菜单锚点失效，直接关闭
   document.addEventListener('wheel', () => closeMenu(), { capture: true, passive: true })
   window.addEventListener('resize', () => closeMenu())
+}
+
+/** 当前可见的菜单根（菜单均 v-if 渲染，同一时刻至多一个） */
+function menuRootEl(): HTMLElement | null {
+  for (const el of document.querySelectorAll<HTMLElement>('.os-menu-root')) {
+    if (el.getClientRects().length) return el
+  }
+  return null
+}
+
+/** 菜单项（可聚焦的按钮/菜单项角色，跳过禁用项） */
+function menuItems(root: HTMLElement): HTMLElement[] {
+  return [...root.querySelectorAll<HTMLElement>('button:not(:disabled), [role="menuitem"]:not(:disabled)')]
 }
 
 // ---- 右键守卫：默认屏蔽浏览器原生菜单，应用自定义菜单自行接管 ----

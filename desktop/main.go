@@ -587,7 +587,39 @@ v=v.replace(/\s+$/,'')+'; SameSite=None';
 }
 }catch(e){}return d.set.call(this,v);}});
 }
-}catch(e){}})();` + globalBridgeSource()
+}catch(e){}})();` + globalBridgeSource() + keyForwardSource()
+}
+
+// keyForwardSource iframe 内全局快捷键转发（SOP 已关、子帧直连真实站点）：
+// 帧内聚焦后宿主 window 收不到按键，把系统级组合（F4 启动台 / ⌘·Ctrl+Space
+// 聚焦搜索 / Win·⌘ 单击松开切换启动台）经 postMessage 转发给父页（WebApp 按
+// contentWindow 校验来源后交统一键盘中枢 ui/keys.ts）。普通按键与打字内容
+// 绝不外发；主帧（OpenOS 自身）不安装。
+func keyForwardSource() string {
+	return `(function(){try{
+if(window.__OSD_KEYFWD__)return;
+Object.defineProperty(window,'__OSD_KEYFWD__',{value:true});
+if(window.top===window.self)return;
+var solo=false;
+var isMeta=function(e){return e.key==='Meta'||e.key==='OS'||e.code==='MetaLeft'||e.code==='MetaRight'};
+var send=function(ev,e,extra){
+try{
+var m={type:'openos:key',ev:ev,key:e.key,code:e.code,alt:e.altKey,ctrl:e.ctrlKey,meta:e.metaKey,shift:e.shiftKey};
+if(extra)for(var k in extra)m[k]=extra[k];
+window.parent.postMessage(m,'*');
+}catch(x){}
+};
+document.addEventListener('keydown',function(e){
+solo=isMeta(e)&&!e.altKey&&!e.ctrlKey&&!e.shiftKey;
+if(e.key==='F4')send('down',e);
+else if(e.code==='Space'&&(e.metaKey||e.ctrlKey||e.altKey))send('down',e);
+},true);
+document.addEventListener('keyup',function(e){
+var s=solo&&isMeta(e);solo=false;
+if(s)send('up',e,{soloMeta:true});
+},true);
+window.addEventListener('blur',function(){solo=false});
+}catch(e){}})();`
 }
 
 // globalBridgeSource 身份全局桥（ME 系微前端的菜单命门）：美团 WebShell 的
@@ -848,7 +880,7 @@ try{
     }
   }
 }catch(e){}
-})();` + globalBridgeSource()
+})();` + globalBridgeSource() + keyForwardSource()
 }
 
 // chromeArgs 组装 Chrome 启动参数。核心三件套：

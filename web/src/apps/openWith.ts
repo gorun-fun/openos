@@ -71,8 +71,9 @@ export function kindOf(f: VFile | { path: string; isDir?: boolean }): string {
   return names[ext] || (ext ? ext.toUpperCase() + ' 文件' : '文档')
 }
 
-/** 文件的 emoji 图标（无缩略图时的占位）。 */
-export function fileEmoji(p: string): string {
+/** 文件的 emoji 图标（无缩略图时的占位；目录恒为文件夹）。 */
+export function fileEmoji(p: string, isDir?: boolean): string {
+  if (isDir) return '📁'
   const ext = extOf(p)
   if (IMAGE_EXTS.includes(ext)) return '🖼️'
   const map: Record<string, string> = {

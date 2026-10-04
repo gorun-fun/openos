@@ -25,6 +25,7 @@ import { snapPreview } from './snapState'
 import { fsApi } from '../api/client'
 import { toast } from '../ui/toast'
 import { useMenu, menuPos } from '../ui/menu'
+import { onKey, isTextFieldEvent, setModal, KEY_PRIORITY, type KeyCtx } from '../ui/keys'
 import { widgetDefs, widgetDef } from './widgetRegistry'
 import { appForPath } from '../apps/openWith'
 import { installAgentBridge } from './agentBridge'
@@ -99,8 +100,11 @@ onMounted(async () => {
   shortcutsRef.value?.relayout()
 
   window.addEventListener('resize', onResize)
-  window.addEventListener('keydown', onShortcut)
-  window.addEventListener('keyup', onShortcutKeyUp)
+  // 键盘快捷键：注册进统一键盘中枢的 system 层（window 监听/分发都在 ui/keys.ts）
+  offs.push(
+    onKey('bubble', KEY_PRIORITY.system, onSystemKey),
+    onKey('keyup', KEY_PRIORITY.system, onSystemKeyUp),
+  )
   // iOS 软键盘弹出不改 innerHeight 也不触发 window resize：visualViewport 跟随
   // （移动形态下全屏窗口收缩到键盘上方，桌面形态回调直接返回）
   window.visualViewport?.addEventListener('resize', onVVChange)
@@ -113,8 +117,6 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   offs.forEach((off) => off())
   window.removeEventListener('resize', onResize)
-  window.removeEventListener('keydown', onShortcut)
-  window.removeEventListener('keyup', onShortcutKeyUp)
   window.visualViewport?.removeEventListener('resize', onVVChange)
   window.visualViewport?.removeEventListener('scroll', onVVChange)
   window.removeEventListener('popstate', onPopState)
@@ -181,7 +183,7 @@ function goHome() {
 watch(() => desktop.dockAutoHide, () => windows.onViewportResize())
 watch(() => windows.list.some((w) => w.maximized), () => windows.onViewportResize())
 
-// ---- 桌面拖放：启动台应用拖出 → 快捷方式；系统文件拖入 → 上传 + 快捷方式 ----
+// ---- 桌面拖放：启动台应用拖出 / 文件应用文件拖出 → 快捷方式；系统文件拖入 → 上传 + 快捷方式 ----
 const shortcutsRef = ref<InstanceType<typeof Shortcuts>>()
 const widgetsRef = ref<InstanceType<typeof Widgets>>()
 
@@ -202,7 +204,21 @@ function onDrop(e: DragEvent) {
     toast(`已创建「${apps.byId(appId)!.name}」快捷方式`)
     return
   }
-  // 3. 操作系统文件 → 上传到「桌面」目录并生成快捷方式
+  // 3. 文件应用拖出的 VFS 文件/目录 → 引用型快捷方式（不移动原文件）
+  //    明细（含是否目录）由 FilesApp 并行写入 x-openos-entries；无明细按文件处理
+  const rawEntries = dt.getData('application/x-openos-entries') || dt.getData('application/x-openos-paths')
+  if (rawEntries) {
+    try {
+      const items = (JSON.parse(rawEntries) as ({ p: string; d?: boolean } | string)[]).map((it) =>
+        typeof it === 'string' ? { p: it, d: false } : { p: it.p, d: !!it.d })
+      const made = items.filter((it) =>
+        shortcutsRef.value?.addAt('file', it.p, it.p.split('/').pop() || '文件', x, y, it.d))
+      if (made.length) toast(made.length === 1 ? `已创建「${made[0].p.split('/').pop()}」快捷方式` : `已在桌面创建 ${made.length} 个快捷方式`)
+      else toast('快捷方式已存在')
+    } catch { /* 忽略 */ }
+    return
+  }
+  // 4. 操作系统文件 → 上传到「桌面」目录并生成快捷方式
   const files = [...(dt.files || [])]
   if (files.length) {
     void (async () => {
@@ -238,54 +254,61 @@ function runCmd(p: any) {
   }
 }
 
-// ---- 键盘快捷键 ----
+// ---- 键盘快捷键（统一键盘中枢 ui/keys.ts 的 system 层） ----
 const launchpadOpen = ref(false)
 const spotOpen = ref(false)
 // 任何窗口被激活（点 Dock 图标 / 总线 sys:open 等）时收起启动台——macOS 行为；
 // 启动台打开期间 Dock 仍可交互（z 序高于启动台层，见 Dock.vue）
 watch(() => windows.activeId, () => { launchpadOpen.value = false })
-function onShortcut(e: KeyboardEvent) {
-  const inField = !!(e.target as HTMLElement)?.closest?.('input, textarea, [contenteditable="true"]')
-  if (e.key === 'Escape') {
-    launchpadOpen.value = false
-    spotOpen.value = false
-    switcherCancel()
-    return
+// 全屏覆盖层（启动台/聚焦搜索/切换器）开合声明给键盘中枢：挂起桌面选中层与
+// sys:key 总线发布，覆盖层期间按键属于覆盖层自身（搜索框等）
+watch([launchpadOpen, spotOpen, () => switcherState.open], ([a, b, c]) => setModal(a || b || c))
+function onSystemKey({ info, ev }: KeyCtx) {
+  if (!ev) return false
+  const inField = isTextFieldEvent(ev)
+  if (info.key === 'Escape') {
+    // Esc 级联：顶层优先，一层一关（切换器 > 聚焦搜索 > 启动台）；
+    // 无覆盖层时不消费，让应用自身的 Esc 语义（计算器 AC 等）照常生效
+    if (switcherState.open) { switcherCancel(); return true }
+    if (spotOpen.value) { spotOpen.value = false; return true }
+    if (launchpadOpen.value) { launchpadOpen.value = false; return true }
+    return false
   }
   // 聚焦搜索：⌘/Ctrl/Alt + Space（macOS 为 ⌘Space；浏览器内 Alt 最稳）。
   // 放在输入框判定之前——任何场景下都应可唤起。
-  if (e.code === 'Space' && (e.metaKey || e.ctrlKey || e.altKey)) {
-    spotOpen.value = !spotOpen.value
-    e.preventDefault()
-    return
+  if (info.code === 'Space' && (info.meta || info.ctrl || info.alt)) {
+    if (!info.repeat) spotOpen.value = !spotOpen.value
+    return true
   }
-  if (e.key === 'F4') { launchpadOpen.value = !launchpadOpen.value; e.preventDefault(); return } // 启动台
+  if (info.key === 'F4') { if (!info.repeat) launchpadOpen.value = !launchpadOpen.value; return true } // 启动台
   // 应用切换器：⌘/Alt + Tab（输入框内也生效——OS 级语义；打开后 Tab/方向键步进，
-  // 松开修饰键提交，见 onShortcutKeyUp 与 desktop/appSwitcher.ts）
-  if (e.key === 'Tab' && (e.altKey || e.metaKey)) {
-    e.preventDefault()
-    e.stopPropagation()
-    if (switcherState.open) switcherStep(e.shiftKey ? -1 : 1)
+  // 松开修饰键提交，见 onSystemKeyUp 与 desktop/appSwitcher.ts）
+  if (info.key === 'Tab' && (info.alt || info.meta)) {
+    if (switcherState.open) switcherStep(info.shift ? -1 : 1)
     else switcherOpen()
-    return
+    return true
   }
   if (switcherState.open) {
-    if (e.key === 'ArrowLeft') { switcherStep(-1); e.preventDefault(); return }
-    if (e.key === 'ArrowRight') { switcherStep(1); e.preventDefault(); return }
+    if (info.key === 'ArrowLeft') { switcherStep(-1); return true }
+    if (info.key === 'ArrowRight') { switcherStep(1); return true }
   }
-  if (!e.altKey || inField) return
+  if (!info.alt || inField) return false
   const w = windows.active
-  switch (e.key) {
-    case 'w': case 'W': if (w) { windows.close(w.id); e.preventDefault(); } break
-    case 'm': case 'M': if (w) { windows.minimize(w.id); e.preventDefault(); } break
-    case 'Enter': if (w) { windows.toggleMaximize(w.id); e.preventDefault(); } break
-    case '`': windows.cycle(); e.preventDefault(); break
+  switch (info.key) {
+    case 'w': case 'W': if (w) { windows.close(w.id); return true } break
+    case 'm': case 'M': if (w) { windows.minimize(w.id); return true } break
+    case 'Enter': if (w) { windows.toggleMaximize(w.id); return true } break
+    case '`': windows.cycle(); return true
   }
+  return false
 }
 
-// 切换器提交：松开修饰键（Alt/Meta）即切换到选中应用
-function onShortcutKeyUp(e: KeyboardEvent) {
-  if (switcherState.open && (e.key === 'Alt' || e.key === 'Meta')) switcherCommit()
+// keyup：切换器「松键提交」+ Win/⌘ 单击切换启动台（单击检测见 keys.ts 的 metaSolo）
+function onSystemKeyUp({ info }: KeyCtx) {
+  if (switcherState.open && (info.key === 'Alt' || info.key === 'Meta')) { switcherCommit(); return }
+  if (info.soloMeta && (info.key === 'Meta' || info.key === 'OS') && !switcherState.open) {
+    launchpadOpen.value = !launchpadOpen.value
+  }
 }
 
 // ---- 窗口状态持久化（同用户刷新后恢复） ----

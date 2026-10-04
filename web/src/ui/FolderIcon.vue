@@ -5,7 +5,7 @@ import { computed } from 'vue'
 import AppIcon from './AppIcon.vue'
 import { fileEmoji } from '../apps/openWith'
 
-const props = withDefaults(defineProps<{ entries: { kind: 'app' | 'file'; id: string }[]; size?: number }>(), { size: 48 })
+const props = withDefaults(defineProps<{ entries: { kind: 'app' | 'file'; id: string; dir?: boolean }[]; size?: number }>(), { size: 48 })
 
 const shown = computed(() => props.entries.slice(0, 4))
 const inner = computed(() => Math.round(props.size * 0.4))
@@ -15,7 +15,7 @@ const inner = computed(() => Math.round(props.size * 0.4))
   <span class="folder-icon" :style="{ width: size + 'px', height: size + 'px' }">
     <span class="grid">
       <template v-for="e in shown" :key="e.kind + ':' + e.id">
-        <span class="cell"><AppIcon v-if="e.kind === 'app'" :app="e.id" :size="inner" /><span v-else class="fi" :style="{ fontSize: Math.round(size * 0.3) + 'px' }">{{ fileEmoji(e.id) }}</span></span>
+        <span class="cell"><AppIcon v-if="e.kind === 'app'" :app="e.id" :size="inner" /><span v-else class="fi" :style="{ fontSize: Math.round(size * 0.3) + 'px' }">{{ fileEmoji(e.id, e.dir) }}</span></span>
       </template>
     </span>
   </span>

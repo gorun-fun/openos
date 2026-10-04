@@ -1,11 +1,53 @@
 <script setup lang="ts">
+import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { onKey, KEY_PRIORITY, type KeyCtx } from './keys'
+
 defineProps<{ title: string; okText?: string; cancelText?: string }>()
 const emit = defineEmits<{ ok: []; cancel: [] }>()
+
+const cardEl = ref<HTMLElement>()
+
+// 键盘：统一键盘中枢 dialog 层（与 DialogHost 同优先级，同优先级 LIFO——后挂载
+// 的模态视觉在上层、先获得按键）。Esc 取消；Tab 焦点圈锁在卡片内；Enter 不做
+// 默认确认（按钮可 Tab 到达，删除类确认避免回车误触）。窗口内模态仅在焦点位于
+// 本窗口时接管（后台窗口的确认弹窗不抢全局按键）。
+function onKeydown({ info }: KeyCtx) {
+  const card = cardEl.value
+  if (!card) return false
+  const own = card.closest('.window')
+  if (own && !own.contains(document.activeElement)) return false
+  if (info.key === 'Escape') { emit('cancel'); return true }
+  if (info.key === 'Tab') { trapTab(info.shift); return true }
+  return false
+}
+let offKeys: (() => void) | undefined
+onMounted(() => {
+  offKeys = onKey('capture', KEY_PRIORITY.dialog, onKeydown)
+  // 初始焦点落卡片本身：不抢进按钮/输入框，交由内容语义决定后续（modal 容器
+  // 可聚焦，键盘事件不再悬挂在弹窗外的旧焦点元素上）
+  cardEl.value?.focus({ preventScroll: true })
+})
+onBeforeUnmount(() => { offKeys?.(); offKeys = undefined })
+
+/** Tab 焦点圈：可聚焦元素首尾环绕 */
+function trapTab(backward: boolean) {
+  const card = cardEl.value
+  if (!card) return
+  const focusables = [...card.querySelectorAll<HTMLElement>(
+    'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex="-1"])',
+  )].filter((el) => el.getClientRects().length)
+  if (!focusables.length) return
+  const idx = focusables.indexOf(document.activeElement as HTMLElement)
+  const next = backward
+    ? focusables[idx <= 0 ? focusables.length - 1 : idx - 1]
+    : focusables[idx === focusables.length - 1 ? 0 : idx + 1]
+  next.focus({ preventScroll: true })
+}
 </script>
 
 <template>
   <div class="os-modal-mask" @pointerdown.self="emit('cancel')">
-    <div class="os-modal" role="dialog" aria-modal="true" :aria-label="title">
+    <div ref="cardEl" class="os-modal" role="dialog" aria-modal="true" :aria-label="title" tabindex="-1">
       <h3>{{ title }}</h3>
       <div class="content"><slot /></div>
       <footer>
@@ -31,6 +73,7 @@ const emit = defineEmits<{ ok: []; cancel: [] }>()
   padding: 20px 22px 16px;
   animation: modal-in .22s var(--os-ease-spring);
 }
+.os-modal:focus { outline: none; }
 @keyframes modal-in {
   from { opacity: 0; transform: scale(.92) translateY(8px); }
   to { opacity: 1; transform: scale(1) translateY(0); }

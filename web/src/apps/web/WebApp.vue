@@ -9,6 +9,7 @@ import type { WinState } from '../../stores/windows'
 import { useWindows } from '../../stores/windows'
 import { useApps } from '../../stores/apps'
 import { OsEmpty, icons } from '../../ui'
+import { handleExternalKey } from '../../ui/keys'
 import { WEB_APPS } from './registry'
 
 const props = defineProps<{ win: WinState }>()
@@ -67,6 +68,23 @@ function onDeskHandshake(e: MessageEvent) {
   } catch { /* 跨 realm eval 失败则放弃（页面可能已跳转） */ }
 }
 
+// ---- iframe 内全局快捷键转发（代理 hook.js / 桌面客户端注入脚本 → postMessage）----
+// iframe 聚焦后宿主 window 收不到其内部按键，F4 / ⌘·Ctrl+Space / Win·⌘ 单击等
+// 系统级组合由注入脚本识别后转发到父页；只接受来自本窗体 iframe 的消息
+// （e.source 须是某个 tab 的 contentWindow，防任意第三方页伪造），交统一键盘中枢
+// 走系统层分发。
+function onIframeKey(e: MessageEvent) {
+  const d: any = e.data
+  if (!d || d.type !== 'openos:key' || !d.key) return
+  if (!tabs.value.some((t) => winOf(t) === e.source)) return
+  handleExternalKey({
+    type: d.ev === 'up' ? 'up' : 'down',
+    key: d.key, code: d.code || '',
+    alt: !!d.alt, ctrl: !!d.ctrl, meta: !!d.meta, shift: !!d.shift,
+    soloMeta: !!d.soloMeta,
+  })
+}
+
 // ---- 标签页：单 tab 即原形态；代理模式下页面 window.open / target=_blank 由
 // hook.js 拦截，经窗体根元素上的 __openosPxHost 收进新 tab（不弹真浏览器窗口）----
 type Tab = { id: number; url: string; title: string; loaded: boolean; seq: number; name?: string }
@@ -92,11 +110,12 @@ function resetTabs() {
   armLoadFallback()
 }
 watch(src, resetTabs, { immediate: true })
-onBeforeUnmount(() => { clearTimeout(loadTimer); clearInterval(anchorTimer); window.removeEventListener('message', onDeskHandshake) })
+onBeforeUnmount(() => { clearTimeout(loadTimer); clearInterval(anchorTimer); window.removeEventListener('message', onDeskHandshake); window.removeEventListener('message', onIframeKey) })
 
 onMounted(() => {
   if (url.value) windows.setTitle(props.win.id, title.value)
   window.addEventListener('message', onDeskHandshake)
+  window.addEventListener('message', onIframeKey)
   anchorTimer = window.setInterval(checkAnchorNow, 1500)
   // 宿主标签页 API：挂在窗体根元素上（hook.js 经 frameElement.closest 认领，
   // 多个代理窗口互不干扰）。openTab 同步返回一个惰性转发到新 tab 真实
