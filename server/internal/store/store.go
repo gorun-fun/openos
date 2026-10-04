@@ -159,6 +159,19 @@ CREATE TABLE IF NOT EXISTS ai_config (
   model TEXT NOT NULL DEFAULT '',
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS ai_user_providers (
+  uid TEXT NOT NULL,
+  name TEXT NOT NULL,
+  base_url TEXT NOT NULL DEFAULT '',
+  api_key TEXT NOT NULL DEFAULT '',
+  models TEXT NOT NULL DEFAULT '[]',
+  is_default INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (uid, name)
+);
+CREATE TABLE IF NOT EXISTS ai_user_provider_names (
+  name TEXT PRIMARY KEY
+);
 CREATE TABLE IF NOT EXISTS chat_messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   username TEXT NOT NULL,
@@ -543,13 +556,13 @@ func (db *DB) ClearChatMsgs(username string) {
 
 // UserAuthInfo 供 JWT 校验的用户态。
 type UserAuthInfo struct {
-	Exists         bool
-	Role           string
-	PasswordHash   string
-	Salt           string
-	DisplayName    string
-	TokenVersion   int64
-	Disabled       bool
+	Exists       bool
+	Role         string
+	PasswordHash string
+	Salt         string
+	DisplayName  string
+	TokenVersion int64
+	Disabled     bool
 }
 
 // GetUserAuth 按用户名取认证信息。
@@ -797,7 +810,8 @@ func (db *DB) AttachmentByID(id string) (Attachment, bool) {
 }
 
 // PruneAttachmentsBefore 删除截止时间前的附件行，返回被删 id（文件删除由 attach 层完成）。
-func (db *DB) PruneAttachmentsBefore(cutoff time.Time) ([]string, error) {	rows, err := db.Query(`SELECT id FROM attachments WHERE created_at < ?`, cutoff.UTC().Format("2006-01-02 15:04:05"))
+func (db *DB) PruneAttachmentsBefore(cutoff time.Time) ([]string, error) {
+	rows, err := db.Query(`SELECT id FROM attachments WHERE created_at < ?`, cutoff.UTC().Format("2006-01-02 15:04:05"))
 	if err != nil {
 		return nil, err
 	}
@@ -821,7 +835,6 @@ func (db *DB) PruneAttachmentsBefore(cutoff time.Time) ([]string, error) {	rows,
 	return ids, nil
 }
 
-
 func (db *DB) pruneBefore(table string, cutoff time.Time) (int64, error) {
 	res, err := db.Exec(`DELETE FROM `+table+` WHERE created_at < ?`, cutoff.UTC().Format("2006-01-02 15:04:05"))
 	if err != nil {
@@ -832,13 +845,13 @@ func (db *DB) pruneBefore(table string, cutoff time.Time) (int64, error) {
 
 // SystemStats 系统信息。
 type SystemStats struct {
-	Version     string `json:"version"`
-	UserCount   int    `json:"userCount"`
-	AppCount    int    `json:"appCount"`
-	FileCount   int    `json:"fileCount"`
-	StorageUsed int64  `json:"storageUsed"`
-	QuotaPerUser int64 `json:"quotaPerUser"`
-	StartedAt   string `json:"startedAt"`
+	Version      string `json:"version"`
+	UserCount    int    `json:"userCount"`
+	AppCount     int    `json:"appCount"`
+	FileCount    int    `json:"fileCount"`
+	StorageUsed  int64  `json:"storageUsed"`
+	QuotaPerUser int64  `json:"quotaPerUser"`
+	StartedAt    string `json:"startedAt"`
 }
 
 // Stats 汇总系统统计。

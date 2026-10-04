@@ -42,6 +42,9 @@ type Service struct {
 	// AfterSave 保存配置后的联动钩子（main 注入：把配置同步为 goder 的
 	// 托管模型供应商；参数为解析后的最终值，任一为空 = 已清除配置）
 	AfterSave func(base, key, model string)
+	// AfterUserProvidersSave 宿主声明每用户供应商替换后的联动钩子（main 注入：
+	// 刷新声明名缓存并把声明条目重渲染进各 goder 用户的 settings.json）
+	AfterUserProvidersSave func()
 }
 
 // New 创建服务：优先读库中配置，其次回退环境变量。

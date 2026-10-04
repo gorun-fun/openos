@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"openos/server/internal/safeenv"
+	"openos/server/internal/store"
 )
 
 // Manager goder 集成管理器。
@@ -63,6 +64,11 @@ type Manager struct {
 	// 而非直连平台 Key——平台 Key 不再落任何 goder 用户家目录
 	aiProxyBase string
 	aiProxyKey  func(uid string) string
+	// providerDB / managedNames：宿主声明的每用户供应商（见 aisync.go）。
+	// managedNames 为名字全集常驻缓存（Replace 后经 RefreshManagedNames 失效）；
+	// nil = 未接库（仅平台托管条目）。
+	providerDB   *store.DB
+	managedNames []string
 }
 
 // New 创建管理器；二进制不存在时 available=false（前端显示引导）。
@@ -142,8 +148,8 @@ func (m *Manager) launch() {
 		"GODER_DATA="+filepath.Join(goderData, "serve-data"),
 		"GODER_STATIC_DIR="+static,
 		"GODER_IDENTITY=header",
-		"GODER_CORS=0",             // 同源反代，无需 CORS
-		"GODER_SETTINGS_SEED=1",    // 新用户种子宿主 ~/.grf 模型配置，开箱即用
+		"GODER_CORS=0",          // 同源反代，无需 CORS
+		"GODER_SETTINGS_SEED=1", // 新用户种子宿主 ~/.grf 模型配置，开箱即用
 		"GODER_BIN="+m.ghBin,
 		"GODER_ACCESS_LOG=0",
 	)
@@ -273,7 +279,8 @@ func (m *Manager) ProxyHandler(identity func(r *http.Request) (uid, name string,
 // markManagedProvider GET /goder-api/v1/agent/models（goder 设置页模型表的
 // 数据源）响应里，为平台托管供应商注入 managed:true —— goder 嵌入约定的
 // 只读展示语义（见 goder docs/embedding.md 与 agent-dto.ts ProviderDTO.managed），
-// 用户在 goder 设置页看到的 OpenOS 条目不可改，来源即「系统设置 → AI 服务」。
+// 用户在 goder 设置页看到的 OpenOS 条目与宿主声明条目均不可改（前者来源
+// 「系统设置 → AI 服务」，后者来源宿主业务系统如 token-hub 套餐）。
 // 用 map[string]json.RawMessage 改写，default/path/maxSteps 等其余键原样保真
 // （goder 前端 PUT 时整表回传，丢键会破坏用户配置）。
 func (m *Manager) markManagedProvider(resp *http.Response) error {
@@ -305,7 +312,7 @@ func (m *Manager) markManagedProvider(resp *http.Response) error {
 	for _, p := range provs {
 		var name string
 		_ = json.Unmarshal(p["name"], &name)
-		if name == AIProviderName {
+		if m.isManagedProviderName(name) {
 			p["managed"] = managed
 			touched = true
 		}
@@ -323,6 +330,19 @@ func (m *Manager) markManagedProvider(resp *http.Response) error {
 		return restoreBody(resp, body)
 	}
 	return restoreBody(resp, out)
+}
+
+// isManagedProviderName 供应商名是否为平台托管名或宿主声明名（只读展示语义）。
+func (m *Manager) isManagedProviderName(name string) bool {
+	if name == AIProviderName {
+		return true
+	}
+	for _, n := range m.managedNamesSnapshot() {
+		if n == name {
+			return true
+		}
+	}
+	return false
 }
 
 // restoreBody 把（可能改写过的）响应体放回并校准 Content-Length。

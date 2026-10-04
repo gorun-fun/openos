@@ -101,6 +101,7 @@ func main() {
 		selfPort = p
 	}
 	goderMgr.SetAIProxy("http://127.0.0.1:"+selfPort+"/api/ai/v1", authSvc.AIProxyKey)
+	goderMgr.SetProviderDB(db)
 	goderMgr.SetAIProviderSource(func() (goder.ProviderConfig, bool) {
 		base, key, model, ok := aiSvc.Provider()
 		return goder.ProviderConfig{BaseURL: base, APIKey: key, Model: model}, ok
@@ -110,8 +111,20 @@ func main() {
 			log.Printf("goder: AI 模型配置已同步 %d 个用户", n)
 		}
 	}
-	// 启动自愈：托管供应商可能在 goder 设置页被用户改动/删除，保用户自选的默认模型
-	if base, key, model, ok := aiSvc.Provider(); ok {
+	// 宿主声明的每用户供应商（如 token-hub 套餐派生的 per-user 网关接入）：
+	// 替换后刷新声明名缓存并全量重渲染（forceDefault=true：声明 default 的
+	// 用户立即切默认模型，宿主是声明的权威源）
+	aiSvc.AfterUserProvidersSave = func() {
+		goderMgr.RefreshManagedNames()
+		base, key, model, _ := aiSvc.Provider()
+		if n := goderMgr.SyncAIProvider(goder.ProviderConfig{BaseURL: base, APIKey: key, Model: model}, true); n > 0 {
+			log.Printf("goder: 宿主声明的每用户供应商已渲染 %d 个用户", n)
+		}
+	}
+	// 启动自愈：托管供应商与声明条目可能在 goder 设置页被用户改动/删除，
+	// 保用户自选的默认模型（平台未配置 AI 也执行——声明条目独立于平台配置）
+	{
+		base, key, model, _ := aiSvc.Provider()
 		if n := goderMgr.SyncAIProvider(goder.ProviderConfig{BaseURL: base, APIKey: key, Model: model}, false); n > 0 {
 			log.Printf("goder: 启动时补齐 %d 个用户的托管 AI 供应商", n)
 		}
@@ -136,7 +149,7 @@ func main() {
 	// 前端约定 {text≤500, attach?{id,name,mime,size}}，服务端再做防御性截断。
 	hub.Handle("chat:room", func(env bus.Envelope, _ func(string, any)) {
 		var p struct {
-			Text  string `json:"text"`
+			Text   string `json:"text"`
 			Attach *struct {
 				ID   string `json:"id"`
 				Name string `json:"name"`
@@ -936,12 +949,16 @@ func main() {
 	authed.HandleFunc("GET /api/ai/config", auth.RequireAdmin(http.HandlerFunc(aiSvc.GetConfig)).ServeHTTP)
 	authed.HandleFunc("PUT /api/ai/config", auth.RequireAdmin(http.HandlerFunc(aiSvc.SaveConfig)).ServeHTTP)
 	authed.HandleFunc("POST /api/ai/test", auth.RequireAdmin(http.HandlerFunc(aiSvc.Test)).ServeHTTP)
+	// 宿主声明的每用户供应商（admin；宿主服务身份经交换密钥 + admin 令牌调用）
+	authed.HandleFunc("GET /api/ai/user-providers", auth.RequireAdmin(http.HandlerFunc(aiSvc.GetUserProviders)).ServeHTTP)
+	authed.HandleFunc("PUT /api/ai/user-providers", auth.RequireAdmin(http.HandlerFunc(aiSvc.SaveUserProviders)).ServeHTTP)
 	// AI 服务状态（所有登录用户可读：设置页展示当前模型与 goder 启用状态，不含密钥）
 	authed.HandleFunc("GET /api/ai/status", func(w http.ResponseWriter, r *http.Request) {
 		_, _, model, _ := aiSvc.Provider()
 		writeJSON(w, map[string]any{
 			"configured": aiSvc.Configured(), "model": model, "demo": !aiSvc.Configured(),
-			"goder": goderMgr.Status(),
+			"goder":         goderMgr.Status(),
+			"userProviders": db.CountAIUserProviders(),
 		})
 	})
 
@@ -1197,7 +1214,7 @@ func scheduleRetention(db *store.DB, attachStore *attach.Store, fs *vfs.FS) {
 }
 
 // sanitizeFilenameASCII Content-Disposition 的 filename= 回退段只留 ASCII 安全字符
-//（中文与特殊字符走 filename*=UTF-8'' 段；双引号/分号等会破坏头结构）。
+// （中文与特殊字符走 filename*=UTF-8” 段；双引号/分号等会破坏头结构）。
 func sanitizeFilenameASCII(name string) string {
 	var b strings.Builder
 	for _, c := range name {
@@ -1274,7 +1291,7 @@ func writeJSON(w http.ResponseWriter, v any) {
 
 // usersHoldingPerm 全部持某权限点且启用中的用户（perm 收件人展开）：
 // admin 直通 + 角色权限矩阵（role_perms 精确/* 通配）+ 用户级权限快照
-//（users.perms JSON 数组，宿主接管模式）三路合并，与 Identity.Can 同语义。
+// （users.perms JSON 数组，宿主接管模式）三路合并，与 Identity.Can 同语义。
 func usersHoldingPerm(db *store.DB, perm string) []string {
 	rows, err := db.Query(`
 		SELECT DISTINCT u.username FROM users u
