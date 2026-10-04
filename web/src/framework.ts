@@ -6,6 +6,7 @@
 //   import { createOpenOS } from '@openos/framework'
 //   createOpenOS({
 //     apps: { dashboard: () => import('./apps/Dashboard.vue') },  // 编译期注册业务 App
+//     remoteApps: { market: 'https://…/market', hostVersion: __VER__ }, // App 独立发布货架（可选，见 remote.ts）
 //     icons: { dashboard: { svg: '<svg…>' } },                     // 业务图标（可选）
 //     login: { mode: 'sso', url: '/api/auth/sso/login' },         // 接宿主单点登录
 //     brand: { name: '业务系统', logo: '🏨' },
@@ -28,6 +29,7 @@ import App from './App.vue'
 import './sdk' // 注入 window.OpenOS 第三方应用 SDK（副作用）
 import './styles/base.css'
 import { builtinComponents, appChrome } from './stores/apps'
+import { loadApp, type RemoteAppsOptions } from './remote'
 import { registerIcons, type IconDef } from './desktop/icons'
 import { shell, type ShellBrand } from './shell'
 import { setToken } from './api/client'
@@ -40,6 +42,15 @@ import { registerDialog, type DialogDef } from './ui/dialogService'
 export interface CreateOpenOSOptions {
   /** 编译期注册的宿主应用组件（key = appId，值为懒加载 loader），与内置应用合并 */
   apps?: Record<string, () => Promise<any>>
+  /**
+   * App 独立发布货架（可选，协议见 remote.ts）：声明后 apps 里每个 App 的组件
+   * 优先从货架加载最新版本（不经宿主发版即可更新），任何失败自动回落 apps 本地
+   * loader——apps 始终是完整兜底，remoteApps 只影响「组件从哪来」。货架条目仅对
+   * apps 已注册的 appId 生效（应用的存在与授权仍由服务端 apps 表决定）。
+   * 配套构建工具 web/tooling/（deps 库集 / host external+importmap / app 单文件
+   * 产物 / catalog 生成），保证远程 App 与宿主共享同一份 Vue/pinia 单实例。
+   */
+  remoteApps?: RemoteAppsOptions
   /** 注册（或覆盖）应用图标，键为 appId；见 desktop/icons.ts 的 IconDef */
   icons?: Record<string, IconDef>
   /** 登录模式：sso = 登录页跳转宿主单点登录入口；passwordUrl = 统一身份改密自助页 */
@@ -109,8 +120,14 @@ export function createOpenOS(opts: CreateOpenOSOptions = {}): VueApp | null {
   // 后台应用通知：应用未打开时的消息提醒（聊天等，见 desktop/appNotifier.ts）
   installAppNotifiers()
 
-  // 1. 宿主应用组件与图标注册
-  Object.assign(builtinComponents, opts.apps || {})
+  // 1. 宿主应用组件与图标注册（remoteApps 存在时每个 loader 包一层货架优先逻辑，
+  //    失败/无条目/版本不兼容均回落本地 loader，见 remote.ts；无 remoteApps 行为不变）
+  const localApps = opts.apps || {}
+  for (const [id, loader] of Object.entries(localApps)) {
+    builtinComponents[id] = opts.remoteApps
+      ? () => loadApp(id, opts.remoteApps!, loader)
+      : loader
+  }
   if (opts.chrome) Object.assign(appChrome, opts.chrome)
   if (opts.dialogs) {
     for (const [id, def] of Object.entries(opts.dialogs)) registerDialog(id, def)

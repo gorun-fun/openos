@@ -238,6 +238,35 @@ notify({ title: '系统公告', body: '今晚 22:00 例行维护', broadcast: tr
 - **边界**：与内置/宿主锁定（builtin/locked）应用撞 id 的条目拒绝安装（`protected` 状态 + HTTP 403）；同 id 手工注册应用存在时标记 `conflict`，重装覆盖其配置。普通用户可浏览目录与打开已装应用，安装/更新仅管理员。
 - **裁剪**：`OPENOS_MARKET=off` 下架商店应用与 `/api/market/*` 路由（同 `OPENOS_VFS`/`OPENOS_GODER` 模式）。
 
+## App 独立发布（remoteApps + 货架）
+
+宿主业务 App 与宿主镜像解耦的发布通道：App 改动只构建单 App 产物传到货架，用户刷新页面即生效——不经宿主发版、不重启服务。与应用商店并存互补：商店是管理员安装第三方应用的语义（bundle 落盘/授权），本通道是宿主自有 App 的热发布语义（框架直连货架、apps 恒为兜底）。
+
+**运行时**：`createOpenOS({ apps, remoteApps: { market, hostVersion } })`——`market` 为货架根 URL（如 `https://…/hotel/market`），`hostVersion` 用于条目兼容比较。每个 App 优先按货架 catalog 加载远程产物；货架不可达/无条目/`minHostVersion` 不满足/import 失败均自动回落 `apps` 本地 loader（打进宿主 dist 的兜底 chunk）。货架协议（`web/src/remote.ts` 文件头有完整定义）：
+
+```jsonc
+{
+  "version": 1,
+  "updatedAt": "2026-10-04T…",
+  "apps": {
+    "rooms": {
+      "version": "1.2.0",
+      "entry": "files/rooms/1.2.0/rooms.js",   // 相对货架根，版本化路径可 immutable 缓存
+      "hash": "sha256:…",                        // 审计用
+      "minHostVersion": "v0.0.21"                // 低于此版本的宿主不用该条目
+    }
+  }
+}
+```
+
+**构建三件套**（`web/tooling/`，宿主经快照目录以相对路径 import 消费）：
+
+1. `defineDepsBuild({ outDir, webBase, extraEntries })`（deps.ts）——共享依赖库集：vue 完整版 / pinia / `openos-all`（@openos/framework、ui、stores/*、api/client、bus 等裸名全部映射同一产物 URL）+ 宿主私有模块（`extraEntries`，键 = importmap 裸名）。产出 `dist/assets/deps/*` 与 `deps-manifest.json`。
+2. `openosHost({ depsManifest })`（host.ts）——宿主构建插件：manifest 内裸名全部 external（保留裸名）+ index.html 注入 `<script type="importmap">` 与 deps CSS。**全站单实例的根基**：壳与远程 App 的 `import 'vue'`/`import '@openos/ui'` 解析到同一 URL。
+3. `defineAppBuild({ id, entry, outDir, depsManifest, define })`（app.ts）——单 App 单文件产物（external 全部裸名、CSS 内联进 JS、产物名 `<id>.js` 不带 hash，版本在货架路径上）；配套 `catalog.mjs` 合并货架 catalog（历史版本目录保留，回滚 = 改 entry 指回旧目录）。
+
+**部署前提**（货架静态服务）：`catalog.json` 开 CORS（`Access-Control-Allow-Origin: *`）+ 短缓存；`files/` 长缓存 immutable。宿主构建顺序：`build:deps` → `build:apps` → 宿主 `vite build`。
+
 ## 第三方接入指南
 
 ### 方式一：声明式应用（零前端代码，推荐）
