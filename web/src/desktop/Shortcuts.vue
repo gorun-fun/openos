@@ -40,6 +40,14 @@ const selected = ref('')
 /** 拖动悬停的合并目标（图标上高亮圆圈；dragover 持续续期，离开后短延时自灭）。 */
 const hoverKey = ref('')
 let hoverClr = 0
+/** 本组件发起的拖动源（顶层快捷方式或文件夹面板成员），落点预览克隆与互换判据用。 */
+interface DragPrev { kind: 'app' | 'file' | 'folder'; id: string; name: string; dir?: boolean; items?: FolderItem[]; col?: number; row?: number; fromFolder?: string }
+const dragPrev = ref<DragPrev | null>(null)
+/** 拖动中的源图标（keyOf 形态），图标本体压暗提示已离位。 */
+const draggingKey = ref('')
+/** 落点预览：松手后图标将吸附到的格子（虚拟对齐位置；dragover 持续续期，超时自灭）。 */
+const ghost = ref<{ c: number; r: number } | null>(null)
+let ghostClr = 0
 /** 打开内容面板（peek）的文件夹 id。 */
 const peekId = ref('')
 const peekNameRef = ref<HTMLInputElement>()
@@ -111,12 +119,21 @@ function addAt(kind: Shortcut['kind'], id: string, name: string, x: number, y: n
 }
 
 /** 供外部（桌面拖放 / 右键菜单）调用。 */
-defineExpose({ addAt, addAppShortcut, dropShortcut, openByKey, removeByKey, relayout, renameFolder })
+defineExpose({ addAt, addAppShortcut, dropShortcut, dragOver, endPreview, openByKey, removeByKey, relayout, renameFolder })
 
 function style(s: Shortcut) {
   const p = posOf({ c: s.col, r: s.row })
   return { left: p.x + 5 + 'px', top: p.y + 6 + 'px', width: GRID.cw - 10 + 'px' }
 }
+
+/** 落点预览定位：与图标同一套格子坐标；跨源拖入（拿不到源数据）固定一格高仅显示虚线框。 */
+const ghostStyle = computed(() => {
+  if (!ghost.value) return {}
+  const p = posOf(ghost.value)
+  const st: Record<string, string> = { left: p.x + 5 + 'px', top: p.y + 6 + 'px', width: GRID.cw - 10 + 'px' }
+  if (!dragPrev.value) st.height = GRID.ch - 12 + 'px'
+  return st
+})
 
 // ---- 打开 / 移除 ----
 function open(s: Shortcut) {
@@ -239,9 +256,53 @@ function navigate(dir: 'up' | 'down' | 'left' | 'right') {
 
 // ---- 拖拽 ----
 function dragStart(e: DragEvent, s: Shortcut) {
+  dragPrev.value = { ...s }
+  draggingKey.value = keyOf(s)
+  ghost.value = null
   e.dataTransfer?.setData('application/x-openos-shortcut', JSON.stringify(s))
   // 文件夹额外标记：图标层 dragover 据此不高亮（文件夹不可收进别的文件夹）
   if (s.kind === 'folder') e.dataTransfer?.setData('application/x-openos-folder', s.id)
+}
+
+/**
+ * 桌面层 dragover（Desktop.vue 转发）：计算并显示松手后的吸附格预览。
+ * 落点判据与 dropShortcut/addAt 严格一致——普通顶层项落格被其他快捷方式占用时互换
+ * （落该格），其余（空闲/被小组件占用/越界/文件夹/新拖入源）走 findFree（clamp +
+ * 螺旋顺延），保证预览即真实结果。悬停在图标上（合并/建夹语义）或文件夹面板内不显示。
+ */
+function dragOver(e: DragEvent) {
+  const t = e.dataTransfer?.types
+  if (!t || !(t.includes('application/x-openos-shortcut') || t.includes('application/x-openos-app')
+    || t.includes('application/x-openos-entries') || t.includes('application/x-openos-paths') || t.includes('Files'))) return
+  const tgt = e.target as HTMLElement | null
+  // 用 target 即时判断（hoverKey 有 160ms 自灭残留，会误抑制离开图标后的预览恢复）
+  if (tgt?.closest('.shortcut') || tgt?.closest('.peek-mask')) { ghost.value = null; return }
+  const cell = cellUnder(e.clientX, e.clientY)
+  const self = dragPrev.value
+  const selfKey = self && !self.fromFolder ? `s:${self.kind}:${self.id}` : undefined
+  const hit = self && self.kind !== 'folder' && !self.fromFolder
+    ? list.value.find((x) => keyOf(x) !== selfKey && x.col === cell.c && x.row === cell.r)
+    : null
+  const fin = hit ? cell : findFree(cell.c, cell.r, 1, 1, 'shortcut', selfKey)
+  // 预览格即源原位（拖回原地）：不显示
+  if (self && self.col !== undefined && fin.c === self.col && fin.r === self.row) { ghost.value = null; return }
+  ghost.value = fin
+  clearTimeout(ghostClr)
+  // 浏览器拖动静止时 dragover 约每 350ms 周期触发，超时须长于该间隔防预览闪烁
+  ghostClr = window.setTimeout(() => { ghost.value = null }, 600)
+}
+
+/** 拖放会话结束（drop 路径）清理落点预览。 */
+function endPreview() {
+  ghost.value = null
+  clearTimeout(ghostClr)
+}
+
+/** 源元素的 dragend（drop 完成或 Esc 取消都会触发）：清拖动源状态。 */
+function dragEnd() {
+  dragPrev.value = null
+  draggingKey.value = ''
+  endPreview()
 }
 
 /** 图标上的 dragover：普通源允许合并释放（preventDefault 后 drop 才会派发到此）；文件夹源放行冒泡给桌面层（走换位）。 */
@@ -303,6 +364,7 @@ function dropOnShortcut(e: DragEvent, target: Shortcut) {
   e.preventDefault()
   e.stopPropagation()
   hoverKey.value = ''
+  endPreview()
   const d = readDragItem(e)
   if (!d) return
   if (d.fromFolder === target.id) return // 已在该文件夹内
@@ -346,10 +408,13 @@ const peekItems = computed(() => (peekFolder.value?.items || []).filter((it) => 
 function peekDragStart(e: DragEvent, it: FolderItem) {
   const f = peekFolder.value
   if (!f) return
+  dragPrev.value = { ...it, fromFolder: f.id }
+  ghost.value = null
   e.dataTransfer?.setData('application/x-openos-shortcut', JSON.stringify({ ...it, col: 0, row: 0, fromFolder: f.id }))
 }
 
 async function dropShortcut(e: DragEvent) {
+  endPreview()
   const raw = e.dataTransfer?.getData('application/x-openos-shortcut')
   if (!raw) return
   try {
@@ -397,13 +462,14 @@ async function dropShortcut(e: DragEvent) {
   <div class="shortcuts" @pointerdown.self="selected = ''">
     <div
       v-for="s in list" :key="s.kind + ':' + s.id"
-      class="shortcut" :class="{ sel: selected === s.kind + ':' + s.id, 'drop-target': hoverKey === keyOf(s) }"
+      class="shortcut" :class="{ sel: selected === s.kind + ':' + s.id, 'drop-target': hoverKey === keyOf(s), dragging: draggingKey === keyOf(s) }"
       :data-id="s.kind + ':' + s.id"
       :style="style(s)"
       draggable="true"
       @pointerdown="selected = s.kind + ':' + s.id"
       @dblclick="open(s)"
       @dragstart="dragStart($event, s)"
+      @dragend="dragEnd"
       @dragover="onItemDragOver($event, s)"
       @drop="dropOnShortcut($event, s)"
       :title="s.kind === 'folder'
@@ -420,6 +486,16 @@ async function dropShortcut(e: DragEvent) {
       <span class="name">{{ s.name }}</span>
     </div>
 
+    <!-- 拖动落点预览：松手后图标将吸附的格子（本组件源显示半透明克隆，跨源拖入仅虚线框） -->
+    <div v-if="ghost" class="ghost" :class="{ 'has-src': !!dragPrev }" :style="ghostStyle" aria-hidden="true">
+      <template v-if="dragPrev">
+        <AppIcon v-if="dragPrev.kind === 'app'" :app="dragPrev.id" :size="48" />
+        <FolderIcon v-else-if="dragPrev.kind === 'folder'" :entries="dragPrev.items || []" :size="48" />
+        <span v-else class="file-icon">{{ fileEmoji(dragPrev.id, dragPrev.dir) }}</span>
+        <span class="name">{{ dragPrev.name }}</span>
+      </template>
+    </div>
+
     <!-- 文件夹内容面板：改名 / 点击打开 / 拖出成员移出（遮罩点击关闭） -->
     <div v-if="peekFolder" class="peek-mask" @pointerdown.self="peekId = ''" @contextmenu.prevent.stop>
       <div class="peek" role="dialog" aria-modal="true" :aria-label="peekFolder.name">
@@ -432,7 +508,7 @@ async function dropShortcut(e: DragEvent) {
           <button
             v-for="it in peekItems" :key="it.kind + ':' + it.id" class="peek-item"
             draggable="true" :title="`${it.name}（点击打开 · 拖出到桌面移出文件夹）`"
-            @click="openItem(it)" @dragstart="peekDragStart($event, it)"
+            @click="openItem(it)" @dragstart="peekDragStart($event, it)" @dragend="dragEnd"
           >
             <AppIcon v-if="it.kind === 'app'" :app="it.id" :size="56" />
             <span v-else class="file-icon">{{ fileEmoji(it.id, it.dir) }}</span>
@@ -455,6 +531,15 @@ async function dropShortcut(e: DragEvent) {
 }
 .shortcut:hover { background: rgba(255,255,255,.09); }
 .shortcut.sel { background: rgba(10,132,255,.3); border-color: rgba(10,132,255,.55); }
+/* 拖动中的源图标本体：压暗提示已离位（落点由 .ghost 预览指示） */
+.shortcut.dragging { opacity: .35; }
+/* 拖动落点预览（虚拟对齐位置）：虚线格框；有源数据时叠加半透明图标克隆 */
+.ghost {
+  position: absolute; display: flex; flex-direction: column; align-items: center; gap: 5px;
+  padding: 8px 4px; border-radius: 10px; pointer-events: none; z-index: 4;
+  border: 1.5px dashed rgba(255,255,255,.5); background: rgba(255,255,255,.07);
+}
+.ghost.has-src { opacity: .55; border-color: rgba(255,255,255,.32); }
 /* 合并目标高亮：macOS 式半透明圆圈罩住图标 */
 .shortcut.drop-target { z-index: 5; }
 .shortcut.drop-target::after {

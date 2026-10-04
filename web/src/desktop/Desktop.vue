@@ -187,8 +187,14 @@ watch(() => windows.list.some((w) => w.maximized), () => windows.onViewportResiz
 const shortcutsRef = ref<InstanceType<typeof Shortcuts>>()
 const widgetsRef = ref<InstanceType<typeof Widgets>>()
 
+/** 桌面层 dragover：转发给快捷方式层计算落点预览（虚拟对齐位置，与释放吸附结果一致）。 */
+function onDragOver(e: DragEvent) {
+  shortcutsRef.value?.dragOver(e)
+}
+
 function onDrop(e: DragEvent) {
   e.preventDefault()
+  shortcutsRef.value?.endPreview()
   const x = e.clientX, y = e.clientY
   const dt = e.dataTransfer
   if (!dt) return
@@ -421,7 +427,7 @@ function ctxCycleNoteColor() {
 </script>
 
 <template>
-  <div class="desktop" :style="{ background: desktop.wallpapers[desktop.wallpaper] }" @contextmenu="onContext" @dragover.prevent @drop="onDrop">
+  <div class="desktop" :style="{ background: desktop.wallpapers[desktop.wallpaper] }" @contextmenu="onContext" @dragover.prevent="onDragOver" @drop="onDrop">
     <!-- 形态分支用「单组件独立 v-if」：结构扁平、两形态共用组件（如通知中心）只挂一份。
          （曾用 <template v-if> 包多组件，跨断点切换时暴露出 Shortcuts 的 TDZ 崩溃
          会中断整个 Fragment patch 的连锁问题，见 Shortcuts.vue 的 stopSeed 注释） -->
