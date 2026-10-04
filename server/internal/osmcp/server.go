@@ -1,10 +1,11 @@
 // server.go — MCP JSON-RPC over HTTP：与 gh mcp 客户端严格兼容（单 POST 单
-// application/json 应答，通知回空体）。鉴权为 Bearer 令牌（安装期生成、随
-// wrapper 参数下发）；发起用户由 shim 经 X-OS-User 头携带（仅回环 + 令牌
-// 可信，与 goder-console 同级信任模型）。
+// application/json 应答，通知回空体）。鉴权为「Bearer 令牌 + X-OS-User 用户」
+// 成对校验（令牌按用户分发，安装期生成、随 wrapper 参数下发——安全审计
+// 2026-10 之前全体用户共享一枚令牌，任何拿到令牌的本地进程可冒充任意用户）。
 package osmcp
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -47,14 +48,21 @@ type ToolCall struct {
 // Server MCP 服务端：工具注册表 + JSON-RPC 分派。
 type Server struct {
 	deps   Deps
-	token  string
+	authz  func(gotToken, user string) bool // 令牌↔用户 绑定校验（Manager 注入）
 	bridge *bridge
 	tools  []*Tool
 	byName map[string]*Tool
 }
 
-func newServer(deps Deps, token string, b *bridge) *Server {
-	s := &Server{deps: deps, token: token, bridge: b, byName: map[string]*Tool{}}
+// tokenAuth 固定令牌校验器（单测用：忽略用户绑定语义）。
+func tokenAuth(token string) func(gotToken, user string) bool {
+	return func(got, _ string) bool {
+		return got != "" && subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
+	}
+}
+
+func newServer(deps Deps, authz func(gotToken, user string) bool, b *bridge) *Server {
+	s := &Server{deps: deps, authz: authz, bridge: b, byName: map[string]*Tool{}}
 	s.registerTools()
 	return s
 }
@@ -90,7 +98,9 @@ func (s *Server) serveMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !checkToken(got, s.token) {
+	user := strings.TrimSpace(r.Header.Get("X-OS-User"))
+	// 令牌与用户成对校验：没有用户身份（shim 必带）或令牌不属于该用户一律拒绝
+	if user == "" || !s.authz(got, user) {
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return

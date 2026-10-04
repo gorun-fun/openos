@@ -11,6 +11,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -263,6 +264,90 @@ func (s *Service) Test(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---- 上游调用 ----
+
+// ProxyChatCompletions POST /api/ai/v1/chat/completions —— OpenAI 兼容代理端点，
+// 供 goder 托管供应商（名为 AIProviderName）接入：平台 API Key 只存服务端，
+// 不再随 settings.json 下发到每个 goder 用户（安全审计 2026-10 之前明文 Key
+// 落所有用户家目录，人人可取）。鉴权在路由层（每用户 AI 代理密钥，auth.AIProxyKey）。
+//   - 模型恒以平台配置为准（忽略请求 model，防向供应商请求任意高价模型）；
+//   - 消息条数 ≤200、请求体 ≤4MB；
+//   - SSE 与 JSON 应答原样透传（gh 侧自带协议解析与历史管理，此处不落库）。
+func (s *Service) ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
+	if !s.Configured() {
+		http.Error(w, `{"error":{"message":"AI 服务未配置"}}`, http.StatusServiceUnavailable)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
+	if err != nil || len(body) == 0 {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		Model    string    `json:"model"`
+		Messages []Message `json:"messages"`
+		Stream   bool      `json:"stream"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil || len(req.Messages) == 0 {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if len(req.Messages) > 200 {
+		http.Error(w, "消息数超过上限（200）", http.StatusBadRequest)
+		return
+	}
+	s.mu.RLock()
+	url := s.baseURL + "/chat/completions"
+	key := s.apiKey
+	model := s.model
+	s.mu.RUnlock()
+
+	payload, _ := json.Marshal(map[string]any{"model": model, "messages": req.Messages, "stream": req.Stream})
+	up, err := http.NewRequestWithContext(r.Context(), "POST", url, bytes.NewReader(payload))
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	up.Header.Set("Content-Type", "application/json")
+	up.Header.Set("Authorization", "Bearer "+key)
+	if req.Stream {
+		up.Header.Set("Accept", "text/event-stream")
+	}
+	resp, err := (&http.Client{Timeout: 120 * time.Second}).Do(up)
+	if err != nil {
+		http.Error(w, "AI 服务不可达: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		var buf bytes.Buffer
+		buf.ReadFrom(io.LimitReader(resp.Body, 4<<20))
+		http.Error(w, fmt.Sprintf("AI 服务返回 %d: %s", resp.StatusCode, truncate(buf.String(), 300)), http.StatusBadGateway)
+		return
+	}
+	if req.Stream {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("X-Accel-Buffering", "no")
+	} else {
+		w.Header().Set("Content-Type", "application/json")
+	}
+	flusher, _ := w.(http.Flusher)
+	buf := make([]byte, 32*1024)
+	for {
+		n, rerr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if rerr != nil {
+			return
+		}
+	}
+}
 
 func (s *Service) call(msgs []Message) (int, string) {
 	s.mu.RLock()

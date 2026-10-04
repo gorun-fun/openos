@@ -9,7 +9,7 @@
 // 断线处理：先探测会话活性再重连——令牌被吊销（改密/禁用/删号/角色变更）时 REST
 // 401，立即走全局登出回登录页并带提示，不再静默退避重试；网络/服务闪断则照常
 // 指数退避重连（上限 20 次）。
-import { getToken, triggerUnauthorized } from '../api/client'
+import { getToken, triggerUnauthorized, fetchWsTicket } from '../api/client'
 
 type Handler = (payload: any, from: string, topic: string) => void
 
@@ -43,9 +43,14 @@ class Bus {
     this.open()
   }
 
-  private open() {
+  private async open() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-    const ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(getToken())}&user=${encodeURIComponent(this.me)}`)
+    // 鉴权优先 30s 一次性短票（长期 JWT 不入 URL）；取票失败回落 token（老服务端）
+    let auth = `token=${encodeURIComponent(getToken())}`
+    try {
+      auth = `ticket=${encodeURIComponent(await fetchWsTicket())}`
+    } catch { /* 兼容回落 */ }
+    const ws = new WebSocket(`${proto}://${location.host}/ws?${auth}&user=${encodeURIComponent(this.me)}`)
     this.ws = ws
     ws.onopen = () => {
       this.retry = 0

@@ -21,11 +21,16 @@ import (
 
 	"openos/server/internal/auth"
 	"openos/server/internal/bus"
+	"openos/server/internal/safeenv"
 	"openos/server/internal/store"
 )
 
 // 单文件上传上限。
 const maxFileSize = 8 << 20
+
+// maxFileRows 每用户文件行数上限：touch/mkdir 曾不做配额检查，可无限插行
+// 绕过 100MB 配额（SQLite 膨胀 DoS，安全审计 2026-10）。行数与配额双重设限。
+const maxFileRows = 20000
 
 // 按扩展名判定是否按文本存储（其余一律按二进制 base64）。
 var textExts = map[string]bool{
@@ -76,7 +81,11 @@ type FS struct {
 
 // New 创建服务。dataDir 用于真实终端的沙箱目录（<dataDir>/homes/<user>）。
 func New(dataDir string, db *store.DB, hub *bus.Hub, ai AIChat) *FS {
-	realShell := os.Getenv("OPENOS_REAL_SHELL") != "off" // 真实 shell 默认开启（受控执行）
+	// 真实 shell 默认关闭（安全审计 2026-10：sh -c 以服务进程权限执行任意命令，
+	// 曾默认开启且继承全部环境变量——秘密可被读取自我提权）。on=受限沙箱执行、
+	// full=解除目录限制；独立演示部署在 compose/run.sh 显式开 on。
+	v := os.Getenv("OPENOS_REAL_SHELL")
+	realShell := v == "on" || v == "full"
 	fs := &FS{
 		db: db, hub: hub, ai: ai,
 		cwd: map[string]string{}, realCwd: map[string]string{},
@@ -183,8 +192,11 @@ func clean(user, p string) (string, error) {
 	if p == "/" {
 		return "/", nil
 	}
-	if !strings.HasPrefix(p, homeOf(user)) {
-		return "", fmt.Errorf("权限不足：只能访问 %s 下的文件", homeOf(user))
+	home := homeOf(user)
+	// 前缀比较必须带 / 边界：user=adm 时 /home/admin/x 不允许通过
+	//（现有 SQL 均带 owner=? 过滤兜底，此处收紧防未来误用）
+	if p != home && !strings.HasPrefix(p, home+"/") {
+		return "", fmt.Errorf("权限不足：只能访问 %s 下的文件", home)
 	}
 	return p, nil
 }
@@ -377,6 +389,7 @@ func (f *FS) Upload(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		saved = append(saved, cp)
+		f.db.Audit(user, "fs.upload", cp, "")
 		f.hub.PublishTo(user, "fs:changed", map[string]any{"path": cp, "kind": "upload"})
 	}
 	writeJSON(w, map[string]any{"ok": "1", "saved": saved})
@@ -407,6 +420,7 @@ func (f *FS) Write(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
+	f.db.Audit(user, "fs.write", p, "")
 	f.hub.PublishTo(user, "fs:changed", map[string]any{"path": p, "kind": "write"})
 	writeJSON(w, ok())
 }
@@ -421,8 +435,13 @@ func (f *FS) Mkdir(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 403)
 		return
 	}
+	if !f.rowBudget(user) {
+		http.Error(w, "文件数量已达上限（2 万条），请清理后再试", 400)
+		return
+	}
 	f.ensureDirs(user, p+"/x")
 	f.db.Exec(`INSERT OR IGNORE INTO files(owner,path,is_dir) VALUES(?,?,1)`, user, p)
+	f.db.Audit(user, "fs.mkdir", p, "")
 	f.hub.PublishTo(user, "fs:changed", map[string]any{"path": p, "kind": "mkdir"})
 	writeJSON(w, ok())
 }
@@ -437,8 +456,20 @@ func (f *FS) Touch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 403)
 		return
 	}
+	if !f.rowBudget(user) {
+		http.Error(w, "文件数量已达上限（2 万条），请清理后再试", 400)
+		return
+	}
+	// INSERT OR IGNORE：已存在时不改内容，配额按净增量校验（扣除现内容长度）
+	var oldLen int64
+	f.db.QueryRow(`SELECT LENGTH(content) FROM files WHERE owner=? AND path=?`, user, p).Scan(&oldLen)
+	if f.quotaUsed(user)-oldLen+int64(len(req.Content)) > store.StorageQuota {
+		http.Error(w, "个人空间已满（配额 100MB）", 400)
+		return
+	}
 	f.ensureDirs(user, p)
 	f.db.Exec(`INSERT OR IGNORE INTO files(owner,path,is_dir,content) VALUES(?,?,0,?)`, user, p, req.Content)
+	f.db.Audit(user, "fs.touch", p, "")
 	f.hub.PublishTo(user, "fs:changed", map[string]any{"path": p, "kind": "create"})
 	writeJSON(w, ok())
 }
@@ -452,8 +483,19 @@ func (f *FS) Remove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.db.Exec(`DELETE FROM files WHERE owner=? AND (path=? OR path LIKE ?)`, user, p, p+"/%")
+	f.db.Audit(user, "fs.remove", p, "")
 	f.hub.PublishTo(user, "fs:changed", map[string]any{"path": p, "kind": "remove"})
 	writeJSON(w, ok())
+}
+
+// rowBudget 该用户文件行数是否还有余量（touch/mkdir 防行数炸弹，
+// 绕过字节数配额的旧漏洞——安全审计 2026-10）。
+func (f *FS) rowBudget(user string) bool {
+	var n int
+	if err := f.db.QueryRow(`SELECT COUNT(*) FROM files WHERE owner=?`, user).Scan(&n); err != nil {
+		return true // 统计失败不阻断正常路径
+	}
+	return n < maxFileRows
 }
 
 // Rename POST /api/fs/rename {from,to}
@@ -486,6 +528,7 @@ func (f *FS) Rename(w http.ResponseWriter, r *http.Request) {
 		np := to + strings.TrimPrefix(e.p, from)
 		f.db.Exec(`UPDATE files SET path=?, updated_at=datetime('now') WHERE owner=? AND path=?`, np, user, e.p)
 	}
+	f.db.Audit(user, "fs.rename", from+" → "+to, "")
 	f.hub.PublishTo(user, "fs:changed", map[string]any{"path": to, "kind": "rename"})
 	writeJSON(w, ok())
 }
@@ -694,7 +737,7 @@ func (f *FS) ensureRealHome(user string) string {
 
 func (f *FS) execReal(user, line string, reply func(string, any)) {
 	if !f.realShell {
-		reply("term:"+user+":real:out", map[string]any{"cwd": "", "text": "真实终端已被管理员关闭（OPENOS_REAL_SHELL=off）"})
+		reply("term:"+user+":real:out", map[string]any{"cwd": "", "text": "真实终端未启用（OPENOS_REAL_SHELL=on 受限沙箱 / =full 解除目录限制）"})
 		return
 	}
 	home := f.ensureRealHome(user)
@@ -756,13 +799,20 @@ func (f *FS) execReal(user, line string, reply func(string, any)) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	// 敏感操作留痕：命令原文（截断）入审计，无论退出码
+	d := line
+	if len(d) > 300 {
+		d = d[:300] + "…"
+	}
+	f.db.Audit(user, "term.real", d, "")
 	cmd := exec.CommandContext(ctx, "sh", "-c", line)
 	cmd.Dir = cwd
 	// 输出合并 + 截断
 	var buf limitedBuf
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
-	cmd.Env = append(os.Environ(), "HOME="+home, "TERM=xterm-256color")
+	// 环境白名单化：绝不继承服务进程秘密（OPENOS_* 密钥等），full 模式同样清洗
+	cmd.Env = safeenv.Env("HOME="+home, "TERM=xterm-256color")
 	err := cmd.Run()
 	out := buf.String()
 	if ctx.Err() == context.DeadlineExceeded {

@@ -3,6 +3,7 @@ package webproxy
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -323,19 +324,20 @@ func TestKeepCookies(t *testing.T) {
 	}
 }
 
-func TestGuardAddr(t *testing.T) {
-	if _, ok := guardAddr("127.0.0.1", "127.0.0.1:8080"); !ok {
+func TestResolveGuarded(t *testing.T) {
+	ctx := context.Background()
+	if ips, err := resolveGuarded(ctx, "127.0.0.1", "127.0.0.1"); err != nil || len(ips) == 0 {
 		t.Error("配置目标主机应放行（可为内网）")
 	}
-	if _, ok := guardAddr("", "8.8.8.8:443"); !ok {
+	if _, err := resolveGuarded(ctx, "8.8.8.8", ""); err != nil {
 		t.Error("公网 IP 应放行")
 	}
-	for _, addr := range []string{"127.0.0.1:80", "10.1.2.3:80", "192.168.1.1:80", "169.254.1.1:80", "[::1]:80", "0.0.0.0:80"} {
-		if _, ok := guardAddr("", addr); ok {
-			t.Errorf("非配置内网地址应拒绝：%s", addr)
+	for _, host := range []string{"127.0.0.1", "10.1.2.3", "192.168.1.1", "169.254.1.1", "::1", "0.0.0.0"} {
+		if _, err := resolveGuarded(ctx, host, ""); err == nil {
+			t.Errorf("非配置内网地址应拒绝：%s", host)
 		}
 	}
-	if _, ok := guardAddr("127.0.0.1", "localhost:8080"); ok {
+	if _, err := resolveGuarded(ctx, "localhost", "127.0.0.1"); err == nil {
 		t.Error("localhost 不等于配置主机名，解析到回环应拒绝")
 	}
 }

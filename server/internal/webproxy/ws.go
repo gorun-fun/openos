@@ -18,13 +18,9 @@ func (p *Proxy) serveWS(w http.ResponseWriter, r *http.Request, tu *url.URL, cfg
 	dialURL := &url.URL{Scheme: tu.Scheme, Host: tu.Host, Path: tu.Path, RawPath: tu.RawPath, RawQuery: tu.RawQuery}
 	dialer := &websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
-		// SSRF 防线与 HTTP 转发同一条（checkDial），配置目标主机放行
+		// SSRF 防线与 HTTP 转发同一条（guardedDial：解析一次按 IP 直连），配置目标主机放行
 		NetDialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			if err := checkDial(cfgHost, addr); err != nil {
-				return nil, err
-			}
-			var d net.Dialer
-			return d.DialContext(ctx, network, addr)
+			return guardedDial(ctx, network, addr, cfgHost)
 		},
 	}
 	// 握手同样带上管理员配置的自定义请求头（内网 WS 网关常按头鉴权）

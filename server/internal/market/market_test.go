@@ -409,6 +409,14 @@ func TestBundleInstallLifecycle(t *testing.T) {
 
  SetBundleDir(filepath.Join(t.TempDir(), "bundles"))
 
+ // bundle 下载走拨号防线（marketGet）：把测试服务主机登记为配置源，否则回环
+ // 地址会被 SSRF 防线拒绝（生产自定义源已强制 https，回环例外仅限本地）
+ mu.Lock()
+ prevSrcs := customSrcs
+ customSrcs = append([]string{srv.URL}, customSrcs...)
+ mu.Unlock()
+ t.Cleanup(func() { mu.Lock(); customSrcs = prevSrcs; mu.Unlock() })
+
 	entry := Entry{ID: "demo-bundle", Name: "演示组件", Type: "bundle", Version: "1.0.0",
 		Config: []byte(fmt.Sprintf(`{"kind":"bundle","url":%q}`, srv.URL+"/demo.js"))}
 	broken := Entry{ID: "broken-bundle", Name: "坏源组件", Type: "bundle", Version: "1.0.0",

@@ -21,4 +21,7 @@ services:
       OPENOS_AI_MODEL: "glm-4-flash"
       # 生产建议设置固定密钥签发 JWT（否则首次启动自动生成并持久化在 SQLite）
       OPENOS_JWT_SECRET: ""
+      # 演示部署显式开启真实终端（默认 off——安全审计 2026-10 起受限执行+环境清洗；
+      # 生产/宿主形态勿开：sh -c 仍以容器内进程权限执行）
+      OPENOS_REAL_SHELL: "on"
     restart: unless-stopped

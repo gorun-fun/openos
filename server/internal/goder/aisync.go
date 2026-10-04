@@ -145,6 +145,31 @@ func (m *Manager) AISource() (ProviderConfig, bool) {
 	return src()
 }
 
+// SetAIProxy 注入 AI 代理端点与每用户代理密钥构造器（main 在启动时调用）。
+// 非空时托管供应商条目写「base=代理地址、api_key=该用户代理密钥」——
+// 平台 API Key 只留服务端（安全审计 2026-10：此前明文 Key 写进每个 goder
+// 用户的 settings.json，用户家目录人人可读自己的 Key）。
+func (m *Manager) SetAIProxy(base string, keyFor func(uid string) string) {
+	m.mu.Lock()
+	m.aiProxyBase, m.aiProxyKey = base, keyFor
+	m.mu.Unlock()
+}
+
+// managedProvider 把平台配置转换为写进 settings.json 的托管条目：
+// 代理注入时指向 /api/ai/v1/* 并换每用户密钥；未注入（兼容形态）保持直连。
+// 密钥派生统一用清洗后的 uid（SyncAIProvider 只能拿到目录名，两路派生必须一致，
+// 否则每次全量同步都会改写 settings.json 触发指纹抖动）。
+func (m *Manager) managedProvider(cfg ProviderConfig, uid string) ProviderConfig {
+	m.mu.Lock()
+	base, kf := m.aiProxyBase, m.aiProxyKey
+	m.mu.Unlock()
+	if base == "" || kf == nil {
+		return cfg
+	}
+	san := uidSan.ReplaceAllString(uid, "_")
+	return ProviderConfig{BaseURL: base, APIKey: kf(san), Model: cfg.Model}
+}
+
 // SyncAIProvider 把托管供应商同步到所有已存在的 goder 用户（管理员保存
 // 配置后与启动时调用）。forceDefault 语义见 upsertAIProvider。返回写盘用户数。
 func (m *Manager) SyncAIProvider(cfg ProviderConfig, forceDefault bool) int {
@@ -166,7 +191,7 @@ func (m *Manager) SyncAIProvider(cfg ProviderConfig, forceDefault bool) int {
 			continue
 		}
 		sp := filepath.Join(grfHome, "settings.json")
-		wrote, err := upsertAIProvider(sp, cfg, forceDefault)
+		wrote, err := upsertAIProvider(sp, m.managedProvider(cfg, e.Name()), forceDefault)
 		if err != nil {
 			log.Printf("goder: 同步 AI 供应商失败(%s): %v", e.Name(), err)
 			continue
@@ -198,7 +223,7 @@ func (m *Manager) EnsureAIUser(uid string) {
 	if seen && mark == (aiMark{mt, sz}) {
 		return // 文件未变化
 	}
-	if _, err := upsertAIProvider(sp, cfg, false); err != nil {
+	if _, err := upsertAIProvider(sp, m.managedProvider(cfg, uid), false); err != nil {
 		log.Printf("goder: 确保 AI 供应商失败(%s): %v", uid, err)
 		return
 	}

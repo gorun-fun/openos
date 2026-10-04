@@ -3,6 +3,7 @@
 package webproxy
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/url"
@@ -12,37 +13,58 @@ import (
 // cfgHostCtx 携带管理员配置的目标主机名到拨号层（SSRF 防线按主机名放行配置目标）。
 type cfgHostCtx struct{}
 
-// checkDial 拨号前校验：非配置目标且解析落内网 → 拒绝。HTTP 与 WS 两条转发链共用。
-func checkDial(cfgHost, addr string) error {
-	if host, ok := guardAddr(cfgHost, addr); !ok {
-		return fmt.Errorf("webproxy: 拒绝拨号内网地址 %s（非管理员配置目标）", host)
+// guardedDial 统一拨号函数（HTTP 与 WS 两条转发链共用）：域名单次解析、逐 IP
+// 校验后按 IP 直连——杜绝「校验用第一条解析、实际拨号二次解析被 DNS rebinding
+// 落到内网」的 TOCTOU 窗口（安全审计 2026-10）。管理员配置的目标主机放行
+//（可为内网，显式选择），但同样按解析出的 IP 直连。
+func guardedDial(ctx context.Context, network, addr, cfgHost string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("webproxy: 非法拨号地址 %q", addr)
 	}
-	return nil
+	ips, err := resolveGuarded(ctx, host, cfgHost)
+	if err != nil {
+		return nil, err
+	}
+	var d net.Dialer
+	var lastErr error
+	for _, ip := range ips {
+		conn, err := d.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
 }
 
-// guardAddr 校验拨号地址：管理员配置的目标主机直接放行（可为内网，这是显式选择）；
-// 其余主机解析后逐 IP 检查，回环/内网/链路本地/组播/未指定地址一律拒绝。
-func guardAddr(cfgHost, addr string) (string, bool) {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		host = addr
-	}
-	if cfgHost != "" && strings.EqualFold(host, cfgHost) {
-		return host, true
-	}
+// resolveGuarded 解析并校验拨号主机（guardedDial 的校验半部，单测直测）：
+// 返回可拨 IP 列表。IP 直写则直接判定；域名经 DefaultResolver 单次解析。
+// 配置目标主机放行（可为内网——管理员显式选择）；其余主机的解析结果只要
+// 含内网/回环/链路本地地址一律拒绝。
+func resolveGuarded(ctx context.Context, host, cfgHost string) ([]net.IP, error) {
 	if ip := net.ParseIP(host); ip != nil {
-		return host, isPublicIP(ip)
+		if !isPublicIP(ip) && (cfgHost == "" || !strings.EqualFold(host, cfgHost)) {
+			return nil, fmt.Errorf("webproxy: 拒绝拨号内网地址 %s（非管理员配置目标）", host)
+		}
+		return []net.IP{ip}, nil
 	}
-	ips, err := net.LookupIP(host)
-	if err != nil {
-		return host, false
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil || len(ips) == 0 {
+		return nil, fmt.Errorf("webproxy: 域名解析失败 %s: %v", host, err)
 	}
-	for _, ip := range ips {
-		if !isPublicIP(ip) {
-			return host, false
+	if cfgHost == "" || !strings.EqualFold(host, cfgHost) {
+		for _, ip := range ips {
+			if !isPublicIP(ip.IP) {
+				return nil, fmt.Errorf("webproxy: 拒绝拨号 %s（解析含内网地址，非管理员配置目标）", host)
+			}
 		}
 	}
-	return host, true
+	out := make([]net.IP, 0, len(ips))
+	for _, ip := range ips {
+		out = append(out, ip.IP)
+	}
+	return out, nil
 }
 
 func isPublicIP(ip net.IP) bool {

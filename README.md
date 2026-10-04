@@ -320,6 +320,8 @@ notify({ title: '系统公告', body: '今晚 22:00 例行维护', broadcast: tr
 
 **部署前提**（货架静态服务）：`catalog.json` 开 CORS（`Access-Control-Allow-Origin: *`）+ 短缓存；`files/` 长缓存 immutable。宿主构建顺序：`build:deps` → `build:apps` → 宿主 `vite build`。
 
+**CSS 管线硬约束**：tooling 三段配置（deps/host/app）已统一强制 `css.transformer='postcss'` + `cssMinify:'esbuild'`——vite 8 起默认 Lightning CSS 会把 `backdrop-filter` + `-webkit-backdrop-filter` 成对声明按前缀回退折叠成仅剩 `-webkit-` 形态，而 Chromium 不认该别名（Safari 认），结果是全系统毛玻璃（启动台/dock/菜单/通知中心）退化为纯透明。宿主工程需有 `esbuild` devDep（rolldown-vite 不自带）；宿主自身 `vite.config.ts` 也应声明同款配置（dev 模式不经过 tooling 插件）。
+
 ## 第三方接入指南
 
 ### 方式一：声明式应用（零前端代码，推荐）
@@ -833,25 +835,47 @@ git tag v0.0.1 && git push origin v0.0.1   # 推送 tag 即触发发布
 
 ## 安全说明
 
-- 密码 pbkdf2-SHA256（20000 轮 + 随机盐；升级前的存量 hash 自动透明升级）
+- 密码 pbkdf2-SHA256（**600000 轮** + 随机盐，2026-10 安全审计自 20000 上调；
+  20000/4096 轮的存量 hash 登录时自动透明升级）
 - JWT HS256，24 小时有效，携带 token_version：**改角色/改密码/删用户/禁用后旧令牌立即失效**
   （REST 每请求实时核对；WebSocket 升级时同套校验，已建立的总线连接经 30s 周期复核踢下线，
   客户端以续期后的令牌自动重连，吊销令牌重连被拒；新建用户 token_version 以当前时间初始化，
   杜绝「删号重建后旧令牌复活」）
+- **query 鉴权走一次性短票**（2026-10 安全审计）：`POST /api/auth/ws-ticket` 签发
+  30s 用后即焚的短票，`/ws`、附件下载、商店 bundle 取件等无法携带 header 的场景
+  用 `?ticket=` 替代长期 JWT 入 URL（`?token=` 兼容期内仍可用）；会话 Cookie 统一
+  HttpOnly + SameSite=Strict，HTTPS 直连或反代声明 https 时自动加 `Secure`
+- **总线 ACL**（2026-10 安全审计）：订阅白名单＝公共主题（`sys:*` `fs:changed`
+  `app:*` `chat:*` `notes:*`）+ 自有主题（`term:<自己>`）；发布白名单＝公开业务前缀
+  （`app:` `chat:` `notes:`）+ 精确 `sys:open`/`sys:notify`/`sys:key`/`fs:changed`/
+  `agent:resp` + 自有终端主题；`agent:*`/他人 `term:*` 不可旁路收听，其余 `sys:*`
+  广播收归服务端（防仿冒系统通知/在线状态）
 - 前端令牌滑动续期：每 12 小时及页面回到前台时静默调 `/api/auth/refresh` 换新令牌
 - 用户禁用（`disabled`）：登录 403、在线会话踢下线；最后一名启用中的管理员不可禁用/降级/删除
-- exchange 令牌交换：密钥恒定时间比较；可选角色白名单（`OPENOS_EXCHANGE_ROLES`）；
+- exchange 令牌交换：密钥恒定时间比较；可选角色白名单（`OPENOS_EXCHANGE_ROLES`，
+  **强烈建议配置**——密钥配置而白名单为空时启动日志会告警）；
   已禁用用户拒绝交换；显示名变更留审计
 - 审计日志 / AI 对话历史按保留期自动清理（默认 90 天，可配置），防止无限膨胀
-- 应用代理（`webproxy`）：SSRF 防线在拨号层（配置目标主机放行、其余主机拒绝内网地址）、
+- 应用代理（`webproxy`）：SSRF 防线在拨号层（域名单次解析校验后按 IP 直连，堵
+  DNS rebinding TOCTOU；配置目标主机放行、其余主机拒绝内网地址）、
   转发前剥 OpenOS 会话 Cookie/Authorization、目标站 Cookie 收归 `/app/<id>/` 代理路径、
   访问权逐请求按角色授权矩阵校验——详见「第三方接入指南 · 应用代理」的安全边界一节
 - jwt_secret 等系统级键存于独立的 `system_kv` 表，与用户界面设置（user_settings）分离
 - 登录防爆破：每 用户名+IP 10 分钟 8 次失败锁定 15 分钟；全局限流 600 次/分钟/IP
-- 虚拟文件系统严格限制在 `/home/<用户>` 内，单文件 ≤8MB，单用户配额 100MB，用户间完全隔离
-- 终端默认**虚拟 shell**；真实模式为受控执行（沙箱目录 + 超时 + 截断），可用 `OPENOS_REAL_SHELL=off` 整体关闭
-- 审计日志记录登录/用户/授权/AI 配置等敏感操作（系统设置 → 系统信息可查）
-- AI 密钥仅存服务端，接口返回始终脱敏
+  （覆盖 `/api`、`/ws`、`/goder-api`、`/app/*`）
+- 虚拟文件系统严格限制在 `/home/<用户>` 内，单文件 ≤8MB，单用户配额 100MB（字节配额
+  之外另有 2 万行文件数上限，堵 touch/mkdir 行数炸弹），用户间完全隔离；文件写删/重命名/
+  上传/分享全部入审计
+- 终端默认**虚拟 shell**；真实模式为受控执行（沙箱目录 + 超时 + 截断 + 命令入审计），
+  **默认关闭**（`OPENOS_REAL_SHELL=on` 开启受限沙箱、`=full` 解除目录限制；独立演示
+  部署的 compose/run.sh 已显式开启）；真实终端与 goder 子进程环境一律白名单化
+  （`safeenv` 包），绝不继承 `OPENOS_*` 秘密
+- goder-serve 仅允许绑定回环地址（`OPENOS_GODER_ADDR` 非回环拒绝启动）；
+  osmcp 桌面控制插件的 MCP 令牌**按用户分发**（令牌↔用户成对校验）
+- 审计日志记录登录/用户/授权/AI 配置/文件操作/真实终端/设置写入等敏感操作（系统设置 → 系统信息可查）
+- AI 密钥仅存服务端，接口返回始终脱敏；goder 托管供应商指向 OpenOS 自身的 OpenAI
+  兼容代理端点（`POST /api/ai/v1/chat/completions`，每用户代理密钥鉴权、模型恒以平台
+  配置为准），**平台 Key 不再写入任何 goder 用户的 settings.json**
 
 ## 开发提示
 

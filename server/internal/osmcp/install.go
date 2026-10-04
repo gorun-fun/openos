@@ -196,7 +196,7 @@ func (m *Manager) installUser(uid string) {
 		return
 	}
 	grfHome := goder.GrfHomePath(m.deps.DataDir, uid)
-	if err := installPlugin(m.exe, grfHome, m.Endpoint(), m.cfg.Token, uid); err != nil {
+	if err := installPlugin(m.exe, grfHome, m.Endpoint(), m.userToken(uid), uid); err != nil {
 		log.Printf("osmcp: 安装插件失败(%s): %v", uid, err)
 		return
 	}

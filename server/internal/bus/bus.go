@@ -44,6 +44,8 @@ type Client struct {
 	token string // 原始 JWT：供周期复核（吊销 / 过期检测）
 	subs  map[string]struct{}
 	mu    sync.Mutex
+	// aclWarned：ACL 拒绝只告警一次（恶意客户端高频试探不刷爆日志）
+	aclWarned bool
 }
 
 // Hub 事件总线中心。
@@ -257,6 +259,10 @@ func (c *Client) readPump() {
 		case "sub":
 			c.mu.Lock()
 			for _, t := range env.Topics {
+				if !subAllowed(c.User, t) {
+					c.aclDeny("sub", t)
+					continue
+				}
 				c.subs[t] = struct{}{}
 			}
 			c.mu.Unlock()
@@ -267,6 +273,10 @@ func (c *Client) readPump() {
 			}
 			c.mu.Unlock()
 		case "pub":
+			if !pubAllowed(c.User, env.Topic) {
+				c.aclDeny("pub", env.Topic)
+				continue
+			}
 			env.From = c.User
 			env.TS = time.Now().Unix()
 			if env.Payload == nil {
@@ -275,6 +285,18 @@ func (c *Client) readPump() {
 			c.hub.dispatch(c, env)
 			c.hub.runHandlers(env, c)
 		}
+	}
+}
+
+// aclDeny 总线 ACL 拒绝告警（每连接仅首次打印，防日志刷屏）。
+// 调用方持有 c.mu 时须已解锁（本方法内部自取锁）。
+func (c *Client) aclDeny(action, topic string) {
+	c.mu.Lock()
+	first := !c.aclWarned
+	c.aclWarned = true
+	c.mu.Unlock()
+	if first {
+		log.Printf("bus: ACL 拒绝 user=%s %s %s（后续拒绝不再重复记录）", c.User, action, topic)
 	}
 }
 

@@ -269,6 +269,8 @@ start_server() {
   # OPENOS_DIST 缺省时以绝对路径注入（尊重外部已设置的值）
   (
     cd "${SERVER_DIR}"
+    # 本地开发/演示形态显式开启真实终端（默认 off——安全审计 2026-10 起）
+    OPENOS_REAL_SHELL="${OPENOS_REAL_SHELL:-on}" \
     OPENOS_DIST="${OPENOS_DIST:-${ROOT}/web/dist}" nohup "${BIN}" >> "${LOG_FILE}" 2>&1 &
     echo $! > "${PID_FILE}"
   )

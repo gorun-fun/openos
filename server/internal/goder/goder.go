@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -30,6 +31,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"openos/server/internal/safeenv"
 )
 
 // Manager goder 集成管理器。
@@ -56,6 +59,10 @@ type Manager struct {
 	aiMu          sync.Mutex
 	aiMarks       map[string]aiMark
 	aiSyncedUsers int
+	// AI 代理（安全审计 2026-10）：非空时托管供应商写「代理地址 + 每用户代理密钥」
+	// 而非直连平台 Key——平台 Key 不再落任何 goder 用户家目录
+	aiProxyBase string
+	aiProxyKey  func(uid string) string
 }
 
 // New 创建管理器；二进制不存在时 available=false（前端显示引导）。
@@ -71,6 +78,20 @@ func New(dataDir string) *Manager {
 	}
 	if m.disabled {
 		m.lastErr = "goder 已通过 OPENOS_GODER=off 停用"
+		return m
+	}
+	// goder-serve 是无鉴权的 header 身份服务，绝不允许绑定回环之外
+	//（安全审计 2026-10：非回环即任意客户端可冒充任意用户）。
+	if host, _, err := net.SplitHostPort(m.addr); err == nil {
+		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+			log.Printf("goder: 拒绝启动：OPENOS_GODER_ADDR=%s 非回环地址（goder-serve 无自身鉴权，仅允许 127.0.0.1/::1）", m.addr)
+			m.disabled = true
+			m.lastErr = "OPENOS_GODER_ADDR 必须是回环地址"
+		}
+	} else {
+		log.Printf("goder: 拒绝启动：OPENOS_GODER_ADDR=%s 无法解析（期望 host:port 回环地址）", m.addr)
+		m.disabled = true
+		m.lastErr = "OPENOS_GODER_ADDR 格式非法"
 	}
 	return m
 }
@@ -114,7 +135,9 @@ func (m *Manager) launch() {
 	os.MkdirAll(static, 0o755)
 
 	cmd := exec.Command(m.binPath)
-	cmd.Env = append(os.Environ(),
+	// 环境白名单化：goder-serve 及其拉起的 gh 子进程不继承服务进程秘密
+	//（OPENOS_* 密钥等，安全审计 2026-10），所需变量逐个显式注入。
+	cmd.Env = safeenv.Env(
 		"ADDR="+m.addr,
 		"GODER_DATA="+filepath.Join(goderData, "serve-data"),
 		"GODER_STATIC_DIR="+static,

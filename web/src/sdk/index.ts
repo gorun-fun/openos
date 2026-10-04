@@ -24,7 +24,7 @@ import { runtimeComponents, appChrome } from '../stores/apps'
 import { useWindows } from '../stores/windows'
 import { useApps } from '../stores/apps'
 import { useSession } from '../stores/session'
-import { api, fsApi, getToken, type SessionUser } from '../api/client'
+import { api, fsApi, getToken, fetchWsTicket, type SessionUser } from '../api/client'
 import { notify } from '../stores/notifications'
 import { useCalendar, todayStr, REMIND_OPTIONS, type CalMark, type RemindOffset } from '../stores/calendar'
 import { registerDialog, unregisterDialog, openDialog, dialogRegistry, type DialogDef } from '../ui/dialogService'
@@ -141,9 +141,15 @@ export const OpenOS = {
   me(): SessionUser | null {
     return useSession().user
   },
-  /** 当前登录令牌（拼 <img>/<a> 等带不了 Authorization header 的 URL 用，如附件下载）。 */
+  /** 当前登录令牌（拼 <img>/<a> 等带不了 Authorization header 的 URL 用，如附件下载）。
+   *  ⚠ 令牌属长期凭证——优先用 authTicket()（30s 一次性短票），新代码勿再用本接口拼 URL。 */
   authToken(): string {
     return getToken()
+  },
+  /** 一次性短票（30s 用后即焚）：query 鉴权 URL 场景（/ws、附件、商店取件）的
+   *  推荐凭据，URL 泄漏窗口极短。失败时调用方自行回落 authToken()。 */
+  async authTicket(): Promise<string> {
+    return fetchWsTicket()
   },
   /** 基础 UI 组件库。 */
   ui,

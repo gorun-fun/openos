@@ -48,16 +48,12 @@ type Proxy struct {
 
 // New 创建应用代理。db 用于逐请求校验应用存在、代理配置与角色授权。
 func New(db *store.DB) *Proxy {
-	dialer := &net.Dialer{Timeout: 15 * time.Second}
 	tr := &http.Transport{
-		// SSRF 防线在拨号层生效（而非请求解析层）：即使目标经 DNS 解析或
-		// 跳转落到内网地址也会被拒绝，配置目标主机除外。
+		// SSRF 防线在拨号层生效（而非请求解析层）：域名单次解析校验后按 IP 直连
+		//（堵 DNS rebinding TOCTOU，见 guard.go guardedDial），配置目标主机除外。
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			cfgHost, _ := ctx.Value(cfgHostCtx{}).(string)
-			if err := checkDial(cfgHost, addr); err != nil {
-				return nil, err
-			}
-			return dialer.DialContext(ctx, network, addr)
+			return guardedDial(ctx, network, addr, cfgHost)
 		},
 		ForceAttemptHTTP2:     true,
 		TLSHandshakeTimeout:   10 * time.Second,

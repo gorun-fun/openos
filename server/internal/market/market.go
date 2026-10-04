@@ -20,17 +20,20 @@
 //     运行时经 /api/market/bundle/{id} 提供（按角色授权校验），前端 BundleApp 容器
 //     动态 import 渲染——代码只在管理员安装时取一次远端，运行期不依赖外部源。
 //     这是唯一的远程代码形态：与内置应用同级信任，宿主应只收录可信来源的目录。
+//
 // 安装 = UpsertApp（builtin=0/locked=0，version/source 标记来源）+ 按所选角色授权。
 // 宿主可用 OPENOS_MARKET=off 整体下架商店。
 package market
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -52,8 +55,8 @@ const SourceMarket = "market"
 
 // 自定义源上限与单条地址长度上限（管理员经商店设置维护）。
 const (
-	MaxCustomSources  = 10
-	MaxSourceURLLen   = 500
+	MaxCustomSources = 10
+	MaxSourceURLLen  = 500
 )
 
 // Entry 目录条目。
@@ -63,11 +66,11 @@ type Entry struct {
 	Description string          `json:"description"`
 	Category    string          `json:"category"`
 	Icon        string          `json:"icon"`
-	Type        string          `json:"type"`               // web | proxy | schema
-	Config      json.RawMessage `json:"config"`             // web/proxy 为 {kind,url[,headers]}；schema 为 SchemaApp schema
-	Version     string          `json:"version"`            // 应用版本（与本机安装版本比较出「可升级」）
+	Type        string          `json:"type"`    // web | proxy | schema
+	Config      json.RawMessage `json:"config"`  // web/proxy 为 {kind,url[,headers]}；schema 为 SchemaApp schema
+	Version     string          `json:"version"` // 应用版本（与本机安装版本比较出「可升级」）
 	Changelog   string          `json:"changelog,omitempty"`
-	Perms       []string        `json:"perms,omitempty"`    // 权限声明（安装确认页展示）
+	Perms       []string        `json:"perms,omitempty"` // 权限声明（安装确认页展示）
 	Width       int             `json:"width,omitempty"`
 	Height      int             `json:"height,omitempty"`
 }
@@ -77,15 +80,15 @@ type State struct {
 	Entry
 	Installed        bool   `json:"installed"`
 	InstalledVersion string `json:"installedVersion,omitempty"`
-	Upgradable       bool   `json:"upgradable"`             // 商店安装且目录版本更新
-	Managed          bool   `json:"managed"`                // 本机由商店安装（source=market）
-	Conflict         bool   `json:"conflict,omitempty"`     // 同 id 应用为管理员手工注册（重装会覆盖其配置）
-	Protected        bool   `json:"protected,omitempty"`    // 同 id 应用为内置/宿主锁定（不可安装）
+	Upgradable       bool   `json:"upgradable"`          // 商店安装且目录版本更新
+	Managed          bool   `json:"managed"`             // 本机由商店安装（source=market）
+	Conflict         bool   `json:"conflict,omitempty"`  // 同 id 应用为管理员手工注册（重装会覆盖其配置）
+	Protected        bool   `json:"protected,omitempty"` // 同 id 应用为内置/宿主锁定（不可安装）
 }
 
 // 错误：路由层据此映射 404 / 403。
 var (
-	ErrNotFound = errors.New("market: 目录中不存在该应用")
+	ErrNotFound  = errors.New("market: 目录中不存在该应用")
 	ErrProtected = errors.New("market: 应用 ID 与内置或宿主锁定应用冲突")
 )
 
@@ -93,15 +96,81 @@ var (
 	embeddedOnce sync.Once
 	embeddedList []Entry
 
-	mu           sync.RWMutex
-	active       []Entry  // 当前生效目录：全部远程源合并结果，或内置兜底
-	defaultURL   string   // 官方默认源（OPENOS_MARKET_URL；=off 时为空 = 只剩自定义源）
-	customSrcs   []string // 管理员自定义源（有序，首见优先遮蔽默认源同 id 条目）
+	mu         sync.RWMutex
+	active     []Entry  // 当前生效目录：全部远程源合并结果，或内置兜底
+	defaultURL string   // 官方默认源（OPENOS_MARKET_URL；=off 时为空 = 只剩自定义源）
+	customSrcs []string // 管理员自定义源（有序，首见优先遮蔽默认源同 id 条目）
 
 	refreshMu       sync.Mutex // 串行化刷新（周期循环与保存即拉取互斥）
 	refreshInterval = 10 * time.Minute
-	httpClient      = &http.Client{Timeout: 15 * time.Second}
 )
+
+// marketGet 市场专用拉取（安全审计 2026-10）：仅 https；域名单次解析后按 IP 直连
+// （堵 DNS rebinding TOCTOU），非配置源主机的域名解析含内网 IP 一律拒绝——
+// 配置源（管理员设置的默认/自定义源）主机视同 webproxy 的配置目标显式放行，
+// 供内网镜像货架使用；bundle 下载地址来自目录内容，仅当主机恰为某配置源主机
+// 时才允许内网，其余必须公网。
+func marketGet(rawURL string) (*http.Response, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	if u.Scheme != "https" && !isLoopbackHost(u.Hostname()) {
+		return nil, fmt.Errorf("market: 仅允许 https 源（%s）", u.Host)
+	}
+	trusted := isSourceHost(u.Hostname())
+	c := &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+			if err != nil || len(ips) == 0 {
+				return nil, fmt.Errorf("market: 域名解析失败 %s: %v", host, err)
+			}
+			if !trusted {
+				for _, ip := range ips {
+					if !isPublicIP(ip.IP) {
+						return nil, fmt.Errorf("market: 拒绝拨号 %s（解析含内网地址，非配置源主机）", host)
+					}
+				}
+			}
+			var d net.Dialer
+			var lastErr error
+			for _, ip := range ips {
+				conn, err := d.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+				if err == nil {
+					return conn, nil
+				}
+				lastErr = err
+			}
+			return nil, lastErr
+		},
+	}}
+	return c.Get(rawURL)
+}
+
+// isSourceHost 主机名是否为当前某配置源（默认源或自定义源）的主机。
+func isSourceHost(host string) bool {
+	for _, s := range Sources() {
+		if su, err := url.Parse(s); err == nil && strings.EqualFold(su.Hostname(), host) {
+			return true
+		}
+	}
+	return false
+}
+
+// isLoopbackHost 回环主机例外（本地开发/单测的 httptest 服务；
+// 生产自定义源经 validSourceURL 已强制 https，走不到此分支）。
+func isLoopbackHost(h string) bool {
+	return h == "localhost" || h == "127.0.0.1" || h == "::1" || h == "[::1]"
+}
+
+func isPublicIP(ip net.IP) bool {
+	return !(ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified())
+}
 
 // Catalog 返回当前生效目录：远程源合并结果（任一源成功即整体以成功源为准），
 // 全部失败沿用现行（不回退内置——现行可能已是更早的成功结果）；初始 = 内置清单。
@@ -257,8 +326,9 @@ func validSourceURL(u string) bool {
 	if len(u) > MaxSourceURLLen {
 		return false
 	}
+	// https 强制（安全审计 2026-10）：http 源可被中间人投毒目录（bundle/web 条目）
 	p, err := url.Parse(u)
-	return err == nil && (p.Scheme == "http" || p.Scheme == "https") && p.Host != ""
+	return err == nil && p.Scheme == "https" && p.Host != ""
 }
 
 // Sources 当前全部远程源（去重副本）：自定义源在前（遮蔽默认源同 id 条目），默认源垫底。
@@ -331,9 +401,10 @@ func RefreshNow() (okCount, total int) {
 	return okCount, total
 }
 
-// fetchRemote 拉取并解析远程清单：仅 http(s)、限 2MB、15s 超时，非 200 视为失败。
+// fetchRemote 拉取并解析远程清单：仅 https、限 2MB、15s 超时，非 200 视为失败。
+// 拨号防线见 marketGet（SSRF：非配置源主机拒绝内网 IP，安全审计 2026-10）。
 func fetchRemote(u string) ([]Entry, error) {
-	resp, err := httpClient.Get(u)
+	resp, err := marketGet(u)
 	if err != nil {
 		return nil, err
 	}
@@ -520,7 +591,7 @@ func fetchBundle(e Entry) error {
 	if bundleDir == "" {
 		return fmt.Errorf("bundle 目录未初始化")
 	}
-	resp, err := httpClient.Get(bundleURL(e))
+	resp, err := marketGet(bundleURL(e))
 	if err != nil {
 		return err
 	}

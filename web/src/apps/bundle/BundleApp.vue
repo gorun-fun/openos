@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // 商店 bundle 应用容器（config.kind=bundle）：动态 import 服务端本地提供的组件
-// 模块（GET /api/market/bundle/<id>?v=<version>&token=<jwt>，ESM 模块请求带不了
-// Authorization header 故鉴权走查询参数），默认导出须为 Vue 组件定义
+// 模块（GET /api/market/bundle/<id>?v=<version>&ticket=<短票>，ESM 模块请求带不了
+// Authorization header 故鉴权走查询参数——用 30s 一次性短票而非长期 JWT，URL 不
+// 再泄漏可长期使用的令牌），默认导出须为 Vue 组件定义
 // （{ template, setup }，template 由主程序完整版 Vue 运行时编译）。
 //
 // 模块 URL 带安装版本号：升级换版本即换 URL，浏览器模块缓存天然按版本隔离；
@@ -10,7 +11,7 @@
 import { onMounted, ref, shallowRef } from 'vue'
 import type { WinState } from '../../stores/windows'
 import { useApps } from '../../stores/apps'
-import { getToken } from '../../api/client'
+import { fetchWsTicket, getToken } from '../../api/client'
 
 const props = defineProps<{ win: WinState }>()
 
@@ -22,8 +23,13 @@ const loading = ref(true)
 onMounted(async () => {
   const appId = props.win.appId
   const def = apps.byId(appId)
+  // 短票优先（用后即焚）；取票失败回落长期 token（老服务端兼容）
+  let auth = `token=${encodeURIComponent(getToken())}`
+  try {
+    auth = `ticket=${encodeURIComponent(await fetchWsTicket())}`
+  } catch { /* 兼容回落 */ }
   const url = `/api/market/bundle/${encodeURIComponent(appId)}`
-    + `?v=${encodeURIComponent(def?.version || '')}&token=${encodeURIComponent(getToken())}`
+    + `?v=${encodeURIComponent(def?.version || '')}&${auth}`
   try {
     const mod: any = await import(/* @vite-ignore */ url)
     const c = mod?.default

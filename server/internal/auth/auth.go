@@ -61,8 +61,61 @@ type Service struct {
 	bruteMu sync.Mutex
 	brute   map[string]*attempt
 
+	// 一次性短票（见 ticketStore）：/ws 与 query 鉴权端点用短票替代长期 JWT 入 URL
+	tickets ticketStore
+
 	// 用户删除后的级联清理钩子（main 注入：清理磁盘沙箱 / goder 数据）
 	onUserDeleted func(username string)
+}
+
+// ticketStore 一次性短票：30s 有效、用后即焚。供无法携带 header 的场景
+//（/ws 升级、附件/商店取件等 query 鉴权）——长期 JWT 不再出现在 URL/日志里
+//（安全审计 2026-10）。纯内存，重启即失效（30s 窗口内客户端可重取）。
+type ticketStore struct {
+	mu sync.Mutex
+	m  map[string]ticketEntry
+}
+
+type ticketEntry struct {
+	user    string
+	expires time.Time
+}
+
+const ticketTTL = 30 * time.Second
+
+// issue 签发短票（顺手清扫过期项，量小无需独立协程）。
+func (t *ticketStore) issue(user string) string {
+	id := randomHex(24)
+	now := time.Now()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.m == nil {
+		t.m = map[string]ticketEntry{}
+	}
+	for k, e := range t.m {
+		if now.After(e.expires) {
+			delete(t.m, k)
+		}
+	}
+	t.m[id] = ticketEntry{user: user, expires: now.Add(ticketTTL)}
+	return id
+}
+
+// consume 核销短票：不存在/过期/已用 均失败（一次性）。
+func (t *ticketStore) consume(id string) (string, bool) {
+	if id == "" {
+		return "", false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	e, ok := t.m[id]
+	if ok {
+		delete(t.m, id)
+	}
+	if !ok || time.Now().After(e.expires) {
+		return "", false
+	}
+	return e.user, true
 }
 
 type cacheEntry struct {
@@ -275,8 +328,9 @@ func (s *Service) success(key string) {
 
 // ---- 密码 ----
 
-// pbkdf2 迭代次数：当前 20000；4096 用于兼容升级前的存量 hash。
-const pbkdf2Iters = 20000
+// pbkdf2 迭代次数：600000（对齐 OWASP 2023 对 PBKDF2-SHA256 的建议，安全审计
+// 2026-10 上调）；20000/4096 为历史参数，登录时对存量 hash 透明升级到当前值。
+const pbkdf2Iters = 600000
 
 func hashWithIters(password, salt string, iters int) string {
 	key, err := pbkdf2.Key(sha256.New, password, []byte(salt), iters, 32)
@@ -290,12 +344,20 @@ func hashPassword(password, salt string) string {
 	return hashWithIters(password, salt, pbkdf2Iters)
 }
 
-// checkPassword 校验密码，兼容旧参数（4096 轮）的存量 hash。
+// legacyIters 历史迭代参数（新→旧），checkPassword 逐级兼容并触发透明升级。
+var legacyIters = []int{20000, 4096}
+
+// checkPassword 校验密码，兼容历史参数的存量 hash。
 func checkPassword(password, salt, hash string) bool {
 	if hashWithIters(password, salt, pbkdf2Iters) == hash {
 		return true
 	}
-	return hashWithIters(password, salt, 4096) == hash
+	for _, it := range legacyIters {
+		if hashWithIters(password, salt, it) == hash {
+			return true
+		}
+	}
+	return false
 }
 
 func newSalt() string {
@@ -358,6 +420,66 @@ func (s *Service) Middleware(next http.Handler) http.Handler {
 
 // TokenCookie 供嵌入组件（goder 等）同源自动携带的令牌 Cookie 名。
 const TokenCookie = "openos_token"
+
+// setSessionCookie 统一种会话 Cookie（HttpOnly + SameSite=Strict；HTTPS 直连或
+// 反代声明 https 时加 Secure——安全审计 2026-10 之前缺 Secure，明文 HTTP 可剥）。
+func (s *Service) setSessionCookie(w http.ResponseWriter, r *http.Request, token string, maxAge int) {
+	c := &http.Cookie{
+		Name:     TokenCookie,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   maxAge,
+	}
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		c.Secure = true
+	}
+	http.SetCookie(w, c)
+}
+
+// IssueTicket 签发一次性短票（登录态调用；见 ticketStore）。
+func (s *Service) IssueTicket(user string) string { return s.tickets.issue(user) }
+
+// ConsumeTicketFromRequest 核销 query 短票（?ticket=）并返回用户名；
+// 与 VerifySession 组合出完整身份（query 端点鉴权用）。
+func (s *Service) ConsumeTicketFromRequest(r *http.Request) (string, bool) {
+	return s.tickets.consume(r.URL.Query().Get("ticket"))
+}
+
+// CurrentUserRole 用户当前角色与状态（导出给总线短票连接的复核与 query 鉴权）。
+func (s *Service) CurrentUserRole(username string) (exists bool, role string, tv int64, disabled bool) {
+	return s.currentUserRole(username)
+}
+
+// WsTicket POST /api/auth/ws-ticket（登录态）—— 签发一次性短票：
+// /ws 与附件/商店取件等无法携带 header 的 query 鉴权场景用它替代长期 JWT。
+func (s *Service) WsTicket(w http.ResponseWriter, r *http.Request) {
+	id := FromContext(r)
+	writeJSON(w, map[string]any{"ticket": s.IssueTicket(id.Username), "ttl": int(ticketTTL.Seconds())})
+}
+
+// AIProxyKey 每用户的 AI 代理密钥（"uid:hex(HMAC)"，HMAC 用 jwt_secret 派生、
+// 跨启动稳定）：goder 托管供应商指向 /api/ai/v1/* 代理端点时作 Bearer 凭据，
+// 平台 API Key 只留服务端、不再写进每个 goder 用户的 settings.json。
+func (s *Service) AIProxyKey(username string) string {
+	mac := hmac.New(sha256.New, s.secret)
+	mac.Write([]byte("ai-proxy:" + username))
+	return username + ":" + hex.EncodeToString(mac.Sum(nil))
+}
+
+// UserForAIProxyKey 校验代理密钥并返回其绑定的用户名（uid:hex 形态）。
+func (s *Service) UserForAIProxyKey(key string) (string, bool) {
+	i := strings.IndexByte(key, ':')
+	if i <= 0 || i == len(key)-1 {
+		return "", false
+	}
+	user := key[:i]
+	if subtle.ConstantTimeCompare([]byte(s.AIProxyKey(user)), []byte(key)) != 1 {
+		return "", false
+	}
+	return user, true
+}
 
 // RequireAdmin 要求管理员角色。
 func RequireAdmin(next http.Handler) http.Handler {
@@ -426,14 +548,7 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 同时种 Cookie：goder 等嵌入组件的同源 fetch 自动携带（httpOnly，JS 不可读）
-	http.SetCookie(w, &http.Cookie{
-		Name:     TokenCookie,
-		Value:    token,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
-		MaxAge:   int(s.ttl.Seconds()),
-	})
+	s.setSessionCookie(w, r, token, int(s.ttl.Seconds()))
 	s.db.Audit(req.Username, "login.ok", "ip="+ip, ip)
 	writeJSON(w, map[string]any{"token": token, "user": map[string]any{
 		"username": req.Username, "role": info.Role, "displayName": info.DisplayName,
@@ -443,6 +558,9 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request) {
 // Logout GET /api/auth/logout —— 清除令牌 Cookie。
 func (s *Service) Logout(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: TokenCookie, Value: "", Path: "/", HttpOnly: true, MaxAge: -1})
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		w.Header().Add("Set-Cookie", TokenCookie+"=; Path=/; Max-Age=0; Secure")
+	}
 	writeJSON(w, ok())
 }
 
@@ -533,14 +651,7 @@ func (s *Service) Exchange(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 500, "签发令牌失败")
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     TokenCookie,
-		Value:    token,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
-		MaxAge:   int(s.ttl.Seconds()),
-	})
+	s.setSessionCookie(w, r, token, int(s.ttl.Seconds()))
 	s.db.Audit(req.Username, "auth.exchange", "role="+info.Role, ip)
 	writeJSON(w, map[string]any{"token": token, "user": map[string]any{
 		"username": req.Username, "role": info.Role, "displayName": info.DisplayName,
@@ -628,10 +739,7 @@ func (s *Service) Refresh(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 500, "签发失败")
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name: TokenCookie, Value: token, Path: "/", HttpOnly: true,
-		SameSite: http.SameSiteStrictMode, MaxAge: int(s.ttl.Seconds()),
-	})
+	s.setSessionCookie(w, r, token, int(s.ttl.Seconds()))
 	writeJSON(w, map[string]any{"token": token, "user": map[string]any{
 		"username": id.Username, "role": info.Role, "displayName": info.DisplayName,
 	}})

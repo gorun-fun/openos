@@ -54,11 +54,14 @@ type Deps struct {
 	OnlineUsers func() []string
 }
 
-// Config 持久化配置（<data>/goder/osmcp.json；令牌跨启动稳定：已连着的 gh
-// 插件进程不至于因令牌轮换而失联）。
+// Config 持久化配置（<data>/goder/osmcp.json）。令牌**按用户分发**（安全审计
+// 2026-10：此前全体用户共享一枚令牌、身份仅由 X-OS-User 声明，任何拿到令牌的
+// 本地进程可以任意用户身份调用 os_* 工具）；每用户令牌跨启动稳定：已连着的
+// gh 插件进程不至于因令牌轮换而失联。旧版共享 token 字段仅作读取兼容、不再使用。
 type Config struct {
-	Addr  string `json:"addr"`
-	Token string `json:"token"`
+	Addr       string            `json:"addr"`
+	Token      string            `json:"token,omitempty"`      // 旧版共享令牌（仅兼容读取，不再校验）
+	UserTokens map[string]string `json:"user_tokens,omitempty"` // uid → 专属令牌
 }
 
 const defaultAddr = "127.0.0.1:7712"
@@ -72,6 +75,7 @@ type Manager struct {
 	srv      *http.Server
 	exe      string // openos-server 绝对路径（wrapper 烙写用）
 
+	tokenMu  sync.RWMutex // 护 cfg.UserTokens
 	installMu sync.Mutex
 	marks     map[string]ensMark // uid → 上次安装时的文件指纹（幂等跳过用）
 }
@@ -127,7 +131,7 @@ func (m *Manager) Start() {
 	saveConfig(m.configPath(), cfg)
 	m.cfg = cfg
 
-	m.server = newServer(m.deps, cfg.Token, newBridge(m.deps.Hub))
+	m.server = newServer(m.deps, m.checkUserToken, newBridge(m.deps.Hub))
 	mux := http.NewServeMux()
 	mux.HandleFunc("/mcp", m.server.serveMCP)
 	m.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
@@ -190,4 +194,31 @@ func checkToken(got, want string) bool {
 		return true
 	}
 	return got != "" && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
+// userToken 取某用户的专属 MCP 令牌（无则生成并持久化，跨启动稳定）。
+func (m *Manager) userToken(uid string) string {
+	m.tokenMu.Lock()
+	defer m.tokenMu.Unlock()
+	if m.cfg.UserTokens == nil {
+		m.cfg.UserTokens = map[string]string{}
+	}
+	if t := m.cfg.UserTokens[uid]; t != "" {
+		return t
+	}
+	b := make([]byte, 24)
+	_, _ = rand.Read(b)
+	t := hex.EncodeToString(b)
+	m.cfg.UserTokens[uid] = t
+	saveConfig(m.configPath(), m.cfg)
+	return t
+}
+
+// checkUserToken 校验「令牌 ↔ 用户」绑定：令牌按用户分发，单一令牌泄漏
+// 不再波及全体用户（安全审计 2026-10）。
+func (m *Manager) checkUserToken(got, uid string) bool {
+	m.tokenMu.RLock()
+	defer m.tokenMu.RUnlock()
+	want := m.cfg.UserTokens[uid]
+	return want != "" && got != "" && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }

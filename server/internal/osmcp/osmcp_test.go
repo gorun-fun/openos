@@ -69,7 +69,7 @@ func rpc(t *testing.T, s *Server, user, method, params string) (rpcTestOut, int)
 
 func TestServeMCPAuth(t *testing.T) {
 	deps, _, _ := newTestDeps(t)
-	s := newServer(deps, testToken, newBridge(deps.Hub))
+	s := newServer(deps, tokenAuth(testToken), newBridge(deps.Hub))
 
 	// 无令牌 → 401
 	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{}`))
@@ -90,7 +90,7 @@ func TestServeMCPAuth(t *testing.T) {
 
 func TestToolsList(t *testing.T) {
 	deps, _, _ := newTestDeps(t)
-	s := newServer(deps, testToken, newBridge(deps.Hub))
+	s := newServer(deps, tokenAuth(testToken), newBridge(deps.Hub))
 
 	out, code := rpc(t, s, "alice", "tools/list", `{}`)
 	if code != 200 || out.Error != nil {
@@ -128,29 +128,37 @@ func TestToolsList(t *testing.T) {
 
 func TestToolsCallValidation(t *testing.T) {
 	deps, _, _ := newTestDeps(t)
-	s := newServer(deps, testToken, newBridge(deps.Hub))
+	s := newServer(deps, tokenAuth(testToken), newBridge(deps.Hub))
 
 	// 未知工具 → JSON-RPC 错误
 	if out, _ := rpc(t, s, "alice", "tools/call", `{"name":"nope"}`); out.Error == nil {
 		t.Fatal("未知工具应返回 JSON-RPC 错误")
 	}
 
-	// 缺用户身份 / 用户不存在 → 工具级错误
-	for _, user := range []string{"", "nobody"} {
-		out, _ := rpc(t, s, user, "tools/call", `{"name":"os_info"}`)
-		var res struct {
-			IsError bool `json:"isError"`
-		}
-		_ = json.Unmarshal(out.Result, &res)
-		if !res.IsError {
-			t.Fatalf("用户 %q 应触发工具级错误", user)
-		}
+	// 缺用户身份 → HTTP 层 401（令牌↔用户成对校验，安全审计 2026-10）
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"os_info"}}`))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	rec := httptest.NewRecorder()
+	s.serveMCP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("缺 X-OS-User 应 401，得到 %d", rec.Code)
+	}
+
+	// 用户不存在 → 工具级错误
+	out, _ := rpc(t, s, "nobody", "tools/call", `{"name":"os_info"}`)
+	var res struct {
+		IsError bool `json:"isError"`
+	}
+	_ = json.Unmarshal(out.Result, &res)
+	if !res.IsError {
+		t.Fatal("用户 \"nobody\" 应触发工具级错误")
 	}
 }
 
 func TestSettingsTools(t *testing.T) {
 	deps, _, _ := newTestDeps(t)
-	s := newServer(deps, testToken, newBridge(deps.Hub))
+	s := newServer(deps, tokenAuth(testToken), newBridge(deps.Hub))
 
 	if out, _ := rpc(t, s, "alice", "tools/call", `{"name":"os_settings_put","arguments":{"key":"foo","value":"bar"}}`); out.Error != nil {
 		t.Fatalf("settings_put 失败: %+v", out)
@@ -168,7 +176,7 @@ func TestSettingsTools(t *testing.T) {
 
 func TestFSTools(t *testing.T) {
 	deps, _, _ := newTestDeps(t)
-	s := newServer(deps, testToken, newBridge(deps.Hub))
+	s := newServer(deps, tokenAuth(testToken), newBridge(deps.Hub))
 
 	call := func(name, args string) (string, bool) {
 		out, _ := rpc(t, s, "alice", "tools/call", `{"name":"`+name+`","arguments":`+args+`}`)
@@ -392,7 +400,7 @@ func TestManagerEnsureAndHeal(t *testing.T) {
 
 func TestRunShim(t *testing.T) {
 	deps, _, _ := newTestDeps(t)
-	s := newServer(deps, testToken, newBridge(deps.Hub))
+	s := newServer(deps, tokenAuth(testToken), newBridge(deps.Hub))
 	ts := httptest.NewServer(http.HandlerFunc(s.serveMCP))
 	defer ts.Close()
 

@@ -8,6 +8,16 @@ export function getToken(): string { return localStorage.getItem(TOKEN_KEY) || '
 export function setToken(t: string) { localStorage.setItem(TOKEN_KEY, t) }
 export function clearToken() { localStorage.removeItem(TOKEN_KEY) }
 
+/** 取一次性短票（30s 用后即焚，POST /api/auth/ws-ticket，依赖会话 Cookie/令牌）：
+ *  /ws 与附件/商店取件等无法携带 header 的 query 鉴权场景用它替代长期 JWT 入 URL
+ *  （安全加固第一步：URL/日志不再出现可长期窃取的令牌）。失败时调用方回落 token。 */
+export async function fetchWsTicket(): Promise<string> {
+  const resp = await fetch('/api/auth/ws-ticket', { method: 'POST' })
+  if (!resp.ok) throw new ApiError(resp.status, '获取短票失败')
+  const data = await resp.json()
+  return String(data.ticket || '')
+}
+
 /** 401 时的全局回调（由 App 层注册：清理状态并回到登录页）。 */
 let onUnauthorized: (() => void) | null = null
 export function setUnauthorizedHandler(fn: () => void) { onUnauthorized = fn }

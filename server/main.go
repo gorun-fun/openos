@@ -67,6 +67,11 @@ func main() {
 	authSvc.SetAuthMode(os.Getenv("OPENOS_AUTH_MODE"))
 	authSvc.SetExchangeSecret(os.Getenv("OPENOS_EXCHANGE_SECRET"))
 	authSvc.SetExchangeRoleWhitelist(os.Getenv("OPENOS_EXCHANGE_ROLES"))
+	// 安全提醒（安全审计 2026-10）：交换密钥 + 空白名单 = 密钥泄露可铸任意角色（含
+	// admin）。宿主部署应显式配置 OPENOS_EXCHANGE_ROLES。
+	if os.Getenv("OPENOS_EXCHANGE_SECRET") != "" && strings.TrimSpace(os.Getenv("OPENOS_EXCHANGE_ROLES")) == "" {
+		log.Printf("auth: 警告：OPENOS_EXCHANGE_SECRET 已配置但未设置 OPENOS_EXCHANGE_ROLES 白名单，交换密钥一旦泄露可铸造任意角色（含 admin）")
+	}
 	if err := authSvc.SeedDefaults(); err != nil {
 		log.Fatal("初始化默认账号失败:", err)
 	}
@@ -74,6 +79,11 @@ func main() {
 	// 总线连接周期复核（30s）：令牌吊销（改角色/改密/删用户/禁用）或过期后踢下线，
 	// 客户端会用本地（可能已续期）的令牌自动重连，令牌确实失效则重连被 401 拒绝。
 	hub.SetRevalidator(func(user, role, token string) bool {
+		// 短票连接没有长期令牌可验：按用户态复核（吊销/禁用/角色变化仍即时生效）
+		if strings.HasPrefix(token, "ticket:") {
+			exists, cur, _, disabled := authSvc.CurrentUserRole(user)
+			return exists && !disabled && cur == role
+		}
 		id, err := authSvc.VerifySession(token)
 		return err == nil && id.Username == user && id.Role == role
 	})
@@ -81,8 +91,16 @@ func main() {
 	fs := vfs.New(dataDir, db, hub, aiSvc.Ask)
 	goderMgr := goder.New(dataDir)
 	goderMgr.Start() // OPENOS_GODER=off 或二进制缺失时自动降级（available=false）
-	// AI ↔ goder 联动：系统设置的模型配置以托管供应商（OpenOS）写入各 goder
-	// 用户的 settings.json 并设为默认模型；goder 设置页经反代注入 managed 只读展示
+	// AI ↔ goder 联动（代理形态，安全审计 2026-10）：系统设置的模型配置以托管供应商
+	//（OpenOS）写入各 goder 用户的 settings.json 并设为默认模型；条目指向 openos
+	// 自身的 OpenAI 兼容代理端点（/api/ai/v1/*，每用户代理密钥鉴权）——平台 API
+	// Key 只留服务端，不再落任何 goder 用户家目录。goder 设置页经反代注入 managed
+	// 只读展示。
+	selfPort := "8081"
+	if _, p, err := net.SplitHostPort(envOr("OPENOS_ADDR", "127.0.0.1:8081")); err == nil && p != "" {
+		selfPort = p
+	}
+	goderMgr.SetAIProxy("http://127.0.0.1:"+selfPort+"/api/ai/v1", authSvc.AIProxyKey)
 	goderMgr.SetAIProviderSource(func() (goder.ProviderConfig, bool) {
 		base, key, model, ok := aiSvc.Provider()
 		return goder.ProviderConfig{BaseURL: base, APIKey: key, Model: model}, ok
@@ -160,20 +178,58 @@ func main() {
 
 	mux := http.NewServeMux()
 
+	// verifyQueryAuth query 鉴权（?ticket= 一次性短票优先，兼容 ?token=）：
+	// /ws、附件下载、商店 bundle 取件等无法携带 header 的端点共用。短票只携带
+	// 用户名，角色实时查库拼出；长期 JWT 出 URL 属过渡兼容（安全审计 2026-10）。
+	verifyQueryAuth := func(r *http.Request) (*auth.Identity, error) {
+		if user, ok := authSvc.ConsumeTicketFromRequest(r); ok {
+			exists, role, _, disabled := authSvc.CurrentUserRole(user)
+			if !exists || disabled {
+				return nil, fmt.Errorf("unauthorized")
+			}
+			return &auth.Identity{Username: user, Role: role}, nil
+		}
+		return authSvc.VerifySession(r.URL.Query().Get("token"))
+	}
+
 	// ---- 公开接口 ----
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]any{
-			"ok": true, "app": "OpenOS", "version": store.Version,
-			"ai": aiSvc.Configured(), "online": hub.OnlineUsers(),
-			"uptimeSec": int(time.Since(startedAt).Seconds()),
-		})
+		// 公开面收敛为最小探测（安全审计 2026-10：版本/AI 状态/在线人数属侦察信息，
+		// 仅登录后可见——菜单栏/小组件等桌面消费方均带凭证请求）
+		out := map[string]any{"ok": true, "app": "OpenOS", "uptimeSec": int(time.Since(startedAt).Seconds())}
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if token == "" {
+			if c, err := r.Cookie(auth.TokenCookie); err == nil {
+				token = c.Value
+			}
+		}
+		if _, err := authSvc.VerifySession(token); err == nil {
+			out["version"] = store.Version
+			out["ai"] = aiSvc.Configured()
+			out["online"] = hub.OnlineUsers()
+		}
+		writeJSON(w, out)
 	})
 	mux.HandleFunc("POST /api/auth/login", authSvc.Login)
 	mux.HandleFunc("GET /api/auth/logout", authSvc.Logout)
+	// 登出改 POST（GET 保留兼容期，前端与宿主切换完成后移除）——GET 副作用端点
+	// 是 CSRF 面（跨站 <img> 即可登出他人），安全审计 2026-10。
+	mux.HandleFunc("POST /api/auth/logout", authSvc.Logout)
 	// 宿主应用令牌交换（仅 OPENOS_EXCHANGE_SECRET 配置后可用）
 	mux.HandleFunc("POST /api/auth/exchange", authSvc.Exchange)
 	// 业务后端验证 OpenOS JWT（认证反向互通，与令牌交换共用 X-Exchange-Secret）
 	mux.HandleFunc("POST /api/auth/introspect", authSvc.Introspect)
+	// OpenAI 兼容代理端点（goder 托管供应商接入；每用户 AI 代理密钥鉴权，
+	// 平台 Key 只留服务端——见 ai.ProxyChatCompletions）
+	mux.HandleFunc("POST /api/ai/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if _, ok := authSvc.UserForAIProxyKey(key); !ok {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		aiSvc.ProxyChatCompletions(w, r)
+	})
 	// 宿主定向事件推送（与令牌交换共用 X-Exchange-Secret）：
 	// {users: ["用户名", ...], topic: "sys:notify", payload: {...}} → 逐用户
 	// hub.PublishTo。典型用途：宿主业务事件（如加入申请待审批）即时送达桌面
@@ -202,8 +258,18 @@ func main() {
 		writeJSON(w, map[string]any{"ok": true, "users": len(req.Users)})
 	})
 
-	// ---- WebSocket 事件总线（token 走查询参数；升级时全量校验用户态，与 REST 同一套判定） ----
+	// ---- WebSocket 事件总线（query 鉴权：优先 30s 一次性短票 ?ticket=，兼容 ?token=；
+	// 升级时全量校验用户态，与 REST 同一套判定） ----
 	mux.HandleFunc("GET /ws", func(w http.ResponseWriter, r *http.Request) {
+		if user, ok := authSvc.ConsumeTicketFromRequest(r); ok {
+			exists, role, _, disabled := authSvc.CurrentUserRole(user)
+			if !exists || disabled {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			hub.ServeWS(w, r, user, role, "ticket:"+user)
+			return
+		}
 		token := r.URL.Query().Get("token")
 		id, err := authSvc.VerifySession(token)
 		if err != nil {
@@ -386,7 +452,7 @@ func main() {
 	//（与 /ws、bundle 取件同例）。图片白名单内联显示，其余（含 SVG/HTML，可携带
 	// 脚本）一律 octet-stream 下载——附件服务不可变成 HTML 注入源。
 	mux.HandleFunc("GET /api/attachments/{id}", func(w http.ResponseWriter, r *http.Request) {
-		if _, err := authSvc.VerifySession(r.URL.Query().Get("token")); err != nil {
+		if _, err := verifyQueryAuth(r); err != nil {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -410,6 +476,8 @@ func main() {
 	})
 	authed.HandleFunc("GET /api/auth/me", authSvc.Me)
 	authed.HandleFunc("GET /api/auth/refresh", authSvc.Refresh)
+	// 一次性短票签发（登录态）：/ws 与附件/商店取件等 query 鉴权场景替代长期 JWT 入 URL
+	authed.HandleFunc("POST /api/auth/ws-ticket", authSvc.WsTicket)
 	authed.HandleFunc("PUT /api/users/password", authSvc.ChangePassword)
 	authed.HandleFunc("PUT /api/users/display-name", authSvc.SetDisplayName)
 
@@ -594,8 +662,13 @@ func main() {
 			writeJSON(w, map[string]any{"ok": "1", "custom": clean, "sourcesOk": okN, "entries": total})
 		})
 		// 商店「刷新」按钮：立即并发拉取全部远程目录源（与周期循环经 refreshMu 串行）。
-		// 全员可用——拉取目标只来自管理员配置的源集合与环境变量默认源，不引入新输入。
+		// 仅 admin——虽拉取目标只来自管理员配置，但任意用户可触发会放大对配置源的
+		// 请求频率（安全审计 2026-10）。
 		authed.HandleFunc("POST /api/market/refresh", func(w http.ResponseWriter, r *http.Request) {
+			if id := auth.FromContext(r); id == nil || id.Role != "admin" {
+				http.Error(w, "需要管理员权限", http.StatusForbidden)
+				return
+			}
 			okN, total := market.RefreshNow()
 			writeJSON(w, map[string]any{"sourcesOk": okN, "entries": total})
 		})
@@ -637,7 +710,7 @@ func main() {
 		// 无法携带 Authorization header，鉴权走查询参数 token（与 /ws 同例）。
 		// 逐请求校验：登录态 + 应用为商店安装的 bundle 形态 + 当前角色获授权。
 		mux.HandleFunc("GET /api/market/bundle/{id}", func(w http.ResponseWriter, r *http.Request) {
-			idn, err := authSvc.VerifySession(r.URL.Query().Get("token"))
+			idn, err := verifyQueryAuth(r)
 			if err != nil {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
@@ -727,7 +800,12 @@ func main() {
 			http.Error(w, "参数错误", 400)
 			return
 		}
+		if len(req.Key) > 128 || len(req.Value) > 1<<20 {
+			http.Error(w, "键值超长", 400)
+			return
+		}
 		db.SetUserSetting(user, req.Key, req.Value)
+		db.Audit(user, "settings.put", req.Key, "")
 		writeJSON(w, map[string]string{"ok": "1"})
 	})
 
@@ -908,7 +986,8 @@ func (s *statusWriter) Flush() {
 	}
 }
 
-// rateLimit 全局 IP 限流：600 次/分钟，突发 1200（仅 /api 与 /ws）。
+// rateLimit 全局 IP 限流：600 次/分钟，突发 1200。覆盖 /api、/ws、/goder-api
+// 与 /app（webproxy 反代——登录用户可绕开 /api 桶打代理与子进程，安全审计 2026-09）。
 func rateLimit(_ *auth.Service, next http.Handler) http.Handler {
 	var mu sync.Mutex
 	buckets := map[string]*tokenBucket{}
@@ -926,7 +1005,8 @@ func rateLimit(_ *auth.Service, next http.Handler) http.Handler {
 		return b
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api") || r.URL.Path == "/ws" {
+		p := r.URL.Path
+		if strings.HasPrefix(p, "/api") || p == "/ws" || strings.HasPrefix(p, "/goder-api") || strings.HasPrefix(p, "/app/") {
 			if !get(clientIP(r)).allow(600.0/60.0, 1200) {
 				http.Error(w, `{"error":"请求过于频繁"}`, 429)
 				return
