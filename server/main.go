@@ -353,7 +353,13 @@ func main() {
 			return
 		}
 		appID := r.PathValue("id")
-		if err := db.DeleteApp(appID); err != nil {
+		// 宿主服务调用（带交换密钥）可删除自己注册的 locked 应用：宿主清退应用
+		//（如下线旧版应用清单）是正当管理操作；界面与管理员 API 仍不可删 locked
+		del := db.DeleteApp
+		if authSvc.CheckExchangeSecret(r.Header.Get("X-Exchange-Secret")) {
+			del = db.DeleteAppForced
+		}
+		if err := del(appID); err != nil {
 			http.Error(w, "内置或宿主锁定的应用不可删除", http.StatusForbidden)
 			return
 		}

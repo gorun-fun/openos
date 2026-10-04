@@ -840,7 +840,21 @@ func (db *DB) UpsertApp(a AppDef) error {
 // DeleteApp 删除应用及其授权。内置（builtin）与宿主锁定（locked）应用不可删；
 // 仅当应用行确实被删除时才回收授权，避免受保护应用的 role_apps 被误清空。
 func (db *DB) DeleteApp(id string) error {
-	res, err := db.Exec(`DELETE FROM apps WHERE id=? AND builtin=0 AND locked=0`, id)
+	return db.deleteApp(id, false)
+}
+
+// DeleteAppForced 宿主服务专用（交换密钥调用）：允许删除宿主锁定（locked）应用
+// ——宿主清退自己注册的应用属正当管理操作；内置（builtin）应用仍不可删。
+func (db *DB) DeleteAppForced(id string) error {
+	return db.deleteApp(id, true)
+}
+
+func (db *DB) deleteApp(id string, allowLocked bool) error {
+	sql := `DELETE FROM apps WHERE id=? AND builtin=0 AND locked=0`
+	if allowLocked {
+		sql = `DELETE FROM apps WHERE id=? AND builtin=0`
+	}
+	res, err := db.Exec(sql, id)
 	if err != nil {
 		return err
 	}
