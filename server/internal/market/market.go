@@ -16,6 +16,8 @@
 //   - web   网页应用（config.kind=web）：iframe 直嵌允许被嵌的站点，渲染走 WebApp 容器
 //   - proxy 代理网页（config.kind=proxy）：目标站经服务端反代（webproxy），安装即放行其目标主机
 //   - schema 声明式应用（config 即 SchemaApp schema）：纯数据描述、无代码执行
+//   - host  宿主预装应用：宿主把自家业务应用列进目录（如 grf-hotel 的房态/订单），
+//     本机已由宿主注册安装——商店仅展示+可打开，不可经商店安装/卸载/升级；无 config
 //   - bundle 组件应用（config.kind=bundle）：单文件 ES 模块（默认导出 Vue 组件定义），
 //     安装时由服务端从目录声明的 https 地址下载落盘（<data>/market/bundles/），
 //     运行时经 /api/market/bundle/{id} 提供（按角色授权校验），前端 BundleApp 容器
@@ -69,7 +71,7 @@ type Entry struct {
 	Description string          `json:"description"`
 	Category    string          `json:"category"`
 	Icon        string          `json:"icon"`
-	Type        string          `json:"type"`    // web | proxy | schema
+	Type        string          `json:"type"`    // web | proxy | schema | bundle | host（宿主预装，仅展示/打开）
 	Config      json.RawMessage `json:"config"`  // web/proxy 为 {kind,url[,headers]}；schema 为 SchemaApp schema
 	Version     string          `json:"version"` // 应用版本（与本机安装版本比较出「可升级」）
 	Changelog   string          `json:"changelog,omitempty"`
@@ -105,6 +107,7 @@ type State struct {
 var (
 	ErrNotFound        = errors.New("market: 目录中不存在该应用")
 	ErrProtected       = errors.New("market: 应用 ID 与内置或宿主锁定应用冲突")
+	ErrNotInstallable  = errors.New("market: 宿主预装应用不可经商店安装")
 	ErrVersionNotFound = errors.New("market: 目录与本地均没有该版本")
 	ErrNotBundle       = errors.New("market: 仅 bundle 形态支持按版本切换")
 	ErrNotInstalled    = errors.New("market: 应用未安装，无法切换版本")
@@ -616,8 +619,13 @@ func (e Entry) validate() error {
 	if e.ID == "" || e.Name == "" {
 		return fmt.Errorf("id 与 name 必填")
 	}
-	if e.Type != "web" && e.Type != "proxy" && e.Type != "schema" && e.Type != "bundle" {
+	if e.Type != "web" && e.Type != "proxy" && e.Type != "schema" && e.Type != "bundle" && e.Type != "host" {
 		return fmt.Errorf("未知形态 %q", e.Type)
+	}
+	// host = 宿主预装应用条目（宿主把自家业务应用列进目录供展示/打开）：
+	// 不经商店安装，无需 config，本机不存在时也不可装
+	if e.Type == "host" {
+		return nil
 	}
 	if len(e.Config) == 0 || !json.Valid(e.Config) {
 		return fmt.Errorf("config 缺失或非法 JSON")
@@ -725,6 +733,9 @@ func Install(db *store.DB, id string, roles []string) (Entry, error) {
 	e, err := Find(id)
 	if err != nil {
 		return e, err
+	}
+	if e.Type == "host" {
+		return e, ErrNotInstallable
 	}
 	if cur, ok := db.AppByID(e.ID); ok && (cur.Builtin || cur.Locked) {
 		return e, ErrProtected

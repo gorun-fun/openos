@@ -165,6 +165,43 @@ func TestInstallProtected(t *testing.T) {
 	}
 }
 
+// TestHostEntry 宿主预装形态（type=host）：无 config 合法；不可经商店安装；
+// 本机已注册（locked）时商店状态为已安装+Protected（前端据此显示宿主应用/打开）。
+func TestHostEntry(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	raw := `{"version":1,"apps":[{"id":"rooms","name":"房态盘","type":"host","version":"v1"}]}`
+	list, err := parseCatalog([]byte(raw))
+	if err != nil {
+		t.Fatalf("host 条目应合法: %v", err)
+	}
+	if len(list) != 1 || list[0].ID != "rooms" {
+		t.Fatalf("host 条目应被收录: %+v", list)
+	}
+
+	// 注入生效目录后：未注册时 Install 拒绝（ErrNotInstallable）；
+	// 本机注册（locked）后状态 = Installed + Protected（可展示/打开，不可装卸）
+	mu.Lock()
+	prevActive, prevDefaults := active, defaultURLs
+	active, defaultURLs = list, nil
+	mu.Unlock()
+	t.Cleanup(func() { mu.Lock(); active, defaultURLs = prevActive, prevDefaults; mu.Unlock() })
+
+	if _, err := Install(db, "rooms", nil); err != ErrNotInstallable {
+		t.Fatalf("host 条目 Install 应拒绝: %v", err)
+	}
+	db.UpsertApp(store.AppDef{ID: "rooms", Name: "房态盘", Locked: true, Version: "v1"})
+	st := findState(List(db), "rooms")
+	if st == nil || !st.Installed || !st.Protected || st.Managed {
+		t.Errorf("本机已注册的 host 条目状态应 Installed+Protected+非托管: %+v", st)
+	}
+}
+
 // TestInstallNotFound 未知 id 返回 ErrNotFound（路由层映射 404）。
 func TestInstallNotFound(t *testing.T) {
 	dir := t.TempDir()

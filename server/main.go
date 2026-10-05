@@ -1016,6 +1016,10 @@ func main() {
 				http.Error(w, "应用 ID 与内置或宿主锁定应用冲突", http.StatusForbidden)
 				return
 			}
+			if errors.Is(err, market.ErrNotInstallable) {
+				http.Error(w, "宿主预装应用不可经商店安装", http.StatusForbidden)
+				return
+			}
 			if errors.Is(err, market.ErrVersionNotFound) {
 				http.Error(w, "目录与本地均没有该版本", 400)
 				return

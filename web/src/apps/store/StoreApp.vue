@@ -20,7 +20,7 @@ interface MarketState {
   description: string
   category: string
   icon: string
-  type: 'web' | 'proxy' | 'schema' | 'bundle'
+  type: 'web' | 'proxy' | 'schema' | 'bundle' | 'host'
   version: string
   changelog?: string
   perms?: string[]
@@ -101,7 +101,7 @@ const filtered = computed(() => {
 })
 
 function typeLabel(t: string) {
-  return t === 'web' ? '网页应用' : t === 'proxy' ? '代理网页' : t === 'schema' ? '声明式' : t === 'bundle' ? '组件应用' : t
+  return t === 'web' ? '网页应用' : t === 'proxy' ? '代理网页' : t === 'schema' ? '声明式' : t === 'bundle' ? '组件应用' : t === 'host' ? '宿主应用' : t
 }
 
 function openDetail(s: MarketState) {
@@ -300,10 +300,10 @@ const icoGear = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fil
           </div>
           <button
             class="c-btn" :class="{ accent: !s.installed || s.upgradable }"
-            :disabled="s.protected || (!isAdmin && (!s.installed || s.upgradable))"
+            :disabled="(s.protected && !apps.byId(s.id)) || (!isAdmin && (!s.installed || s.upgradable))"
             @click.stop="cardAction(s)"
           >
-            {{ s.protected ? '不可用' : !s.installed ? (isAdmin ? '安装' : '未安装') : s.upgradable ? (isAdmin ? '更新' : '可更新') : (apps.byId(s.id) ? '打开' : '已安装') }}
+            {{ (s.protected && !apps.byId(s.id)) ? '不可用' : !s.installed ? (isAdmin ? '安装' : '未安装') : s.upgradable ? (isAdmin ? '更新' : '可更新') : (apps.byId(s.id) ? '打开' : '已安装') }}
           </button>
         </div>
       </div>
@@ -364,7 +364,7 @@ const icoGear = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fil
             <template v-if="detail.installed"> · 本机 v{{ detail.installedVersion || '—' }}</template>
           </div>
           <div class="d-actions">
-            <button v-if="!detail.installed && isAdmin" class="primary" :disabled="busy || detail.protected" @click="install(detail)">安装</button>
+            <button v-if="!detail.installed && isAdmin && detail.type !== 'host'" class="primary" :disabled="busy || detail.protected" @click="install(detail)">安装</button>
             <button v-else-if="detail.upgradable && isAdmin" class="primary" :disabled="busy" @click="install(detail)">更新到 v{{ detail.version }}</button>
             <span v-if="detail.installed && detail.managed && !detail.upgradable" class="ok">✓ 已是最新版本</span>
             <button v-if="detail.installed && apps.byId(detail.id)" class="ghost" @click="openApp(detail)">打开</button>
