@@ -505,8 +505,9 @@ func introspect(openosToken string) (id struct {
 | `GET`/`PUT /api/host/ai/user-providers` | AI 每用户供应商 |
 
 hostsdk 的 `Manager`（SyncUser/SyncUsers/ListUsers/CreateUser/DeleteUser/RoleAppMap/
-SetRoleApps/UpsertApp…）已全部切到本组；旧管理 REST 路径的 `Call` 逃生通道自动回落
-兼容。审计 operator 记为 `host`。
+SetRoleApps/UpsertApp/ListApps/DeleteApp…）已全部切到本组；`Call` 逃生通道仅受理
+`/api/host/*` 路径（旧「exchange 铸 admin 服务账号 + Bearer 调管理 REST」路径已于
+v0.0.48 彻底移除）。审计 operator 记为 `host`。
 
 **批量用户同步**：`POST /api/users/sync`（users.manage，宿主走 `/api/host/users/sync`）
 幂等推送用户清单——不存在则开通（随机密码），存在则按字段更新（角色/显示名/禁用态/

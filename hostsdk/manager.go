@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -29,9 +28,6 @@ type Config struct {
 	GoderAddr      string   // 透传 OPENOS_GODER_ADDR（同机多实例错开 goder-serve 端口）
 	MarketURL      string   // 透传 OPENOS_MARKET_URL（宿主货架 catalog.json；空则用 openos 默认）
 	ExtraEnv       []string // 附加环境（如 OPENOS_VFS=off、OPENOS_MARKET=off）
-	// ServiceUser 已废弃（仅旧 openos 快照的兼容回落通道使用）：服务身份用户名，
-	// 新面 /api/host/* 全部经 X-Exchange-Secret 直连、不再铸造 admin 服务账号令牌
-	ServiceUser    string
 	// ExternalAuth 身份唯一来源为宿主 SSO（默认 true）：OPENOS_AUTH_MODE=external
 	//（openos 本地账密/改密 403、演示账号不种子）+ OPENOS_SEED_DEMO=0。
 	// 独立双进程形态（宿主无 SSO）才置 false。
@@ -45,7 +41,6 @@ func DefaultConfig() Config {
 	return Config{
 		Addr:         "127.0.0.1:8421",
 		DataDir:      "./openos-data",
-		ServiceUser:  "host-service",
 		ExternalAuth: true,
 	}
 }
@@ -57,9 +52,6 @@ type Manager struct {
 	mu     sync.Mutex
 	client *http.Client
 	proxy  http.Handler
-	// 旧管理 REST 面回落用的服务账号令牌缓存（20h；/api/host/* 新面不需要）
-	svcToken    string
-	svcTokenExp time.Time
 }
 
 // New 创建托管器（未启动）。
@@ -69,9 +61,6 @@ func New(cfg Config) *Manager {
 	}
 	if cfg.DataDir == "" {
 		cfg.DataDir = "./openos-data"
-	}
-	if cfg.ServiceUser == "" {
-		cfg.ServiceUser = "host-service"
 	}
 	m := &Manager{cfg: cfg, client: &http.Client{Timeout: 15 * time.Second}}
 	target, _ := url.Parse("http://" + cfg.Addr)
@@ -263,32 +252,19 @@ func (m *Manager) Exchange(username, role, displayName string, perms []string) (
 }
 
 // serviceCall 机对机调用 openos 管理 API：X-Exchange-Secret 直连（/api/host/* 组，
-// openos ≥ v0.0.46）——不再铸造 admin 服务账号令牌，与 OPENOS_EXCHANGE_ROLES
-// 白名单解耦、不再产生假 admin 用户行。2xx 时把响应 JSON 解到 out（可为 nil）。
-//
-// 兼容回落：宿主业务代码经 Call 逃生通道自行传入的旧管理 REST 路径（如
-// /api/ai/user-providers、/api/apps/role-labels）走登录中间件鉴权，密钥直连会被
-// 拒——此时自动回落「服务账号 exchange → Bearer」重试一次（需白名单放行 admin
-// 或未配白名单），保证宿主随旧调用面升级 openos 快照时不断路。
+// openos ≥ v0.0.46）——不铸造 admin 服务账号令牌（与 OPENOS_EXCHANGE_ROLES 白名单
+// 解耦、不产生假 admin 用户行；旧「exchange 铸 admin 服务账号 + Bearer 调管理 REST」
+// 路径已于 v0.0.48 彻底移除）。2xx 时把响应 JSON 解到 out（可为 nil）。
 func (m *Manager) serviceCall(method, path string, body, out any) error {
-	raw0, err0 := m.doCall(method, path, body, "")
-	if err0 == nil {
-		return decodeOut(path, raw0, out)
+	raw, err := m.doCall(method, path, body)
+	if err != nil {
+		return err
 	}
-	if !strings.HasPrefix(path, "/api/host/") {
-		if token, err := m.serviceToken(); err == nil {
-			raw1, err1 := m.doCall(method, path, body, token)
-			if err1 == nil {
-				return decodeOut(path, raw1, out)
-			}
-			return err1
-		}
-	}
-	return err0
+	return decodeOut(path, raw, out)
 }
 
-// doCall 单次 HTTP 调用（bearer 空时仅凭 X-Exchange-Secret）。
-func (m *Manager) doCall(method, path string, body any, bearer string) ([]byte, error) {
+// doCall 单次 HTTP 调用（X-Exchange-Secret 密钥直连）。
+func (m *Manager) doCall(method, path string, body any) ([]byte, error) {
 	var rd io.Reader
 	if body != nil {
 		raw, _ := json.Marshal(body)
@@ -299,9 +275,6 @@ func (m *Manager) doCall(method, path string, body any, bearer string) ([]byte, 
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if bearer != "" {
-		req.Header.Set("Authorization", "Bearer "+bearer)
-	}
 	req.Header.Set("X-Exchange-Secret", m.cfg.ExchangeSecret)
 	resp, err := m.client.Do(req)
 	if err != nil {
@@ -324,25 +297,8 @@ func decodeOut(path string, raw []byte, out any) error {
 	return nil
 }
 
-// serviceToken 兼容回落的旧服务账号令牌（缓存 20h；仅旧 openos 快照需要，
-// 新面 /api/host/* 不经过这里）。deprecated：宿主快照全量升级后可移除。
-func (m *Manager) serviceToken() (string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.svcToken != "" && time.Now().Before(m.svcTokenExp) {
-		return m.svcToken, nil
-	}
-	tok, err := m.Exchange(m.cfg.ServiceUser, "admin", "Host Service", nil)
-	if err != nil {
-		return "", err
-	}
-	m.svcToken = tok
-	m.svcTokenExp = time.Now().Add(20 * time.Hour)
-	return tok, nil
-}
-
-// Call 逃生通道：直接调 openos 管理 API（SDK 未封装的新端点）。推荐使用
-// /api/host/* 组（密钥直连）；旧管理 REST 路径自动走兼容回落。
+// Call 逃生通道：直接调 openos 管理 API（SDK 未封装的新端点）。仅支持
+// /api/host/* 组（密钥直连，openos ≥ v0.0.46）；旧管理 REST 路径不再受理。
 func (m *Manager) Call(method, path string, body, out any) error {
 	return m.serviceCall(method, path, body, out)
 }
