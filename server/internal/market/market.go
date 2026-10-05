@@ -22,7 +22,9 @@
 //     这是唯一的远程代码形态：与内置应用同级信任，宿主应只收录可信来源的目录。
 //
 // 安装 = UpsertApp（builtin=0/locked=0，version/source 标记来源）+ 按所选角色授权。
-// 宿主可用 OPENOS_MARKET=off 整体下架商店。
+// bundle 应用支持按版本切换（SwitchVersion：目录 versions 表/本地缓存取件、授权不变），
+// 升级保留历史版本文件作为回滚根基；自动升级（AutoUpgrade，商店全局开关）在每次
+// 目录刷新后把商店安装的应用对齐到目录版本。宿主可用 OPENOS_MARKET=off 整体下架商店。
 package market
 
 import (
@@ -70,9 +72,18 @@ type Entry struct {
 	Config      json.RawMessage `json:"config"`  // web/proxy 为 {kind,url[,headers]}；schema 为 SchemaApp schema
 	Version     string          `json:"version"` // 应用版本（与本机安装版本比较出「可升级」）
 	Changelog   string          `json:"changelog,omitempty"`
-	Perms       []string        `json:"perms,omitempty"` // 权限声明（安装确认页展示）
+	Perms       []string        `json:"perms,omitempty"`    // 权限声明（安装确认页展示）
+	Versions    []EntryVersion  `json:"versions,omitempty"` // bundle 历史版本（新到旧，供按版本切换/回滚）
 	Width       int             `json:"width,omitempty"`
 	Height      int             `json:"height,omitempty"`
+}
+
+// EntryVersion bundle 历史版本条目：版本号 + 该版本组件文件的下载地址。
+// 约定 versions[0] 与顶层 version/config.url 一致（顶层指针仍是唯一权威最新版，
+// versions 仅作查找表，旧服务端忽略该字段不受影响）。
+type EntryVersion struct {
+	Version string `json:"version"`
+	URL     string `json:"url"`
 }
 
 // State 目录条目 + 本机安装状态（GET /api/market/apps 的响应单元）。
@@ -84,12 +95,19 @@ type State struct {
 	Managed          bool   `json:"managed"`             // 本机由商店安装（source=market）
 	Conflict         bool   `json:"conflict,omitempty"`  // 同 id 应用为管理员手工注册（重装会覆盖其配置）
 	Protected        bool   `json:"protected,omitempty"` // 同 id 应用为内置/宿主锁定（不可安装）
+	// Versions 可切换版本列表（bundle 专属）：目录声明的历史版本在前（新到旧），
+	// 本地已落盘但目录未列的版本垫底（离线仍可回滚）；非 bundle 形态为空。
+	Versions []string `json:"versions,omitempty"`
 }
 
-// 错误：路由层据此映射 404 / 403。
+// 错误：路由层据此映射 404 / 403 / 400。
 var (
-	ErrNotFound  = errors.New("market: 目录中不存在该应用")
-	ErrProtected = errors.New("market: 应用 ID 与内置或宿主锁定应用冲突")
+	ErrNotFound        = errors.New("market: 目录中不存在该应用")
+	ErrProtected       = errors.New("market: 应用 ID 与内置或宿主锁定应用冲突")
+	ErrVersionNotFound = errors.New("market: 目录与本地均没有该版本")
+	ErrNotBundle       = errors.New("market: 仅 bundle 形态支持按版本切换")
+	ErrNotInstalled    = errors.New("market: 应用未安装，无法切换版本")
+	ErrBadVersion      = errors.New("market: 非法版本号")
 )
 
 var (
@@ -355,6 +373,9 @@ func Sources() []string {
 func RefreshNow() (okCount, total int) {
 	refreshMu.Lock()
 	defer refreshMu.Unlock()
+	// 刷新尾部跑自动升级（defer 后注册先执行：仍在 refreshMu 持有期间，与手动安装串行）；
+	// 源全部失败/零源也照跑——目录指针未变时对齐的是现行目录，语义一致
+	defer runAutoUpgrade()
 	srcs := Sources()
 	if len(srcs) == 0 {
 		return 0, len(Catalog())
@@ -419,6 +440,89 @@ func fetchRemote(u string) ([]Entry, error) {
 	return parseCatalog(raw)
 }
 
+// ---- 自动升级（商店全局开关，system_kv 持久化，默认关） ----
+//
+// 每次 RefreshNow 尾部执行：本机商店安装（source=market）的应用与目录版本
+// 不一致即自动重装到目录版本，**保留现有授权**。目录最新版指针被货架回退时
+// 也会跟随回退——货架本身就是全局回滚杠杆。手动切到旧版本（SwitchVersion）
+// 后若开关仍开，下次刷新同样会被拉回目录版本（前端切换确认框会提示）。
+
+// KVAutoUpgrade 自动升级开关的 system_kv 键（"1"=开，缺省=关）。
+const KVAutoUpgrade = "market_autoupgrade"
+
+// AutoUpgraded 单个应用的自动升级结果（main 注入的回调据此审计与推送）。
+type AutoUpgraded struct {
+	ID      string
+	Version string // 升级后的版本
+}
+
+// autoUpgradeFn 刷新尾部回调（main 注入：跑 AutoUpgrade + 审计 + sys:apps-changed；
+// market 包不依赖 hub，发布收在 main 侧）。
+var autoUpgradeFn func()
+
+// SetAutoUpgrader 注册/注销自动升级回调（main 启动时注入 db 闭包）。
+func SetAutoUpgrader(fn func()) { autoUpgradeFn = fn }
+
+// AutoUpgradeOn 自动升级开关是否开启。
+func AutoUpgradeOn(db *store.DB) bool {
+	v, _ := db.GetSystemKV(KVAutoUpgrade)
+	return v == "1"
+}
+
+// SetAutoUpgrade 开关持久化（PUT /api/market/autoupgrade 调用）。
+func SetAutoUpgrade(db *store.DB, on bool) error {
+	v := "0"
+	if on {
+		v = "1"
+	}
+	return db.SetSystemKV(KVAutoUpgrade, v)
+}
+
+// AutoUpgrade 自动升级一遍：开关关时空操作；逐应用比对目录版本，不一致即重装
+// 到目录版本并保留授权。单个应用失败只记日志跳过（bundle 下载失败等），不拖垮
+// 其余应用与刷新本身。目录已下架的应用保留现状不动作。
+func AutoUpgrade(db *store.DB) []AutoUpgraded {
+	if !AutoUpgradeOn(db) {
+		return nil
+	}
+	apps, err := db.ListApps()
+	if err != nil {
+		log.Printf("market: 自动升级读取应用列表失败: %v", err)
+		return nil
+	}
+	var changed []AutoUpgraded
+	for _, a := range apps {
+		if a.Source != SourceMarket {
+			continue
+		}
+		e, err := Find(a.ID)
+		if err != nil || a.Version == e.Version {
+			continue
+		}
+		if _, err := Install(db, a.ID, appRoles(db, a.ID)); err != nil {
+			log.Printf("market: 自动升级 %s 失败: %v", a.ID, err)
+			continue
+		}
+		log.Printf("market: 自动升级 %s %s → %s", a.ID, a.Version, e.Version)
+		changed = append(changed, AutoUpgraded{ID: a.ID, Version: e.Version})
+	}
+	return changed
+}
+
+// runAutoUpgrade RefreshNow 尾部执行（refreshMu 持有期间）。回调异常只记日志，
+// 绝不影响刷新主流程。
+func runAutoUpgrade() {
+	if autoUpgradeFn == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("market: 自动升级异常: %v", r)
+		}
+	}()
+	autoUpgradeFn()
+}
+
 // entriesEqual 内容级比较（清单条目量小，直接比序列化字节），内容不变不交换不打日志。
 func entriesEqual(a, b []Entry) bool {
 	ab, _ := json.Marshal(a)
@@ -458,6 +562,21 @@ func (e Entry) validate() error {
 			if !safeNameRe.MatchString(e.ID) || !safeNameRe.MatchString(e.Version) {
 				return fmt.Errorf("bundle 条目 id/version 须为字母数字._-")
 			}
+			// 历史版本表：版本号同样限安全字符、地址强制 https（与最新版同一套防线）
+			seen := map[string]bool{}
+			for _, v := range e.Versions {
+				if !safeNameRe.MatchString(v.Version) {
+					return fmt.Errorf("bundle 历史版本号 %q 须为字母数字._-", v.Version)
+				}
+				vu, err := url.Parse(v.URL)
+				if err != nil || vu.Scheme != "https" || vu.Host == "" {
+					return fmt.Errorf("bundle 历史版本 %s 地址须为合法 https", v.Version)
+				}
+				if seen[v.Version] {
+					return fmt.Errorf("bundle 历史版本 %s 重复", v.Version)
+				}
+				seen[v.Version] = true
+			}
 		}
 	}
 	return nil
@@ -493,14 +612,34 @@ func List(db *store.DB) []State {
 				st.Conflict = true
 			}
 		}
+		// 可切换版本列表（bundle 专属）：目录声明的历史版本在前（新到旧），
+		// 本地已落盘但目录未列的版本垫底（货架清过历史仍可离线回滚）
+		if e.Type == "bundle" {
+			seen := map[string]bool{}
+			var vs []string
+			for _, v := range e.Versions {
+				if !seen[v.Version] {
+					seen[v.Version] = true
+					vs = append(vs, v.Version)
+				}
+			}
+			for _, v := range localBundleVersions(e.ID) {
+				if !seen[v] {
+					seen[v] = true
+					vs = append(vs, v)
+				}
+			}
+			st.Versions = vs
+		}
 		out = append(out, st)
 	}
 	return out
 }
 
-// Install 安装/升级/覆盖安装目录条目，并按所选角色整组授权（admin 恒在授权内）。
+// Install 安装/升级/覆盖安装目录条目（最新版），并按所选角色整组授权（admin 恒在授权内）。
 // 角色只认系统出现过的（ListRoles），防 role_apps 写入幽灵角色。
 // bundle 形态在入库前先下载组件文件落盘（下载失败即安装失败，不产生装了跑不起来的应用）。
+// 按指定版本安装（历史版本切换/回滚）走 SwitchVersion。
 func Install(db *store.DB, id string, roles []string) (Entry, error) {
 	e, err := Find(id)
 	if err != nil {
@@ -509,14 +648,68 @@ func Install(db *store.DB, id string, roles []string) (Entry, error) {
 	if cur, ok := db.AppByID(e.ID); ok && (cur.Builtin || cur.Locked) {
 		return e, ErrProtected
 	}
+	ver := e.Version
+	if err := installEntry(db, e, roles, ver, bundleURL(e)); err != nil {
+		return e, err
+	}
+	e.Version = ver
+	return e, nil
+}
+
+// SwitchVersion 把已安装的 bundle 应用切换到指定版本（历史版本回滚的入口）：
+// 版本地址取目录 versions 表；本地已有该版本文件则直接复用（离线可回滚），否则下载。
+// **保留现有授权不变**（区别于 Install 的整组覆盖）；仅 bundle 形态支持——
+// web/schema 等形态的"版本"就是条目本身，没有历史快照可切。
+func SwitchVersion(db *store.DB, id, version string) (Entry, error) {
+	e, err := Find(id)
+	if err != nil {
+		return e, err
+	}
+	if cur, ok := db.AppByID(e.ID); ok && (cur.Builtin || cur.Locked) {
+		return e, ErrProtected
+	}
+	if _, ok := db.AppByID(e.ID); !ok {
+		return e, ErrNotInstalled
+	}
+	if e.Type != "bundle" {
+		return e, ErrNotBundle
+	}
+	if !safeNameRe.MatchString(version) {
+		return e, ErrBadVersion
+	}
+	url := ""
+	if version == e.Version {
+		url = bundleURL(e)
+	} else {
+		for _, v := range e.Versions {
+			if v.Version == version {
+				url = v.URL
+				break
+			}
+		}
+	}
+	if url == "" && !bundleFileExists(e.ID, version) {
+		return e, ErrVersionNotFound
+	}
+	roles := appRoles(db, e.ID) // 现有授权原样带回（installEntry 校验后整组写回）
+	if err := installEntry(db, e, roles, version, url); err != nil {
+		return e, err
+	}
+	e.Version = version
+	return e, nil
+}
+
+// installEntry 安装内核（Install/SwitchVersion 共用）：按目标版本下载组件（bundle）、
+// 角色校验过滤、UpsertApp 落库（version 标记目标版本）+ 整组写授权。
+func installEntry(db *store.DB, e Entry, roles []string, version, bundleAddr string) error {
 	if e.Type == "bundle" {
-		if err := fetchBundle(e); err != nil {
-			return e, fmt.Errorf("组件下载失败: %w", err)
+		if err := fetchBundle(e.ID, version, bundleAddr); err != nil {
+			return fmt.Errorf("组件下载失败: %w", err)
 		}
 	}
 	valid, err := db.ListRoles()
 	if err != nil {
-		return e, err
+		return err
 	}
 	vm := make(map[string]bool, len(valid))
 	for _, r := range valid {
@@ -530,15 +723,29 @@ func Install(db *store.DB, id string, roles []string) (Entry, error) {
 	}
 	if err := db.UpsertApp(store.AppDef{
 		ID: e.ID, Name: e.Name, Icon: e.Icon, Category: e.Category,
-		Config: e.Config, Version: e.Version, Source: SourceMarket,
+		Config: e.Config, Version: version, Source: SourceMarket,
 		Width: e.Width, Height: e.Height,
 	}); err != nil {
-		return e, err
+		return err
 	}
-	if err := db.SetAppRoles(e.ID, granted); err != nil {
-		return e, err
+	return db.SetAppRoles(e.ID, granted)
+}
+
+// appRoles 查应用当前已授权角色（RoleAccessMap 按角色聚合，倒排回来），
+// 自动升级/版本切换用它保持授权不变。
+func appRoles(db *store.DB, appID string) []string {
+	m, err := db.RoleAccessMap()
+	if err != nil {
+		return nil
 	}
-	return e, nil
+	var out []string
+	for role, ids := range m {
+		if contains(ids, appID) {
+			out = append(out, role)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func contains(xs []string, s string) bool {
@@ -552,9 +759,10 @@ func contains(xs []string, s string) bool {
 
 // ---- bundle 组件文件管理 ----
 //
-// 安装时从目录声明的 https 地址下载到 <data>/market/bundles/<id>-<version>.js，
-// 运行期由服务端本地提供（GET /api/market/bundle/{id}，按角色授权校验）——
-// 代码只在管理员安装的那一刻取一次远端，之后版本固定、不再依赖外部源。
+// 安装/切换版本时从目录声明的 https 地址下载到 <data>/market/bundles/<id>-<version>.js
+// （本地已有同名版本文件则复用——版本号即内容不可变），运行期由服务端本地提供
+// （GET /api/market/bundle/{id}，按角色授权校验）。升级换代**保留**历史版本文件
+// （按版本回滚的本地根基），卸载经 RemoveBundles 全清。
 
 var (
 	bundleDirOnce sync.Once
@@ -585,13 +793,21 @@ func bundleURL(e Entry) string {
 	return cfg.URL
 }
 
-// fetchBundle 下载组件文件并原子落盘（限 2MB / 15s，与目录清单同一套限额），
-// 成功后清理同 id 的旧版本文件（升级即换代，不留孤儿）。
-func fetchBundle(e Entry) error {
+// fetchBundle 下载指定版本的组件文件并原子落盘（限 2MB / 15s，与目录清单同一套限额）。
+// **本地已有同名版本文件则直接复用不再下载**：版本号即内容不可变（与运行期
+// /api/market/bundle 的版本化长缓存语义一致），离线也能切换/回滚到曾装过的版本。
+// 旧版本文件不再清理（升级换代保留历史文件，作为按版本回滚的本地根基；
+// 卸载时经 RemoveBundles 全清）。
+func fetchBundle(id, version, addr string) error {
 	if bundleDir == "" {
 		return fmt.Errorf("bundle 目录未初始化")
 	}
-	resp, err := marketGet(bundleURL(e))
+	dst := bundleFile(id, version)
+	if _, err := os.Stat(dst); err == nil {
+		log.Printf("market: bundle %s@%s 复用本地文件", id, version)
+		return nil
+	}
+	resp, err := marketGet(addr)
 	if err != nil {
 		return err
 	}
@@ -609,7 +825,6 @@ func fetchBundle(e Entry) error {
 	if len(raw) >= 2<<20 {
 		return fmt.Errorf("组件文件超过 2MB 限制")
 	}
-	dst := bundleFile(e.ID, e.Version)
 	tmp := dst + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
 		return err
@@ -618,16 +833,32 @@ func fetchBundle(e Entry) error {
 		os.Remove(tmp)
 		return err
 	}
-	// 清理旧版本文件（忽略错误：残留文件不影响正确性，只占磁盘）
-	if matches, _ := filepath.Glob(filepath.Join(bundleDir, e.ID+"-*.js")); len(matches) > 0 {
-		for _, m := range matches {
-			if m != dst {
-				os.Remove(m)
-			}
+	log.Printf("market: bundle %s@%s 已落盘（%d 字节）", id, version, len(raw))
+	return nil
+}
+
+// bundleFileExists 本地是否已有该版本的组件文件。
+func bundleFileExists(id, version string) bool {
+	_, err := os.Stat(bundleFile(id, version))
+	return err == nil
+}
+
+// localBundleVersions 扫描本地已落盘的该 id 全部版本号（文件名 <id>-<version>.js）。
+func localBundleVersions(id string) []string {
+	if bundleDir == "" || !safeNameRe.MatchString(id) {
+		return nil
+	}
+	matches, _ := filepath.Glob(filepath.Join(bundleDir, id+"-*.js"))
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		base := strings.TrimSuffix(filepath.Base(m), ".js")
+		v := strings.TrimPrefix(base, id+"-")
+		if v != "" && safeNameRe.MatchString(v) {
+			out = append(out, v)
 		}
 	}
-	log.Printf("market: bundle %s@%s 已落盘（%d 字节）", e.ID, e.Version, len(raw))
-	return nil
+	sort.Sort(sort.Reverse(sort.StringSlice(out)))
+	return out
 }
 
 // ErrNoBundle 应用非 bundle 形态或组件文件缺失。

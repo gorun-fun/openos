@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"openos/server/internal/store"
@@ -362,127 +363,360 @@ func TestRefreshNowMultiSource(t *testing.T) {
 	}
 }
 
-// TestBundleValidate bundle 形态静态校验：地址强制 https、id/version 限安全字符（拼文件名）。
+// TestBundleValidate bundle 形态静态校验：地址强制 https、id/version 限安全字符（拼文件名）；
+// versions 历史版本表同套防线（安全字符/https/去重）。
 func TestBundleValidate(t *testing.T) {
- mk := func(id, ver, rawURL string) Entry {
-  return Entry{ID: id, Name: "组件应用", Type: "bundle", Version: ver,
-   Config: []byte(fmt.Sprintf(`{"kind":"bundle","url":%q}`, rawURL))}
- }
- if err := mk("chat", "1.0.0", "https://example.com/chat.js").validate(); err != nil {
-  t.Errorf("合法 bundle 条目不应报错: %v", err)
- }
- if err := mk("chat", "1.0.0", "http://example.com/chat.js").validate(); err == nil {
-  t.Error("http 地址的 bundle 条目应被拒（可执行代码强制 https）")
- }
- if err := mk("chat", "", "https://example.com/chat.js").validate(); err == nil {
-  t.Error("缺少 version 应被拒")
- }
- if err := mk("../evil", "1.0.0", "https://example.com/chat.js").validate(); err == nil {
-  t.Error("id 含路径穿越字符应被拒")
- }
- if err := mk("chat", "a/b", "https://example.com/chat.js").validate(); err == nil {
-  t.Error("version 含路径穿越字符应被拒")
- }
+	mk := func(id, ver, rawURL string) Entry {
+		return Entry{ID: id, Name: "组件应用", Type: "bundle", Version: ver,
+			Config: []byte(fmt.Sprintf(`{"kind":"bundle","url":%q}`, rawURL))}
+	}
+	if err := mk("chat", "1.0.0", "https://example.com/chat.js").validate(); err != nil {
+		t.Errorf("合法 bundle 条目不应报错: %v", err)
+	}
+	if err := mk("chat", "1.0.0", "http://example.com/chat.js").validate(); err == nil {
+		t.Error("http 地址的 bundle 条目应被拒（可执行代码强制 https）")
+	}
+	if err := mk("chat", "", "https://example.com/chat.js").validate(); err == nil {
+		t.Error("缺少 version 应被拒")
+	}
+	if err := mk("../evil", "1.0.0", "https://example.com/chat.js").validate(); err == nil {
+		t.Error("id 含路径穿越字符应被拒")
+	}
+	if err := mk("chat", "a/b", "https://example.com/chat.js").validate(); err == nil {
+		t.Error("version 含路径穿越字符应被拒")
+	}
+	// versions 历史版本表
+	ok := mk("chat", "1.0.0", "https://example.com/chat.js")
+	ok.Versions = []EntryVersion{{Version: "0.9.0", URL: "https://example.com/chat-0.9.0.js"}}
+	if err := ok.validate(); err != nil {
+		t.Errorf("合法 versions 不应报错: %v", err)
+	}
+	badChars := ok
+	badChars.Versions = []EntryVersion{{Version: "a/b", URL: "https://example.com/x.js"}}
+	if err := badChars.validate(); err == nil {
+		t.Error("历史版本号含穿越字符应被拒")
+	}
+	badURL := ok
+	badURL.Versions = []EntryVersion{{Version: "0.9.0", URL: "http://example.com/x.js"}}
+	if err := badURL.validate(); err == nil {
+		t.Error("历史版本 http 地址应被拒")
+	}
+	dup := ok
+	dup.Versions = []EntryVersion{{Version: "0.9.0", URL: "https://example.com/a.js"}, {Version: "0.9.0", URL: "https://example.com/b.js"}}
+	if err := dup.validate(); err == nil {
+		t.Error("历史版本重复应被拒")
+	}
 }
 
 // TestBundleInstallLifecycle bundle 安装全链路（httptest 真实 HTTP）：下载落盘 →
 // BundlePath 按已装版本解析 → 升级换代清理旧文件 → RemoveBundles 清理 → 下载失败不入库。
 func TestBundleInstallLifecycle(t *testing.T) {
- dir := t.TempDir()
- db, err := store.Open(dir)
- if err != nil {
-  t.Fatalf("Open: %v", err)
- }
- defer db.Close()
+	dir := t.TempDir()
+	db, err := store.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
 
- const body = "export default { template: '<div>hi</div>' }\n"
- var hits int
- srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-  hits++
-  if strings.HasSuffix(r.URL.Path, "broken.js") {
-   http.Error(w, "boom", 500)
-   return
-  }
-  fmt.Fprint(w, body)
- }))
- defer srv.Close()
+	const body = "export default { template: '<div>hi</div>' }\n"
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if strings.HasSuffix(r.URL.Path, "broken.js") {
+			http.Error(w, "boom", 500)
+			return
+		}
+		fmt.Fprint(w, body)
+	}))
+	defer srv.Close()
 
- SetBundleDir(filepath.Join(t.TempDir(), "bundles"))
+	resetBundleDir(t, filepath.Join(t.TempDir(), "bundles"))
 
- // bundle 下载走拨号防线（marketGet）：把测试服务主机登记为配置源，否则回环
- // 地址会被 SSRF 防线拒绝（生产自定义源已强制 https，回环例外仅限本地）
- mu.Lock()
- prevSrcs := customSrcs
- customSrcs = append([]string{srv.URL}, customSrcs...)
- mu.Unlock()
- t.Cleanup(func() { mu.Lock(); customSrcs = prevSrcs; mu.Unlock() })
+	// bundle 下载走拨号防线（marketGet）：把测试服务主机登记为配置源，否则回环
+	// 地址会被 SSRF 防线拒绝（生产自定义源已强制 https，回环例外仅限本地）
+	mu.Lock()
+	prevSrcs := customSrcs
+	customSrcs = append([]string{srv.URL}, customSrcs...)
+	mu.Unlock()
+	t.Cleanup(func() { mu.Lock(); customSrcs = prevSrcs; mu.Unlock() })
 
 	entry := Entry{ID: "demo-bundle", Name: "演示组件", Type: "bundle", Version: "1.0.0",
 		Config: []byte(fmt.Sprintf(`{"kind":"bundle","url":%q}`, srv.URL+"/demo.js"))}
 	broken := Entry{ID: "broken-bundle", Name: "坏源组件", Type: "bundle", Version: "1.0.0",
 		Config: []byte(fmt.Sprintf(`{"kind":"bundle","url":%q}`, srv.URL+"/broken.js"))}
- mu.Lock()
- prev := active
- active = []Entry{entry, broken}
- mu.Unlock()
- t.Cleanup(func() { mu.Lock(); active = prev; mu.Unlock() })
+	mu.Lock()
+	prev := active
+	active = []Entry{entry, broken}
+	mu.Unlock()
+	t.Cleanup(func() { mu.Lock(); active = prev; mu.Unlock() })
 
- // 1) 下载失败：Install 报错且不入库（不产生装了跑不起来的应用）
- if _, err := Install(db, "broken-bundle", nil); err == nil {
-  t.Fatal("下载失败应导致安装失败")
- }
- if _, ok := db.AppByID("broken-bundle"); ok {
-  t.Error("下载失败的应用不应入库")
- }
+	// 1) 下载失败：Install 报错且不入库（不产生装了跑不起来的应用）
+	if _, err := Install(db, "broken-bundle", nil); err == nil {
+		t.Fatal("下载失败应导致安装失败")
+	}
+	if _, ok := db.AppByID("broken-bundle"); ok {
+		t.Error("下载失败的应用不应入库")
+	}
 
- // 2) 正常安装：入库 + 文件落盘 + BundlePath 可解析
- if _, err := Install(db, "demo-bundle", []string{"user"}); err != nil {
-  t.Fatalf("Install: %v", err)
- }
- cur, ok := db.AppByID("demo-bundle")
- if !ok {
-  t.Fatal("安装后未入库")
- }
- p, err := BundlePath(cur)
- if err != nil {
-  t.Fatalf("BundlePath: %v", err)
- }
- raw, err := os.ReadFile(p)
- if err != nil || string(raw) != body {
-  t.Errorf("落盘内容不一致: %v", err)
- }
+	// 2) 正常安装：入库 + 文件落盘 + BundlePath 可解析
+	if _, err := Install(db, "demo-bundle", []string{"user"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	cur, ok := db.AppByID("demo-bundle")
+	if !ok {
+		t.Fatal("安装后未入库")
+	}
+	p, err := BundlePath(cur)
+	if err != nil {
+		t.Fatalf("BundlePath: %v", err)
+	}
+	raw, err := os.ReadFile(p)
+	if err != nil || string(raw) != body {
+		t.Errorf("落盘内容不一致: %v", err)
+	}
 
- // 3) 非 bundle 应用 / 非 market 来源 → BundlePath 拒绝
- if _, err := BundlePath(store.AppDef{ID: "demo-bundle", Version: "1.0.0", Source: SourceMarket, Config: []byte(`{"kind":"web","url":"https://x/"}`)}); err != ErrNoBundle {
-  t.Errorf("web 形态应返回 ErrNoBundle: %v", err)
- }
- if _, err := BundlePath(store.AppDef{ID: "demo-bundle", Version: "1.0.0", Config: entry.Config}); err != ErrNoBundle {
-  t.Errorf("非 market 来源应返回 ErrNoBundle: %v", err)
- }
+	// 3) 非 bundle 应用 / 非 market 来源 → BundlePath 拒绝
+	if _, err := BundlePath(store.AppDef{ID: "demo-bundle", Version: "1.0.0", Source: SourceMarket, Config: []byte(`{"kind":"web","url":"https://x/"}`)}); err != ErrNoBundle {
+		t.Errorf("web 形态应返回 ErrNoBundle: %v", err)
+	}
+	if _, err := BundlePath(store.AppDef{ID: "demo-bundle", Version: "1.0.0", Config: entry.Config}); err != ErrNoBundle {
+		t.Errorf("非 market 来源应返回 ErrNoBundle: %v", err)
+	}
 
-	// 4) 升级换代：目录版本更新重装 → 新文件落盘、旧文件清理
+	// 4) 升级换代：目录版本更新重装 → 新文件落盘、**旧版本文件保留**（按版本回滚的根基）
 	up := entry
 	up.Version = "1.1.0"
 	up.Config = []byte(fmt.Sprintf(`{"kind":"bundle","url":%q}`, srv.URL+"/v2.js"))
+	up.Versions = []EntryVersion{
+		{Version: "1.1.0", URL: srv.URL + "/v2.js"},
+		{Version: "1.0.0", URL: srv.URL + "/demo.js"},
+	}
 	mu.Lock()
 	active = []Entry{up}
 	mu.Unlock()
- if _, err := Install(db, "demo-bundle", nil); err != nil {
-  t.Fatalf("升级安装: %v", err)
- }
- cur, _ = db.AppByID("demo-bundle")
- if _, err := BundlePath(cur); err != nil {
-  t.Fatalf("升级后 BundlePath: %v", err)
- }
- if _, err := os.Stat(bundleFile("demo-bundle", "1.0.0")); !os.IsNotExist(err) {
-  t.Error("旧版本文件应被清理")
- }
+	if _, err := Install(db, "demo-bundle", []string{"user"}); err != nil {
+		t.Fatalf("升级安装: %v", err)
+	}
+	cur, _ = db.AppByID("demo-bundle")
+	if cur.Version != "1.1.0" {
+		t.Fatalf("升级后版本应为 1.1.0: %s", cur.Version)
+	}
+	if _, err := BundlePath(cur); err != nil {
+		t.Fatalf("升级后 BundlePath: %v", err)
+	}
+	if _, err := os.Stat(bundleFile("demo-bundle", "1.0.0")); err != nil {
+		t.Error("旧版本文件应保留（回滚根基）")
+	}
+	if !db.RoleCanAccessApp("user", "demo-bundle") {
+		t.Error("升级时显式带角色应保持授权")
+	}
 
- // 5) 卸载清理
- RemoveBundles("demo-bundle")
- if _, err := os.Stat(bundleFile("demo-bundle", "1.1.0")); !os.IsNotExist(err) {
-  t.Error("卸载后组件文件应被清理")
- }
+	// 5) 切换回旧版本（回滚）：版本回退、授权不变、本地文件直接复用（零下载）
+	hitsBefore := hits
+	if _, err := SwitchVersion(db, "demo-bundle", "1.0.0"); err != nil {
+		t.Fatalf("SwitchVersion: %v", err)
+	}
+	cur, _ = db.AppByID("demo-bundle")
+	if cur.Version != "1.0.0" {
+		t.Errorf("切换后版本应为 1.0.0: %s", cur.Version)
+	}
+	if !db.RoleCanAccessApp("user", "demo-bundle") || !db.RoleCanAccessApp("admin", "demo-bundle") {
+		t.Error("版本切换应保留现有授权")
+	}
+	if hits != hitsBefore {
+		t.Errorf("本地已有该版本文件应复用不再下载: hits %d → %d", hitsBefore, hits)
+	}
+	if p, err := BundlePath(cur); err != nil {
+		t.Fatalf("回滚后 BundlePath: %v", err)
+	} else if raw, _ := os.ReadFile(p); string(raw) != body {
+		t.Error("回滚后组件内容应为旧版本")
+	}
+
+	// 6) 卸载清理（含全部历史版本文件）
+	RemoveBundles("demo-bundle")
+	if _, err := os.Stat(bundleFile("demo-bundle", "1.1.0")); !os.IsNotExist(err) {
+		t.Error("卸载后组件文件应被清理")
+	}
+	if _, err := os.Stat(bundleFile("demo-bundle", "1.0.0")); !os.IsNotExist(err) {
+		t.Error("卸载后历史版本文件应一并清理")
+	}
+}
+
+// resetBundleDir 测试助手：SetBundleDir 的 sync.Once 全局只生效一次，跨测试重置
+// bundleDir（前一个测试的临时目录随测试结束已被清理）。
+func resetBundleDir(t *testing.T, dir string) {
+	t.Helper()
+	bundleDirOnce = sync.Once{}
+	bundleDir = ""
+	SetBundleDir(dir)
+}
+
+// TestSwitchVersion 按版本切换的边界：未安装/非 bundle/未知版本/非法版本号报错；
+// 目录 versions 表未列但本地有文件的版本仍可切换（货架清过历史也能离线回滚）。
+func TestSwitchVersion(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	const v1Body, v2Body = "export default { template: '<div>v1</div>' }\n", "export default { template: '<div>v2</div>' }\n"
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if strings.HasSuffix(r.URL.Path, "/v1.js") {
+			fmt.Fprint(w, v1Body)
+			return
+		}
+		fmt.Fprint(w, v2Body)
+	}))
+	defer srv.Close()
+	resetBundleDir(t, filepath.Join(t.TempDir(), "bundles"))
+	mu.Lock()
+	prevSrcs := customSrcs
+	customSrcs = append([]string{srv.URL}, customSrcs...)
+	prev := active
+	active = []Entry{{
+		ID: "sw-app", Name: "切换演示", Type: "bundle", Version: "2.0.0",
+		Config:   []byte(fmt.Sprintf(`{"kind":"bundle","url":%q}`, srv.URL+"/v2.js")),
+		Versions: []EntryVersion{{Version: "2.0.0", URL: srv.URL + "/v2.js"}, {Version: "1.0.0", URL: srv.URL + "/v1.js"}},
+	}}
+	mu.Unlock()
+	t.Cleanup(func() {
+		mu.Lock()
+		customSrcs = prevSrcs
+		active = prev
+		mu.Unlock()
+	})
+
+	// 未安装 → ErrNotInstalled
+	if _, err := SwitchVersion(db, "sw-app", "1.0.0"); err != ErrNotInstalled {
+		t.Fatalf("未安装应报 ErrNotInstalled: %v", err)
+	}
+	// 安装最新版（下载 v2）
+	if _, err := Install(db, "sw-app", []string{"user"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	// 未知版本 / 非法版本号
+	if _, err := SwitchVersion(db, "sw-app", "9.9.9"); err != ErrVersionNotFound {
+		t.Fatalf("未知版本应报 ErrVersionNotFound: %v", err)
+	}
+	if _, err := SwitchVersion(db, "sw-app", "../evil"); err != ErrBadVersion {
+		t.Fatalf("非法版本号应报 ErrBadVersion: %v", err)
+	}
+	// 切到目录声明的历史版本：从货架下载 v1、授权保持
+	if _, err := SwitchVersion(db, "sw-app", "1.0.0"); err != nil {
+		t.Fatalf("SwitchVersion: %v", err)
+	}
+	cur, _ := db.AppByID("sw-app")
+	if cur.Version != "1.0.0" || !db.RoleCanAccessApp("user", "sw-app") {
+		t.Errorf("切换后版本/授权错误: v=%s user=%v", cur.Version, db.RoleCanAccessApp("user", "sw-app"))
+	}
+	// 目录清掉 1.0.0 历史（货架回收）→ 本地文件仍在，仍可切回
+	mu.Lock()
+	e := active[0]
+	e.Versions = []EntryVersion{{Version: "2.0.0", URL: srv.URL + "/v2.js"}}
+	active[0] = e
+	mu.Unlock()
+	if _, err := SwitchVersion(db, "sw-app", "1.0.0"); err != nil {
+		t.Fatalf("本地已有文件的版本应可离线切换: %v", err)
+	}
+	// 目录与本地都没有 → ErrVersionNotFound
+	if _, err := SwitchVersion(db, "sw-app", "0.5.0"); err != ErrVersionNotFound {
+		t.Fatalf("目录与本地均无应报 ErrVersionNotFound: %v", err)
+	}
+	// 非 bundle 条目 → ErrNotBundle
+	mu.Lock()
+	active = append(active, Entry{ID: "sw-web", Name: "网页演示", Type: "web", Version: "1.0.0",
+		Config: []byte(`{"kind":"web","url":"https://example.com/"}`)})
+	mu.Unlock()
+	if _, err := Install(db, "sw-web", nil); err != nil {
+		t.Fatalf("Install web: %v", err)
+	}
+	if _, err := SwitchVersion(db, "sw-web", "1.0.0"); err != ErrNotBundle {
+		t.Fatalf("web 形态应报 ErrNotBundle: %v", err)
+	}
+}
+
+// TestAutoUpgrade 自动升级：开关默认关不动作；开启后商店安装的应用对齐目录版本
+// 并**保留授权**；目录最新版指针回退时跟随回退；非商店来源的应用不动。
+func TestAutoUpgrade(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	// 用 web 条目驱动（Install 不走网络），目录版本直接改 active 模拟货架发布/回退
+	setActive := func(ver string) {
+		mu.Lock()
+		defer mu.Unlock()
+		active = []Entry{{
+			ID: "au-app", Name: "自动升级演示", Type: "web", Version: ver,
+			Config: []byte(`{"kind":"web","url":"https://example.com/"}`),
+		}}
+	}
+	mu.Lock()
+	prev := active
+	mu.Unlock()
+	t.Cleanup(func() { mu.Lock(); active = prev; mu.Unlock() })
+
+	setActive("1.0.0")
+	if _, err := Install(db, "au-app", []string{"user"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	// 开关默认关：目录发新版也不动作
+	if AutoUpgradeOn(db) {
+		t.Fatal("自动升级默认应为关")
+	}
+	setActive("2.0.0")
+	if got := AutoUpgrade(db); got != nil {
+		t.Errorf("开关关闭时不应有变更: %+v", got)
+	}
+	if cur, _ := db.AppByID("au-app"); cur.Version != "1.0.0" {
+		t.Errorf("开关关闭时版本不应变化: %s", cur.Version)
+	}
+
+	// 开启 → 对齐目录版本、授权保留（user 不掉）
+	if err := SetAutoUpgrade(db, true); err != nil {
+		t.Fatalf("SetAutoUpgrade: %v", err)
+	}
+	got := AutoUpgrade(db)
+	if len(got) != 1 || got[0].ID != "au-app" || got[0].Version != "2.0.0" {
+		t.Fatalf("自动升级结果错误: %+v", got)
+	}
+	cur, _ := db.AppByID("au-app")
+	if cur.Version != "2.0.0" || !db.RoleCanAccessApp("user", "au-app") {
+		t.Errorf("升级后版本/授权错误: v=%s user=%v", cur.Version, db.RoleCanAccessApp("user", "au-app"))
+	}
+	// 版本已一致 → 幂等空转
+	if got := AutoUpgrade(db); got != nil {
+		t.Errorf("版本一致时不应有变更: %+v", got)
+	}
+
+	// 目录指针回退（货架全局回滚）→ 跟随回退
+	setActive("1.0.0")
+	got = AutoUpgrade(db)
+	if len(got) != 1 || got[0].Version != "1.0.0" {
+		t.Fatalf("目录回退应跟随回退: %+v", got)
+	}
+	if cur, _ = db.AppByID("au-app"); cur.Version != "1.0.0" {
+		t.Errorf("跟随回退后版本应为 1.0.0: %s", cur.Version)
+	}
+
+	// 非商店来源（管理员手工注册）不受自动升级影响
+	db.UpsertApp(store.AppDef{ID: "au-manual", Name: "手工应用", Config: []byte(`{"kind":"web","url":"https://example.com/"}`), Version: "0.1.0"})
+	mu.Lock()
+	active = append(active, Entry{ID: "au-manual", Name: "手工应用", Type: "web", Version: "9.9.9",
+		Config: []byte(`{"kind":"web","url":"https://example.com/"}`)})
+	mu.Unlock()
+	AutoUpgrade(db)
+	if cur, ok := db.AppByID("au-manual"); !ok || cur.Version != "0.1.0" {
+		t.Errorf("非商店来源不应被自动升级: %+v", cur)
+	}
 }
 
 func findState(states []State, id string) *State {

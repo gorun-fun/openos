@@ -10,7 +10,30 @@
 - `catalog.json` — 货架清单（与内置目录同步维护）
 - `bundles/` — bundle 形态应用的组件文件，**按版本命名**（`<id>-<version>.js`），
   与 catalog 条目 `config.url` 一一对应；升级 = 上传新版本文件 + 改条目 version 与 url
+  （**旧版本文件保留不删**——它们是按版本回滚的取件来源，catalog 的 versions 表也引用它们）
 - `icons/` — 应用图标（catalog 条目的 icon 地址）
+
+## 历史版本表（按版本回滚）
+
+bundle 条目可声明 `versions` 历史版本表（新到旧，`versions[0]` 与顶层
+`version`/`config.url` 保持一致），供商店「版本切换/回滚」取件：
+
+```jsonc
+{
+  "id": "chat",
+  "type": "bundle",
+  "version": "1.3.0",
+  "config": { "kind": "bundle", "url": "https://…/bundles/chat-1.3.0.js" },
+  "versions": [
+    { "version": "1.3.0", "url": "https://…/bundles/chat-1.3.0.js" },
+    { "version": "1.2.0", "url": "https://…/bundles/chat-1.2.0.js" }
+  ]
+}
+```
+
+版本号限 `[A-Za-z0-9._-]`、地址强制 https；旧版本服务端忽略该字段不受影响。
+全局回滚也可以不动 versions：直接把顶层 `version`/`config.url` 指回旧版本文件，
+开了「自动升级」的服务端会随目录指针一起回退。
 
 ## bundle 形态约定（商店组件应用档）
 

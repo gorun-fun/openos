@@ -901,6 +901,14 @@ func main() {
 				market.SetCustomSources(urls)
 			}
 		}
+		// 自动升级回调（必须在 StartRemote 之前注册：其 goroutine 启动即 RefreshNow）：
+		// 刷新尾部把商店安装的应用对齐到目录版本（保留授权），变更走审计 + sys:apps-changed
+		market.SetAutoUpgrader(func() {
+			for _, u := range market.AutoUpgrade(db) {
+				db.Audit("system", "market.auto_upgrade", u.ID+"@"+u.Version, "")
+				hub.Publish("sys:apps-changed", map[string]any{"id": u.ID})
+			}
+		})
 		market.StartRemote(marketDefault)
 		// 目录源管理（admin）：GET 查看默认/自定义源；PUT 全量覆盖自定义源并立即拉取
 		authed.HandleFunc("GET /api/market/sources", func(w http.ResponseWriter, r *http.Request) {
@@ -948,6 +956,35 @@ func main() {
 			okN, total := market.RefreshNow()
 			writeJSON(w, map[string]any{"sourcesOk": okN, "entries": total})
 		})
+		authed.HandleFunc("GET /api/market/autoupgrade", func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, map[string]bool{"on": market.AutoUpgradeOn(db)})
+		})
+		// 自动升级开关（market.manage）：开启后每次目录刷新（10 分钟周期/手动刷新/源保存）
+		// 把商店安装的应用自动对齐到目录版本并保留授权。开启即刷新一次立刻生效。
+		authed.HandleFunc("PUT /api/market/autoupgrade", func(w http.ResponseWriter, r *http.Request) {
+			id := auth.FromContext(r)
+			if !id.Can("market.manage") {
+				http.Error(w, "需要权限：market.manage", http.StatusForbidden)
+				return
+			}
+			var req struct {
+				On bool `json:"on"`
+			}
+			if json.NewDecoder(r.Body).Decode(&req) != nil {
+				http.Error(w, "参数错误", 400)
+				return
+			}
+			if err := market.SetAutoUpgrade(db, req.On); err != nil {
+				http.Error(w, "保存失败", 500)
+				return
+			}
+			db.Audit(id.Username, "market.autoupgrade", map[bool]string{true: "开启", false: "关闭"}[req.On], "")
+			okN, total := 0, len(market.Catalog())
+			if req.On {
+				okN, total = market.RefreshNow() // 刷新尾部自动执行一轮升级
+			}
+			writeJSON(w, map[string]any{"ok": "1", "on": req.On, "sourcesOk": okN, "entries": total})
+		})
 		authed.HandleFunc("GET /api/market/apps", func(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, market.List(db))
 		})
@@ -958,20 +995,43 @@ func main() {
 				return
 			}
 			var req struct {
-				ID    string   `json:"id"`
-				Roles []string `json:"roles"`
+				ID      string   `json:"id"`
+				Roles   []string `json:"roles"`
+				Version string   `json:"version"` // 指定历史版本 = 切换/回滚（仅 bundle，授权不变）
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" {
 				http.Error(w, "参数错误：需要 id", 400)
 				return
 			}
-			e, err := market.Install(db, req.ID, req.Roles)
+			var e market.Entry
+			var err error
+			if req.Version != "" {
+				e, err = market.SwitchVersion(db, req.ID, req.Version)
+			} else {
+				e, err = market.Install(db, req.ID, req.Roles)
+			}
 			if errors.Is(err, market.ErrNotFound) {
 				http.Error(w, "目录中不存在该应用", http.StatusNotFound)
 				return
 			}
 			if errors.Is(err, market.ErrProtected) {
 				http.Error(w, "应用 ID 与内置或宿主锁定应用冲突", http.StatusForbidden)
+				return
+			}
+			if errors.Is(err, market.ErrVersionNotFound) {
+				http.Error(w, "目录与本地均没有该版本", 400)
+				return
+			}
+			if errors.Is(err, market.ErrNotBundle) {
+				http.Error(w, "仅 bundle 应用支持按版本切换", 400)
+				return
+			}
+			if errors.Is(err, market.ErrNotInstalled) {
+				http.Error(w, "应用未安装，无法切换版本", 400)
+				return
+			}
+			if errors.Is(err, market.ErrBadVersion) {
+				http.Error(w, "非法版本号", 400)
 				return
 			}
 			if err != nil {

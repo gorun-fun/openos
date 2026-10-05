@@ -30,6 +30,7 @@ interface MarketState {
   managed: boolean
   conflict?: boolean
   protected?: boolean
+  versions?: string[] // 可切换版本（bundle 专属）：目录历史版本 + 本地已落盘版本
 }
 
 const session = useSession()
@@ -85,7 +86,7 @@ async function loadRoles() {
     roleLabels.value = d.labels || {}
   } catch { /* 忽略：安装时无角色信息则只授 admin */ }
 }
-onMounted(() => { load(); loadRoles() })
+onMounted(() => { load(); loadRoles(); loadAutoUpgrade() })
 
 const categories = computed(() => {
   const out: string[] = []
@@ -153,6 +154,30 @@ function openApp(s: MarketState) {
   else toast('当前角色未获授权，请联系管理员', { type: 'error' })
 }
 
+// ---- 版本切换（回滚，仅 bundle 且已安装）：POST install 带 version，服务端保留授权、
+//      本地已有该版本组件文件则直接复用（离线可回滚） ----
+async function switchVersion(s: MarketState, v: string) {
+  const warn = autoUp.value && v !== s.version
+    ? '\n注意：自动升级已开启，下次目录刷新会自动升回最新版；如需保持旧版请先在商店设置关闭自动升级。'
+    : ''
+  if (!(await osConfirm({
+    title: '切换版本',
+    body: `将「${s.name}」从 v${s.installedVersion || '—'} 切换到 v${v}，授权保持不变。${warn}`,
+    confirmText: '切换',
+  }))) return
+  busy.value = true
+  try {
+    await api.post('/api/market/install', { id: s.id, version: v })
+    toast(`${s.name} 已切换到 v${v}`, { type: 'success' })
+    await Promise.all([load(), apps.refresh()])
+    detail.value = states.value.find((x) => x.id === s.id) || null
+  } catch (e: any) {
+    toast(e.message, { type: 'error' })
+  } finally {
+    busy.value = false
+  }
+}
+
 // ---- 商店设置：目录源管理（admin）——默认官方源不可删，自定义源可添加多个，
 //      排在前面可遮蔽官方同 id 条目；保存后服务端立即拉取全部源合并生效 ----
 const settingsOpen = ref(false)
@@ -160,6 +185,31 @@ const srcDefault = ref('')
 const srcCustom = ref<string[]>([])
 const srcInput = ref('')
 const srcMsg = ref('')
+
+// 自动升级开关（admin，全局）：目录每次刷新（10 分钟周期/手动/保存源）后，
+// 商店安装的应用自动对齐目录版本并保留授权；关闭则仅手动更新
+const autoUp = ref(false)
+const autoUpBusy = ref(false)
+
+async function loadAutoUpgrade() {
+  try {
+    const d = await api.get<{ on: boolean }>('/api/market/autoupgrade')
+    autoUp.value = d.on
+  } catch { /* 忽略：开关状态拉取失败按默认关展示 */ }
+}
+async function saveAutoUpgrade() {
+  autoUpBusy.value = true
+  try {
+    await api.put('/api/market/autoupgrade', { on: autoUp.value })
+    toast(autoUp.value ? '自动升级已开启' : '自动升级已关闭', { type: 'success' })
+    if (autoUp.value) await load() // 开启即触发一轮刷新+升级，重读货架反映新版本
+  } catch (e: any) {
+    toast(e.message, { type: 'error' })
+    await loadAutoUpgrade()
+  } finally {
+    autoUpBusy.value = false
+  }
+}
 
 async function openSettings() {
   detail.value = null
@@ -246,8 +296,20 @@ const icoGear = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fil
       </div>
     </div>
 
-    <!-- 商店设置：目录源管理（admin） -->
+    <!-- 商店设置：自动升级 + 目录源管理（admin） -->
     <div v-else-if="settingsOpen" class="body detail">
+      <div class="d-sec">
+        <h4>自动升级</h4>
+        <p class="s-desc">
+          开启后，每次目录刷新（每 10 分钟自动 + 手动刷新/保存目录源）会把商店安装的应用自动升级到目录版本并保留原授权；
+          目录最新版被货架回退时也会跟随回退。关闭后仅在手动点击「更新」时升级。
+          新版本有问题时可先关闭本开关，再到应用详情切换回历史版本。
+        </p>
+        <label class="au-row">
+          <input type="checkbox" v-model="autoUp" :disabled="autoUpBusy" @change="saveAutoUpgrade" />
+          <span>目录刷新时自动升级已安装应用</span>
+        </label>
+      </div>
       <div class="d-sec">
         <h4>目录源</h4>
         <p class="s-desc">
@@ -294,6 +356,18 @@ const icoGear = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fil
         </div>
       </div>
       <p class="d-desc">{{ detail.description }}</p>
+      <div v-if="isAdmin && detail.installed && detail.managed && detail.versions?.length" class="d-sec">
+        <h4>版本切换（回滚）</h4>
+        <p class="s-desc">切换到指定历史版本：授权保持不变，本地已有该版本文件时离线可切。当前 v{{ detail.installedVersion }}。</p>
+        <div class="vers">
+          <div v-for="v in detail.versions" :key="v" class="ver" :class="{ cur: v === detail.installedVersion }">
+            <span class="v-num">v{{ v }}</span>
+            <span v-if="v === detail.version" class="v-tag">最新</span>
+            <span v-if="v === detail.installedVersion" class="v-tag now">当前</span>
+            <button v-if="v !== detail.installedVersion" class="ghost v-btn" :disabled="busy" @click="switchVersion(detail, v)">切换</button>
+          </div>
+        </div>
+      </div>
       <div v-if="detail.perms?.length" class="d-sec">
         <h4>权限说明</h4>
         <ul><li v-for="(p, i) in detail.perms" :key="i">{{ p }}</li></ul>
@@ -411,6 +485,12 @@ html.dark .d-warn { background: rgba(255, 159, 10, .16); color: #ffb340; }
 
 /* 商店设置：目录源 */
 .s-desc { margin: 0 0 12px; font-size: 12.5px; line-height: 1.7; color: var(--os-text-secondary); }
+.au-row {
+  display: flex; align-items: center; gap: 8px; font-size: 12.5px; cursor: pointer;
+  padding: 8px 12px; border-radius: 8px; background: rgba(125, 125, 125, .1); color: var(--os-text, #222);
+}
+.au-row:hover { background: rgba(125, 125, 125, .18); }
+.au-row input { accent-color: var(--os-accent); }
 .src-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; background: rgba(125, 125, 125, .1); margin-bottom: 6px; }
 .src-badge {
   flex: none; font-size: 10.5px; padding: 2px 8px; border-radius: 8px;
@@ -427,4 +507,19 @@ html.dark .d-warn { background: rgba(255, 159, 10, .16); color: #ffb340; }
 .src-add input:focus { border-color: var(--os-accent); }
 .src-add .ghost { padding: 5px 14px; }
 .s-msg { margin-top: 8px; font-size: 12px; color: #e0343c; }
+
+/* 版本切换（回滚） */
+.vers { display: flex; flex-direction: column; gap: 6px; }
+.ver {
+  display: flex; align-items: center; gap: 8px; padding: 7px 12px; border-radius: 8px;
+  background: rgba(125, 125, 125, .1);
+}
+.ver.cur { background: rgba(52, 168, 83, .12); }
+.v-num { font-size: 12.5px; font-weight: 600; color: var(--os-text, #222); }
+.v-tag {
+  font-size: 10.5px; padding: 1px 8px; border-radius: 8px; flex: none;
+  background: var(--os-accent); color: #fff;
+}
+.v-tag.now { background: #34a853; }
+.v-btn { margin-left: auto; padding: 4px 14px; font-size: 11.5px; }
 </style>
