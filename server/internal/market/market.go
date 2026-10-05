@@ -440,15 +440,23 @@ func fetchRemote(u string) ([]Entry, error) {
 	return parseCatalog(raw)
 }
 
-// ---- 自动升级（商店全局开关，system_kv 持久化，默认关） ----
+// ---- 自动升级（商店全局开关，system_kv 持久化，**默认开**） ----
 //
 // 每次 RefreshNow 尾部执行：本机商店安装（source=market）的应用与目录版本
 // 不一致即自动重装到目录版本，**保留现有授权**。目录最新版指针被货架回退时
-// 也会跟随回退——货架本身就是全局回滚杠杆。手动切到旧版本（SwitchVersion）
-// 后若开关仍开，下次刷新同样会被拉回目录版本（前端切换确认框会提示）。
+// 也会跟随回退——货架本身就是全局回滚杠杆。
+//
+// 跳过问题版本：管理员手动切换到旧版本（SwitchVersion）= 明确避开当时的目录
+// 最新版（KVSkipVersions 记下该版本）。自动升级发现目录版本 == 被避开版本时
+// 跳过该应用，直到目录出现不同的（更新的）版本才恢复自动升级并清除记录；
+// 手动点「更新」或切回最新版同样清除。
 
-// KVAutoUpgrade 自动升级开关的 system_kv 键（"1"=开，缺省=关）。
+// KVAutoUpgrade 自动升级开关的 system_kv 键（"0"=显式关，缺省/其它=开）。
 const KVAutoUpgrade = "market_autoupgrade"
+
+// KVSkipVersions 被避开的应用版本表（system_kv，JSON {appID: 目录版本}）：
+// 手动切旧版时记录，自动升级据此跳过该版本。
+const KVSkipVersions = "market_skip_versions"
 
 // AutoUpgraded 单个应用的自动升级结果（main 注入的回调据此审计与推送）。
 type AutoUpgraded struct {
@@ -463,10 +471,11 @@ var autoUpgradeFn func()
 // SetAutoUpgrader 注册/注销自动升级回调（main 启动时注入 db 闭包）。
 func SetAutoUpgrader(fn func()) { autoUpgradeFn = fn }
 
-// AutoUpgradeOn 自动升级开关是否开启。
+// AutoUpgradeOn 自动升级开关是否开启（默认开：仅显式存 "0" 为关，
+// 未写过开关的新部署/升级部署直接生效）。
 func AutoUpgradeOn(db *store.DB) bool {
 	v, _ := db.GetSystemKV(KVAutoUpgrade)
-	return v == "1"
+	return v != "0"
 }
 
 // SetAutoUpgrade 开关持久化（PUT /api/market/autoupgrade 调用）。
@@ -479,8 +488,10 @@ func SetAutoUpgrade(db *store.DB, on bool) error {
 }
 
 // AutoUpgrade 自动升级一遍：开关关时空操作；逐应用比对目录版本，不一致即重装
-// 到目录版本并保留授权。单个应用失败只记日志跳过（bundle 下载失败等），不拖垮
-// 其余应用与刷新本身。目录已下架的应用保留现状不动作。
+// 到目录版本并保留授权。目录版本 == 被避开版本（手动切旧版记录，见 KVSkipVersions）
+// 时跳过该应用——那是管理员明确避开的疑似问题版本，等目录发布不同的版本再恢复。
+// 单个应用失败只记日志跳过（bundle 下载失败等），不拖垮其余应用与刷新本身。
+// 目录已下架的应用保留现状不动作。
 func AutoUpgrade(db *store.DB) []AutoUpgraded {
 	if !AutoUpgradeOn(db) {
 		return nil
@@ -490,6 +501,7 @@ func AutoUpgrade(db *store.DB) []AutoUpgraded {
 		log.Printf("market: 自动升级读取应用列表失败: %v", err)
 		return nil
 	}
+	skips := skipVersions(db)
 	var changed []AutoUpgraded
 	for _, a := range apps {
 		if a.Source != SourceMarket {
@@ -497,6 +509,10 @@ func AutoUpgrade(db *store.DB) []AutoUpgraded {
 		}
 		e, err := Find(a.ID)
 		if err != nil || a.Version == e.Version {
+			continue
+		}
+		if skips[a.ID] == e.Version {
+			log.Printf("market: 自动升级跳过 %s@%s（管理员切换版本时避开）", a.ID, e.Version)
 			continue
 		}
 		if _, err := Install(db, a.ID, appRoles(db, a.ID)); err != nil {
@@ -507,6 +523,40 @@ func AutoUpgrade(db *store.DB) []AutoUpgraded {
 		changed = append(changed, AutoUpgraded{ID: a.ID, Version: e.Version})
 	}
 	return changed
+}
+
+// skipVersions 读被避开的版本表（{appID: 目录版本}，坏 JSON 视为空）。
+func skipVersions(db *store.DB) map[string]string {
+	raw, _ := db.GetSystemKV(KVSkipVersions)
+	m := map[string]string{}
+	if raw != "" {
+		_ = json.Unmarshal([]byte(raw), &m)
+	}
+	return m
+}
+
+// setSkipVersion 记录/清除某应用被避开的版本（ver 为空 = 清除，即恢复正常
+// 自动跟踪；写失败只记日志——skip 表是尽力而为的元数据，不影响安装主流程）。
+func setSkipVersion(db *store.DB, id, ver string) {
+	m := skipVersions(db)
+	if ver == "" {
+		if _, ok := m[id]; !ok {
+			return
+		}
+		delete(m, id)
+	} else {
+		if m[id] == ver {
+			return
+		}
+		m[id] = ver
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return
+	}
+	if err := db.SetSystemKV(KVSkipVersions, string(b)); err != nil {
+		log.Printf("market: 记录跳过版本失败 %s@%s: %v", id, ver, err)
+	}
 }
 
 // runAutoUpgrade RefreshNow 尾部执行（refreshMu 持有期间）。回调异常只记日志，
@@ -649,9 +699,12 @@ func Install(db *store.DB, id string, roles []string) (Entry, error) {
 		return e, ErrProtected
 	}
 	ver := e.Version
-	if err := installEntry(db, e, roles, ver, bundleURL(e)); err != nil {
+	url := bundleURL(e)
+	if err := installEntry(db, e, roles, ver, url); err != nil {
 		return e, err
 	}
+	// 到达目标版本（手动安装/更新/自动升级均经此）= 恢复正常自动跟踪
+	setSkipVersion(db, e.ID, "")
 	e.Version = ver
 	return e, nil
 }
@@ -692,8 +745,16 @@ func SwitchVersion(db *store.DB, id, version string) (Entry, error) {
 		return e, ErrVersionNotFound
 	}
 	roles := appRoles(db, e.ID) // 现有授权原样带回（installEntry 校验后整组写回）
+	// 此刻 e.Version 仍是目录最新版：切到它 = 恢复自动跟踪；切到旧版 = 避开它
+	latest := e.Version
 	if err := installEntry(db, e, roles, version, url); err != nil {
 		return e, err
+	}
+	if version != latest {
+		setSkipVersion(db, e.ID, latest)
+		log.Printf("market: %s 切换到 %s，自动升级将跳过目录版本 %s（下一个新版恢复）", e.ID, version, latest)
+	} else {
+		setSkipVersion(db, e.ID, "")
 	}
 	e.Version = version
 	return e, nil

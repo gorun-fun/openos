@@ -160,12 +160,12 @@ function openApp(s: MarketState) {
 //      时调用方把下拉选值弹回当前版本） ----
 const selVer = ref('')
 async function switchVersion(s: MarketState, v: string): Promise<boolean> {
-  const warn = autoUp.value && v !== s.version
-    ? '\n注意：自动升级已开启，下次目录刷新会自动升回最新版；如需保持旧版请先在商店设置关闭自动升级。'
+  const note = autoUp.value && v !== s.version
+    ? `\n自动升级会跳过 v${s.version}（视为问题版本），目录发布更新的版本时才会自动升级。`
     : ''
   if (!(await osConfirm({
     title: '切换版本',
-    body: `将「${s.name}」从 v${s.installedVersion || '—'} 切换到 v${v}，授权保持不变。${warn}`,
+    body: `将「${s.name}」从 v${s.installedVersion || '—'} 切换到 v${v}，授权保持不变。${note}`,
     confirmText: '切换',
   }))) return false
   busy.value = true
@@ -315,8 +315,8 @@ const icoGear = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fil
         <h4>自动升级</h4>
         <p class="s-desc">
           开启后，每次目录刷新（每 10 分钟自动 + 手动刷新/保存目录源）会把商店安装的应用自动升级到目录版本并保留原授权；
-          目录最新版被货架回退时也会跟随回退。关闭后仅在手动点击「更新」时升级。
-          新版本有问题时可先关闭本开关，再到应用详情切换回历史版本。
+          目录最新版被货架回退时也会跟随回退。手动切换到旧版本的应用会自动跳过被避开的版本（视为问题版本），
+          目录发布更新的版本后才恢复升级。关闭后仅在手动点击「更新」时升级。
         </p>
         <label class="au-row">
           <input type="checkbox" v-model="autoUp" :disabled="autoUpBusy" @change="saveAutoUpgrade" />

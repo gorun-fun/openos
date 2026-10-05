@@ -639,8 +639,9 @@ func TestSwitchVersion(t *testing.T) {
 	}
 }
 
-// TestAutoUpgrade 自动升级：开关默认关不动作；开启后商店安装的应用对齐目录版本
-// 并**保留授权**；目录最新版指针回退时跟随回退；非商店来源的应用不动。
+// TestAutoUpgrade 自动升级：开关**默认开**；商店安装的应用对齐目录版本并**保留授权**；
+// 显式关闭后不动作；目录最新版指针回退时跟随回退；非商店来源的应用不动。
+// 切旧版避开问题版本（skip）语义见 TestAutoUpgradeSkipVersion。
 func TestAutoUpgrade(t *testing.T) {
 	dir := t.TempDir()
 	db, err := store.Open(dir)
@@ -668,22 +669,11 @@ func TestAutoUpgrade(t *testing.T) {
 		t.Fatalf("Install: %v", err)
 	}
 
-	// 开关默认关：目录发新版也不动作
-	if AutoUpgradeOn(db) {
-		t.Fatal("自动升级默认应为关")
+	// 默认开：目录发新版即对齐、授权保留（user 不掉）
+	if !AutoUpgradeOn(db) {
+		t.Fatal("自动升级默认应为开")
 	}
 	setActive("2.0.0")
-	if got := AutoUpgrade(db); got != nil {
-		t.Errorf("开关关闭时不应有变更: %+v", got)
-	}
-	if cur, _ := db.AppByID("au-app"); cur.Version != "1.0.0" {
-		t.Errorf("开关关闭时版本不应变化: %s", cur.Version)
-	}
-
-	// 开启 → 对齐目录版本、授权保留（user 不掉）
-	if err := SetAutoUpgrade(db, true); err != nil {
-		t.Fatalf("SetAutoUpgrade: %v", err)
-	}
 	got := AutoUpgrade(db)
 	if len(got) != 1 || got[0].ID != "au-app" || got[0].Version != "2.0.0" {
 		t.Fatalf("自动升级结果错误: %+v", got)
@@ -695,6 +685,21 @@ func TestAutoUpgrade(t *testing.T) {
 	// 版本已一致 → 幂等空转
 	if got := AutoUpgrade(db); got != nil {
 		t.Errorf("版本一致时不应有变更: %+v", got)
+	}
+
+	// 显式关闭 → 不动作
+	if err := SetAutoUpgrade(db, false); err != nil {
+		t.Fatalf("SetAutoUpgrade: %v", err)
+	}
+	setActive("3.0.0")
+	if got := AutoUpgrade(db); got != nil {
+		t.Errorf("开关关闭时不应有变更: %+v", got)
+	}
+	if cur, _ := db.AppByID("au-app"); cur.Version != "2.0.0" {
+		t.Errorf("开关关闭时版本不应变化: %s", cur.Version)
+	}
+	if err := SetAutoUpgrade(db, true); err != nil {
+		t.Fatalf("SetAutoUpgrade: %v", err)
 	}
 
 	// 目录指针回退（货架全局回滚）→ 跟随回退
@@ -716,6 +721,89 @@ func TestAutoUpgrade(t *testing.T) {
 	AutoUpgrade(db)
 	if cur, ok := db.AppByID("au-manual"); !ok || cur.Version != "0.1.0" {
 		t.Errorf("非商店来源不应被自动升级: %+v", cur)
+	}
+}
+
+// TestAutoUpgradeSkipVersion 跳过问题版本：手动切旧版 = 避开当时的目录最新版，
+// 自动升级跳过该版本；目录发布不同（更新）版本后恢复自动升级并清除记录；
+// 手动 Install 到目录最新版也清除记录。
+func TestAutoUpgradeSkipVersion(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	const body = "export default { template: '<div>hi</div>' }\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, body)
+	}))
+	defer srv.Close()
+	resetBundleDir(t, filepath.Join(t.TempDir(), "bundles"))
+	mkEntry := func(ver string) Entry {
+		return Entry{ID: "skip-app", Name: "跳过演示", Type: "bundle", Version: ver,
+			Config:   []byte(fmt.Sprintf(`{"kind":"bundle","url":%q}`, srv.URL+"/"+ver+".js")),
+			Versions: []EntryVersion{{Version: ver, URL: srv.URL + "/" + ver + ".js"}, {Version: "1.0.0", URL: srv.URL + "/1.0.0.js"}}}
+	}
+	setActive := func(ver string) {
+		mu.Lock()
+		defer mu.Unlock()
+		active = []Entry{mkEntry(ver)}
+	}
+	mu.Lock()
+	prevSrcs, prev := customSrcs, active
+	customSrcs = append([]string{srv.URL}, customSrcs...)
+	mu.Unlock()
+	t.Cleanup(func() { mu.Lock(); customSrcs, active = prevSrcs, prev; mu.Unlock() })
+
+	// 装 1.0.0 → 目录发 2.0.0（疑似问题版本）→ 手动切回 1.0.0 = 避开 2.0.0
+	setActive("1.0.0")
+	if _, err := Install(db, "skip-app", []string{"user"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	setActive("2.0.0")
+	if _, err := SwitchVersion(db, "skip-app", "1.0.0"); err != nil {
+		t.Fatalf("SwitchVersion: %v", err)
+	}
+	if v := skipVersions(db)["skip-app"]; v != "2.0.0" {
+		t.Fatalf("切旧版应记录被避开的目录版本 2.0.0: %q", v)
+	}
+
+	// 目录仍是 2.0.0：自动升级跳过（版本停在 1.0.0）
+	if got := AutoUpgrade(db); got != nil {
+		t.Errorf("被避开的版本应跳过自动升级: %+v", got)
+	}
+	if cur, _ := db.AppByID("skip-app"); cur.Version != "1.0.0" {
+		t.Fatalf("跳过期间版本不应变化: %s", cur.Version)
+	}
+
+	// 目录发布 2.1.0（≠被避开的 2.0.0）→ 恢复自动升级并清除记录
+	setActive("2.1.0")
+	got := AutoUpgrade(db)
+	if len(got) != 1 || got[0].Version != "2.1.0" {
+		t.Fatalf("新版本发布后应恢复自动升级: %+v", got)
+	}
+	if v := skipVersions(db)["skip-app"]; v != "" {
+		t.Errorf("恢复升级后应清除跳过记录: %q", v)
+	}
+	if cur, _ := db.AppByID("skip-app"); cur.Version != "2.1.0" || !db.RoleCanAccessApp("user", "skip-app") {
+		t.Errorf("恢复升级后版本/授权错误: v=%s", cur.Version)
+	}
+
+	// 再次避开 → 手动点「更新」（Install 到目录最新版）= 主动接受，清除记录
+	setActive("3.0.0")
+	if _, err := SwitchVersion(db, "skip-app", "2.1.0"); err != nil {
+		t.Fatalf("SwitchVersion: %v", err)
+	}
+	if v := skipVersions(db)["skip-app"]; v != "3.0.0" {
+		t.Fatalf("应记录避开 3.0.0: %q", v)
+	}
+	if _, err := Install(db, "skip-app", appRoles(db, "skip-app")); err != nil {
+		t.Fatalf("手动更新: %v", err)
+	}
+	if v := skipVersions(db)["skip-app"]; v != "" {
+		t.Errorf("手动更新到目录最新版应清除跳过记录: %q", v)
 	}
 }
 

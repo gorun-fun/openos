@@ -959,8 +959,9 @@ func main() {
 		authed.HandleFunc("GET /api/market/autoupgrade", func(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, map[string]bool{"on": market.AutoUpgradeOn(db)})
 		})
-		// 自动升级开关（market.manage）：开启后每次目录刷新（10 分钟周期/手动刷新/源保存）
-		// 把商店安装的应用自动对齐到目录版本并保留授权。开启即刷新一次立刻生效。
+		// 自动升级开关（market.manage，默认开）：每次目录刷新（10 分钟周期/手动刷新/源保存）
+		// 把商店安装的应用自动对齐到目录版本并保留授权；手动切过旧版本的应用会跳过
+		// 被避开的目录版本，直到下一个新版。开启即刷新一次立刻生效。
 		authed.HandleFunc("PUT /api/market/autoupgrade", func(w http.ResponseWriter, r *http.Request) {
 			id := auth.FromContext(r)
 			if !id.Can("market.manage") {
