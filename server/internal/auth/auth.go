@@ -1078,7 +1078,11 @@ func (s *Service) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 404, "用户不存在")
 		return
 	}
-	if req.Role != nil {
+	// 角色仅在真正变化时更新并吊销旧令牌：宿主 SDK 的 SyncUser 幂等同步会固定携带
+	// role 字段（grf-hotel 员工资料编辑/任命同步等），字段出现≠变化——旧逻辑
+	//「出现即 bump」会把该用户全部设备无差别踢下线。validRole/末位管理员保护
+	// 仅在确有变化时才需要生效。
+	if req.Role != nil && *req.Role != info.Role {
 		if !validRole(*req.Role) {
 			jsonError(w, 400, "非法角色")
 			return

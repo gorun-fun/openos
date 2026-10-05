@@ -12,7 +12,11 @@ export function clearToken() { localStorage.removeItem(TOKEN_KEY) }
  *  /ws 与附件/商店取件等无法携带 header 的 query 鉴权场景用它替代长期 JWT 入 URL
  *  （安全加固第一步：URL/日志不再出现可长期窃取的令牌）。失败时调用方回落 token。 */
 export async function fetchWsTicket(): Promise<string> {
-  const resp = await fetch('/api/auth/ws-ticket', { method: 'POST' })
+  let resp = await fetch('/api/auth/ws-ticket', { method: 'POST' })
+  // 401（Cookie 过期而令牌尚可恢复）时先走静默恢复再试一次
+  if (resp.status === 401 && await tryTokenRecovery()) {
+    resp = await fetch('/api/auth/ws-ticket', { method: 'POST' })
+  }
   if (!resp.ok) throw new ApiError(resp.status, '获取短票失败')
   const data = await resp.json()
   return String(data.ticket || '')
@@ -21,6 +25,32 @@ export async function fetchWsTicket(): Promise<string> {
 /** 401 时的全局回调（由 App 层注册：清理状态并回到登录页）。 */
 let onUnauthorized: (() => void) | null = null
 export function setUnauthorizedHandler(fn: () => void) { onUnauthorized = fn }
+
+/** 401 静默恢复钩子（宿主注册，如 grf-hotel 经宿主 /api/v1/auth/os-token 换发
+ *  新桌面令牌）：返回非空令牌 → setToken 后由调用方原地重试原请求，全程不清
+ *  状态不跳转；返回空 / 抛错 → 调用方落回 triggerUnauthorized 全局登出。
+ *  并发 401 合并为一次恢复（single-flight），未注册时行为与旧版完全一致。 */
+type TokenRecovery = () => string | undefined | Promise<string | undefined>
+let tokenRecovery: TokenRecovery | null = null
+export function setTokenRecovery(fn: TokenRecovery | null) { tokenRecovery = fn }
+
+let recovering: Promise<string | null> | null = null
+/** 尝试静默恢复：成功返回新令牌（已 setToken）；失败返回 null——不在这里触发
+ *  登出，交由调用方决定（REST 重试 / 总线重连 / 探测各自处理）。 */
+export async function tryTokenRecovery(): Promise<string | null> {
+  if (!tokenRecovery) return null
+  if (!recovering) {
+    recovering = (async () => {
+      try {
+        const t = await tokenRecovery()
+        if (t) { setToken(t); return t }
+        return null
+      } catch { return null }
+      finally { setTimeout(() => { recovering = null }, 0) }
+    })()
+  }
+  return recovering
+}
 
 /** 触发全局登出（清令牌 + 带 sessionStorage 提示 + 回调）；REST 401 与总线断线
  *  探测共用——提示由登录页读后即清（跨 location.reload / SSO 跳转存活）。 */
@@ -42,13 +72,6 @@ export class ApiError extends Error {
 }
 
 async function handleResp<T>(resp: Response, path: string): Promise<T> {
-  if (resp.status === 401) {
-    // 登录过期 / 凭证被吊销：清理并回到登录页（登录接口本身除外）
-    if (!path.includes('/api/auth/login')) {
-      triggerUnauthorized()
-      throw new ApiError(401, '登录已过期')
-    }
-  }
   if (!resp.ok) {
     let msg = `HTTP ${resp.status}`
     try {
@@ -60,18 +83,38 @@ async function handleResp<T>(resp: Response, path: string): Promise<T> {
   return resp.json() as Promise<T>
 }
 
+/** 401 统一处置：先静默恢复（宿主钩子换新令牌）重试一次；恢复不了才全局登出。
+ *  登录接口本身的 401 是密码错误，不在此列。 */
+async function handle401<T>(resp: Response, path: string, retry: () => Promise<Response>): Promise<T> {
+  if (resp.status !== 401 || path.includes('/api/auth/login')) return handleResp<T>(resp, path)
+  if (await tryTokenRecovery()) {
+    let again: Response
+    try {
+      again = await retry()
+    } catch {
+      throw new ApiError(0, '网络不可达，请检查服务是否运行')
+    }
+    if (again.status !== 401) return handleResp<T>(again, path)
+  }
+  triggerUnauthorized()
+  throw new ApiError(401, '登录已过期')
+}
+
 async function request<T>(method: string, path: string, body?: unknown, headers?: Record<string, string>): Promise<T> {
-  const h: Record<string, string> = { ...headers }
-  if (body !== undefined) h['Content-Type'] = 'application/json'
-  const t = getToken()
-  if (t) h['Authorization'] = 'Bearer ' + t
+  const doFetch = (): Promise<Response> => {
+    const h: Record<string, string> = { ...headers }
+    if (body !== undefined) h['Content-Type'] = 'application/json'
+    const t = getToken()
+    if (t) h['Authorization'] = 'Bearer ' + t
+    return fetch(path, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body) })
+  }
   let resp: Response
   try {
-    resp = await fetch(path, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body) })
+    resp = await doFetch()
   } catch {
     throw new ApiError(0, '网络不可达，请检查服务是否运行')
   }
-  return handleResp<T>(resp, path)
+  return handle401<T>(resp, path, doFetch)
 }
 
 export const api = {
@@ -83,16 +126,19 @@ export const api = {
   upload: async <T>(path: string, file: File, field = 'file'): Promise<T> => {
     const fd = new FormData()
     fd.append(field, file)
-    const h: Record<string, string> = {}
-    const t = getToken()
-    if (t) h['Authorization'] = 'Bearer ' + t
+    const doFetch = (): Promise<Response> => {
+      const h: Record<string, string> = {}
+      const t = getToken()
+      if (t) h['Authorization'] = 'Bearer ' + t
+      return fetch(path, { method: 'POST', headers: h, body: fd })
+    }
     let resp: Response
     try {
-      resp = await fetch(path, { method: 'POST', headers: h, body: fd })
+      resp = await doFetch()
     } catch {
       throw new ApiError(0, '网络不可达，请检查服务是否运行')
     }
-    return handleResp<T>(resp, path)
+    return handle401<T>(resp, path, doFetch)
   },
 }
 

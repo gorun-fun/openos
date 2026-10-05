@@ -7,9 +7,10 @@
 //   bus.remote('term:alice', 'ls')                 仅发给服务端处理器（不回声本地）
 //
 // 断线处理：先探测会话活性再重连——令牌被吊销（改密/禁用/删号/角色变更）时 REST
-// 401，立即走全局登出回登录页并带提示，不再静默退避重试；网络/服务闪断则照常
-// 指数退避重连（上限 20 次）。
-import { getToken, triggerUnauthorized, fetchWsTicket } from '../api/client'
+// 401，先经宿主恢复钩子静默换新令牌重连（grf-hotel 等宿主可全程无感），恢复不了
+// 才全局登出回登录页并带提示；网络/服务闪断则照常指数退避重连（上限 20 次，
+// 回前台时复位计数并立即重连——覆盖系统休眠 / 长时间挂后台后定时器停摆）。
+import { getToken, triggerUnauthorized, fetchWsTicket, tryTokenRecovery } from '../api/client'
 
 type Handler = (payload: any, from: string, topic: string) => void
 
@@ -69,12 +70,17 @@ class Bus {
     ws.onclose = () => {
       this.ws = null
       if (this.closed) return
-      // 重连前探测会话：区分「网络/服务闪断」与「令牌已被吊销」。401 时全局登出
-      // 接管（triggerUnauthorized 会带 sessionStorage 提示到登录页）；网络不可达
+      // 重连前探测会话：区分「网络/服务闪断」与「令牌已被吊销」。401 时先经宿主
+      // 恢复钩子换新令牌（酒店会话仍有效则成功，原地重连不登出）；恢复不了才全局
+      // 登出（triggerUnauthorized 带 sessionStorage 提示到登录页）。网络不可达
       // 或会话有效则视同闪断，照常退避重连。
       void fetch('/api/auth/me', { headers: { Authorization: 'Bearer ' + getToken() } })
-        .then((r) => {
+        .then(async (r) => {
           if (r.status !== 401) return
+          if (await tryTokenRecovery()) {
+            this.open()
+            return
+          }
           this.closed = true // 会话已死，停止重连；重新登录后 connect() 复位
           triggerUnauthorized()
         })
@@ -86,6 +92,16 @@ class Bus {
           }
         })
     }
+  }
+
+  constructor() {
+    // 回前台兜底：系统休眠 / 长时间挂后台后退避定时器停摆，ws 已死却不再重连——
+    // 回前台即复位计数并立即重连（主动 disconnect 的场景由 closed 拦截）。
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState !== 'visible' || this.closed || this.ws) return
+      this.retry = 0
+      this.open()
+    })
   }
 
   disconnect() {
