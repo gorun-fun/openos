@@ -47,10 +47,11 @@ OpenOS 主程序的完整版 Vue 运行时编译；模块不 import 任何依赖
 ## 上传（发布货架）
 
 ```bash
-scp market/catalog.json 10.8.0.5:/data/download/openos/market/catalog.json
-ssh 10.8.0.5 'mkdir -p /data/download/openos/market/bundles /data/download/openos/market/icons'
-scp market/bundles/chat-1.0.0.js 10.8.0.5:/data/download/openos/market/bundles/
-scp market/icons/chat.svg 10.8.0.5:/data/download/openos/market/icons/
+# 注意用户名必须显式 root@（~/.ssh/config 将 10.8.0.5 默认用户设为 wenjun，免密会拒）
+scp market/catalog.json root@10.8.0.5:/data/download/openos/market/catalog.json
+ssh root@10.8.0.5 'mkdir -p /data/download/openos/market/bundles /data/download/openos/market/icons'
+scp market/bundles/chat-1.0.0.js root@10.8.0.5:/data/download/openos/market/bundles/
+scp market/icons/chat.svg root@10.8.0.5:/data/download/openos/market/icons/
 ```
 
 上传后商店「刷新」按钮立即生效（POST /api/market/refresh 即时拉取远程源）。
