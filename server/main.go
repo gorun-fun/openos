@@ -71,8 +71,19 @@ func main() {
 	authSvc.SetAuthMode(os.Getenv("OPENOS_AUTH_MODE"))
 	authSvc.SetExchangeSecret(os.Getenv("OPENOS_EXCHANGE_SECRET"))
 	authSvc.SetExchangeRoleWhitelist(os.Getenv("OPENOS_EXCHANGE_ROLES"))
+	// 令牌有效期可配（默认 24h；宿主长会话场景可设 168h 等，前端按响应 tokenTtl
+	// 自适应续期间隔）
+	if v := os.Getenv("OPENOS_TOKEN_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			authSvc.SetTokenTTL(d)
+		} else {
+			log.Printf("auth: 警告：OPENOS_TOKEN_TTL=%q 不是合法 duration（如 168h），沿用默认 24h", v)
+		}
+	}
 	// 安全提醒（安全审计 2026-10）：交换密钥 + 空白名单 = 密钥泄露可铸任意角色（含
 	// admin）。宿主部署应显式配置 OPENOS_EXCHANGE_ROLES。
+	// 注意：/api/host/* 机对机组（用户体系管理）与 declare 同为全信任通道，
+	// OPENOS_EXCHANGE_ROLES 仅约束 exchange 的用户令牌铸造面。
 	if os.Getenv("OPENOS_EXCHANGE_SECRET") != "" && strings.TrimSpace(os.Getenv("OPENOS_EXCHANGE_ROLES")) == "" {
 		log.Printf("auth: 警告：OPENOS_EXCHANGE_SECRET 已配置但未设置 OPENOS_EXCHANGE_ROLES 白名单，交换密钥一旦泄露可铸造任意角色（含 admin）")
 	}
@@ -80,16 +91,17 @@ func main() {
 		log.Fatal("初始化默认账号失败:", err)
 	}
 	hub := bus.New()
-	// 总线连接周期复核（30s）：令牌吊销（改角色/改密/删用户/禁用）或过期后踢下线，
-	// 客户端会用本地（可能已续期）的令牌自动重连，令牌确实失效则重连被 401 拒绝。
+	// 总线连接周期复核（30s）：令牌吊销（改密/删用户）或禁用、过期后踢下线，客户端
+	// 会用本地（可能已续期）的令牌自动重连，令牌确实失效则重连被 401 拒绝。
+	// 角色不参与复核比较——授权变化实时生效不掉线（身份与授权分离，2026-10）。
 	hub.SetRevalidator(func(user, role, token string) bool {
-		// 短票连接没有长期令牌可验：按用户态复核（吊销/禁用/角色变化仍即时生效）
+		// 短票连接没有长期令牌可验：按用户态复核（吊销/禁用仍即时生效）
 		if strings.HasPrefix(token, "ticket:") {
-			exists, cur, _, disabled := authSvc.CurrentUserRole(user)
-			return exists && !disabled && cur == role
+			exists, _, _, disabled := authSvc.CurrentUserRole(user)
+			return exists && !disabled
 		}
 		id, err := authSvc.VerifySession(token)
-		return err == nil && id.Username == user && id.Role == role
+		return err == nil && id.Username == user
 	})
 	aiSvc := ai.New(db)
 	fs := vfs.New(dataDir, db, hub, aiSvc.Ask)
@@ -133,10 +145,14 @@ func main() {
 			log.Printf("goder: 启动时补齐 %d 个用户的托管 AI 供应商", n)
 		}
 	}
-	// 删除用户后的级联磁盘清理：真实终端沙箱 + goder 会话数据
-	authSvc.SetUserDeletedHook(func(name string) {
-		fs.DeleteHome(name)
-		goderMgr.DeleteUserData(name)
+	// 用户身份（角色/权限/显示名/禁用）变化推送：sys:user 定向送达该用户全部
+	// 连接，前端 session store 就地回正（不再依赖 401/重登感知）；角色变化另
+	// 广播 sys:apps-changed 让所有在线用户刷新应用列表（授权范围可能变了）。
+	authSvc.SetIdentityChangedHook(func(user string, roleChanged bool, snap map[string]any) {
+		hub.PublishTo(user, "sys:user", snap)
+		if roleChanged {
+			hub.Publish("sys:apps-changed", map[string]any{"user": user})
+		}
 	})
 	// goder 桌面控制插件（openos MCP）：gh 侧经 wrapper 自动发现接入，
 	// 向 AI 暴露 os_* 工具（窗口/应用/桌面/便签/VFS/设置/通知/总线发布）
@@ -189,6 +205,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("附件存储初始化失败: %v", err)
 	}
+	// 删除用户后的级联磁盘清理：真实终端沙箱 + goder 会话数据 + 附件文件
+	//（附件的行级清理由 auth 包 deleteUserCore 完成，磁盘文件在此清理）
+	authSvc.SetUserDeletedHook(func(name string) {
+		fs.DeleteHome(name)
+		goderMgr.DeleteUserData(name)
+		attachStore.DeleteByUploader(name)
+	})
 	// 数据保留期（防无限增长；0 = 永久保留）：启动清理一次，此后每天一次
 	// （含 vfs 到期分享链接清理）
 	go scheduleRetention(db, attachStore, fs)
@@ -289,6 +312,8 @@ func main() {
 	// 权限点/应用授权）+ 权限点目录，幂等同步到 roles/role_perms/role_apps
 	//（managed_by='host'）。取代宿主侧 os_role_seed 标记表 / 「access 含 gateway」
 	// 这类种子 workaround。与令牌交换/定向推送共用 X-Exchange-Secret。
+	// 清单外仍被用户绑定的 host 角色不删，响应 unresolved 报告（宿主先迁用户再
+	// 重 declare，幂等收敛）——直接删会让用户挂着不存在的角色悬空。
 	mux.HandleFunc("POST /api/host/declare", func(w http.ResponseWriter, r *http.Request) {
 		if !authSvc.CheckExchangeSecret(r.Header.Get("X-Exchange-Secret")) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -312,14 +337,117 @@ func main() {
 				return
 			}
 		}
-		if err := db.DeclareHostRoles(req.Roles, req.Perms); err != nil {
+		unresolved, err := db.DeclareHostRoles(req.Roles, req.Perms)
+		if err != nil {
 			http.Error(w, "声明失败: "+err.Error(), 500)
 			return
 		}
 		db.Audit("host", "host.declare", fmt.Sprintf("%d 角色 / %d 权限点", len(req.Roles), len(req.Perms)), "")
+		authSvc.InvalidateAllCache() // 角色矩阵变化：整体清用户态缓存，权限即时生效
 		hub.Publish("sys:apps-changed", map[string]any{"source": "host-declare"})
-		writeJSON(w, map[string]any{"ok": true, "roles": len(req.Roles)})
+		if unresolved == nil {
+			unresolved = []store.StaleRole{}
+		}
+		writeJSON(w, map[string]any{"ok": true, "roles": len(req.Roles), "unresolved": unresolved})
 	})
+
+	// ---- 宿主机对机 API 组（/api/host/*，X-Exchange-Secret 守护）——用户体系
+	// 全量管理 + 应用管理 + AI 每用户供应商。取代旧「exchange 铸 admin 服务账号
+	// 令牌再调管理 REST」的间接路径：不再依赖 OPENOS_EXCHANGE_ROLES 放行 admin、
+	// 不再产生假 admin 用户行。hostsdk 的 Manager 全部封装已切到本组。 ----
+	// hostOnly 密钥守护包装（与 declare 同款 401 语义）。
+	hostOnly := func(fn http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if !authSvc.CheckExchangeSecret(r.Header.Get("X-Exchange-Secret")) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			fn(w, r)
+		}
+	}
+	// 用户体系（handler 在 auth/hostapi.go，内部自带密钥守护与审计 operator="host"）
+	mux.HandleFunc("GET /api/host/users", authSvc.HostListUsers)
+	mux.HandleFunc("POST /api/host/users", authSvc.HostCreateUser)
+	mux.HandleFunc("POST /api/host/users/sync", authSvc.HostSyncUsers)
+	mux.HandleFunc("PUT /api/host/users/{name}", authSvc.HostUpdateUser)
+	mux.HandleFunc("DELETE /api/host/users/{name}", authSvc.HostDeleteUser)
+	// 角色与权限点目录（只读对账；投影写入走 POST /api/host/declare）
+	mux.HandleFunc("GET /api/host/roles", authSvc.HostRoles)
+	// 应用注册（宿主通道恒信任 locked——密钥本身即宿主身份）与强制删除
+	mux.HandleFunc("POST /api/host/apps", hostOnly(func(w http.ResponseWriter, r *http.Request) {
+		var a store.AppDef
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&a); err != nil || a.ID == "" || a.Name == "" {
+			http.Error(w, "参数错误：需要 id 与 name", http.StatusBadRequest)
+			return
+		}
+		a.ID = sanitizeID(a.ID)
+		a.Builtin = false
+		if err := db.UpsertApp(a); err != nil {
+			http.Error(w, "注册失败", 500)
+			return
+		}
+		db.Audit("host", "app.register", a.ID, "")
+		hub.Publish("sys:apps-changed", map[string]any{"id": a.ID})
+		writeJSON(w, map[string]string{"ok": "1"})
+	}))
+	mux.HandleFunc("DELETE /api/host/apps/{id}", hostOnly(func(w http.ResponseWriter, r *http.Request) {
+		appID := r.PathValue("id")
+		if err := db.DeleteAppForced(appID); err != nil {
+			http.Error(w, "删除失败: "+err.Error(), http.StatusForbidden)
+			return
+		}
+		market.RemoveBundles(appID)
+		db.Audit("host", "app.delete", appID, "")
+		hub.Publish("sys:apps-changed", nil)
+		writeJSON(w, map[string]string{"ok": "1"})
+	}))
+	// 角色应用授权映射（读取对账 / 按角色全量覆盖）与角色显示名
+	mux.HandleFunc("GET /api/host/apps/access", hostOnly(func(w http.ResponseWriter, r *http.Request) {
+		m, _ := db.RoleAccessMap()
+		roles, _ := db.ListRoles()
+		if roles == nil {
+			roles = []string{"admin", "user", "guest"}
+		}
+		writeJSON(w, map[string]any{"roles": roles, "access": m, "labels": db.RoleLabels()})
+	}))
+	mux.HandleFunc("PUT /api/host/apps/access", hostOnly(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Role string   `json:"role"`
+			Apps []string `json:"apps"`
+		}
+		if json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&req) != nil || req.Role == "" {
+			http.Error(w, "参数错误", http.StatusBadRequest)
+			return
+		}
+		if err := db.SetRoleApps(req.Role, req.Apps); err != nil {
+			http.Error(w, "保存失败", 500)
+			return
+		}
+		db.Audit("host", "apps.access", "role="+req.Role, "")
+		hub.Publish("sys:apps-changed", map[string]any{"role": req.Role})
+		writeJSON(w, map[string]string{"ok": "1"})
+	}))
+	mux.HandleFunc("PUT /api/host/apps/role-labels", hostOnly(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Labels map[string]string `json:"labels"`
+		}
+		if json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req) != nil {
+			http.Error(w, "参数错误", http.StatusBadRequest)
+			return
+		}
+		if req.Labels == nil {
+			req.Labels = map[string]string{}
+		}
+		if err := db.SetRoleLabels(req.Labels); err != nil {
+			http.Error(w, "保存失败", 500)
+			return
+		}
+		db.Audit("host", "apps.role-labels", fmt.Sprintf("%d 项", len(req.Labels)), "")
+		writeJSON(w, map[string]string{"ok": "1"})
+	}))
+	// AI 每用户供应商（handler 与 REST 版共用，见 ai 包）
+	mux.HandleFunc("GET /api/host/ai/user-providers", hostOnly(aiSvc.GetUserProviders))
+	mux.HandleFunc("PUT /api/host/ai/user-providers", hostOnly(aiSvc.SaveUserProviders))
 
 	// ---- WebSocket 事件总线（query 鉴权：优先 30s 一次性短票 ?ticket=，兼容 ?token=；
 	// 升级时全量校验用户态，与 REST 同一套判定） ----
@@ -556,8 +684,8 @@ func main() {
 	})
 	authed.HandleFunc("POST /api/apps", func(w http.ResponseWriter, r *http.Request) {
 		id := auth.FromContext(r)
-		if id.Role != "admin" {
-			http.Error(w, "需要管理员权限", http.StatusForbidden)
+		if !id.Can("apps.manage") {
+			http.Error(w, "需要权限：apps.manage", http.StatusForbidden)
 			return
 		}
 		var a store.AppDef
@@ -586,8 +714,8 @@ func main() {
 	})
 	authed.HandleFunc("DELETE /api/apps/{id}", func(w http.ResponseWriter, r *http.Request) {
 		id := auth.FromContext(r)
-		if id.Role != "admin" {
-			http.Error(w, "需要管理员权限", http.StatusForbidden)
+		if !id.Can("apps.manage") {
+			http.Error(w, "需要权限：apps.manage", http.StatusForbidden)
 			return
 		}
 		appID := r.PathValue("id")
@@ -607,8 +735,8 @@ func main() {
 		writeJSON(w, map[string]string{"ok": "1"})
 	})
 	authed.HandleFunc("GET /api/apps/access", func(w http.ResponseWriter, r *http.Request) {
-		if auth.FromContext(r).Role != "admin" {
-			http.Error(w, "需要管理员权限", http.StatusForbidden)
+		if !auth.FromContext(r).Can("apps.manage") {
+			http.Error(w, "需要权限：apps.manage", http.StatusForbidden)
 			return
 		}
 		m, _ := db.RoleAccessMap()
@@ -623,8 +751,8 @@ func main() {
 	// 语义，宿主在启动/角色变更时整体推送，与 role_apps 同样由宿主侧维护。
 	authed.HandleFunc("PUT /api/apps/role-labels", func(w http.ResponseWriter, r *http.Request) {
 		id := auth.FromContext(r)
-		if id.Role != "admin" {
-			http.Error(w, "需要管理员权限", http.StatusForbidden)
+		if !id.Can("apps.manage") {
+			http.Error(w, "需要权限：apps.manage", http.StatusForbidden)
 			return
 		}
 		var req struct {
@@ -646,8 +774,8 @@ func main() {
 	})
 	authed.HandleFunc("PUT /api/apps/access", func(w http.ResponseWriter, r *http.Request) {
 		id := auth.FromContext(r)
-		if id.Role != "admin" {
-			http.Error(w, "需要管理员权限", http.StatusForbidden)
+		if !id.Can("apps.manage") {
+			http.Error(w, "需要权限：apps.manage", http.StatusForbidden)
 			return
 		}
 		var req struct {
@@ -668,8 +796,8 @@ func main() {
 	})
 
 	// ---- 角色目录与功能级权限（P2 2026-10）----
-	// 目录对所有登录用户可读（角色/权限的展示性信息；编辑仅 admin，宿主托管角色
-	// 只读——host 模式权威在宿主自己的数据库，openos 侧仅投影）。
+	// 目录对所有登录用户可读（角色/权限的展示性信息；编辑需 system.manage，
+	// admin 恒直通——宿主托管角色只读，host 模式权威在宿主自己的数据库）。
 	authed.HandleFunc("GET /api/roles", func(w http.ResponseWriter, r *http.Request) {
 		roles, err := db.ListRoleDefs()
 		if err != nil {
@@ -691,8 +819,8 @@ func main() {
 	})
 	authed.HandleFunc("PUT /api/roles/{key}", func(w http.ResponseWriter, r *http.Request) {
 		id := auth.FromContext(r)
-		if id.Role != "admin" {
-			http.Error(w, "需要管理员权限", http.StatusForbidden)
+		if !id.Can("system.manage") {
+			http.Error(w, "需要权限：system.manage", http.StatusForbidden)
 			return
 		}
 		key := r.PathValue("key")
@@ -715,14 +843,15 @@ func main() {
 				return
 			}
 		}
+		authSvc.InvalidateAllCache() // 角色矩阵变化：整体清用户态缓存立即生效
 		db.Audit(id.Username, "roles.upsert", key, "")
 		hub.Publish("sys:apps-changed", map[string]any{"role": key})
 		writeJSON(w, map[string]string{"ok": "1"})
 	})
 	authed.HandleFunc("DELETE /api/roles/{key}", func(w http.ResponseWriter, r *http.Request) {
 		id := auth.FromContext(r)
-		if id.Role != "admin" {
-			http.Error(w, "需要管理员权限", http.StatusForbidden)
+		if !id.Can("system.manage") {
+			http.Error(w, "需要权限：system.manage", http.StatusForbidden)
 			return
 		}
 		key := r.PathValue("key")
@@ -736,6 +865,7 @@ func main() {
 			http.Error(w, err.Error(), 400)
 			return
 		}
+		authSvc.InvalidateAllCache()
 		db.Audit(id.Username, "roles.delete", key, "")
 		hub.Publish("sys:apps-changed", map[string]any{"role": key})
 		writeJSON(w, map[string]string{"ok": "1"})
@@ -765,16 +895,16 @@ func main() {
 		market.StartRemote(marketDefault)
 		// 目录源管理（admin）：GET 查看默认/自定义源；PUT 全量覆盖自定义源并立即拉取
 		authed.HandleFunc("GET /api/market/sources", func(w http.ResponseWriter, r *http.Request) {
-			if auth.FromContext(r).Role != "admin" {
-				http.Error(w, "需要管理员权限", http.StatusForbidden)
+			if !auth.FromContext(r).Can("market.manage") {
+				http.Error(w, "需要权限：market.manage", http.StatusForbidden)
 				return
 			}
 			writeJSON(w, map[string]any{"default": market.DefaultURL(), "custom": market.CustomSources()})
 		})
 		authed.HandleFunc("PUT /api/market/sources", func(w http.ResponseWriter, r *http.Request) {
 			id := auth.FromContext(r)
-			if id.Role != "admin" {
-				http.Error(w, "需要管理员权限", http.StatusForbidden)
+			if !id.Can("market.manage") {
+				http.Error(w, "需要权限：market.manage", http.StatusForbidden)
 				return
 			}
 			var req struct {
@@ -802,8 +932,8 @@ func main() {
 		// 仅 admin——虽拉取目标只来自管理员配置，但任意用户可触发会放大对配置源的
 		// 请求频率（安全审计 2026-10）。
 		authed.HandleFunc("POST /api/market/refresh", func(w http.ResponseWriter, r *http.Request) {
-			if id := auth.FromContext(r); id == nil || id.Role != "admin" {
-				http.Error(w, "需要管理员权限", http.StatusForbidden)
+			if id := auth.FromContext(r); id == nil || !id.Can("market.manage") {
+				http.Error(w, "需要权限：market.manage", http.StatusForbidden)
 				return
 			}
 			okN, total := market.RefreshNow()
@@ -814,8 +944,8 @@ func main() {
 		})
 		authed.HandleFunc("POST /api/market/install", func(w http.ResponseWriter, r *http.Request) {
 			id := auth.FromContext(r)
-			if id.Role != "admin" {
-				http.Error(w, "需要管理员权限", http.StatusForbidden)
+			if !id.Can("market.manage") {
+				http.Error(w, "需要权限：market.manage", http.StatusForbidden)
 				return
 			}
 			var req struct {
@@ -874,15 +1004,17 @@ func main() {
 		})
 	}
 
-	// 用户管理（admin；sync 为宿主批量幂等同步）
-	authed.HandleFunc("GET /api/users", auth.RequireAdmin(http.HandlerFunc(authSvc.ListUsers)).ServeHTTP)
-	authed.HandleFunc("POST /api/users", auth.RequireAdmin(http.HandlerFunc(authSvc.CreateUser)).ServeHTTP)
-	authed.HandleFunc("POST /api/users/sync", auth.RequireAdmin(http.HandlerFunc(authSvc.SyncUsers)).ServeHTTP)
-	authed.HandleFunc("PUT /api/users/{name}", auth.RequireAdmin(http.HandlerFunc(authSvc.UpdateUser)).ServeHTTP)
-	authed.HandleFunc("DELETE /api/users/{name}", auth.RequireAdmin(http.HandlerFunc(authSvc.DeleteUser)).ServeHTTP)
+	// 用户管理（users.manage：admin 恒直通；2026-10 起权限点实际接管，宿主/管理员
+	// 可下放用户管理而不必给 admin。sync 为批量幂等同步；防提权约束在 patchUser：
+	// 非 admin 操作者不可动 admin 用户/授 admin 角色）
+	authed.HandleFunc("GET /api/users", auth.RequirePerm("users.manage")(http.HandlerFunc(authSvc.ListUsers)).ServeHTTP)
+	authed.HandleFunc("POST /api/users", auth.RequirePerm("users.manage")(http.HandlerFunc(authSvc.CreateUser)).ServeHTTP)
+	authed.HandleFunc("POST /api/users/sync", auth.RequirePerm("users.manage")(http.HandlerFunc(authSvc.SyncUsers)).ServeHTTP)
+	authed.HandleFunc("PUT /api/users/{name}", auth.RequirePerm("users.manage")(http.HandlerFunc(authSvc.UpdateUser)).ServeHTTP)
+	authed.HandleFunc("DELETE /api/users/{name}", auth.RequirePerm("users.manage")(http.HandlerFunc(authSvc.DeleteUser)).ServeHTTP)
 
-	// 审计日志 / 系统统计（admin）
-	authed.HandleFunc("GET /api/audit", auth.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// 审计日志 / 系统统计（system.manage）
+	authed.HandleFunc("GET /api/audit", auth.RequirePerm("system.manage")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		entries, err := db.ListAudit(200)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
@@ -890,7 +1022,7 @@ func main() {
 		}
 		writeJSON(w, entries)
 	})).ServeHTTP)
-	authed.HandleFunc("GET /api/stats", auth.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	authed.HandleFunc("GET /api/stats", auth.RequirePerm("system.manage")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, db.Stats(startedAt))
 	})).ServeHTTP)
 
@@ -950,12 +1082,12 @@ func main() {
 	authed.HandleFunc("POST /api/ai/chat", aiSvc.Chat)
 	authed.HandleFunc("GET /api/ai/history", aiSvc.History)
 	authed.HandleFunc("DELETE /api/ai/history", aiSvc.ClearHistory)
-	authed.HandleFunc("GET /api/ai/config", auth.RequireAdmin(http.HandlerFunc(aiSvc.GetConfig)).ServeHTTP)
-	authed.HandleFunc("PUT /api/ai/config", auth.RequireAdmin(http.HandlerFunc(aiSvc.SaveConfig)).ServeHTTP)
-	authed.HandleFunc("POST /api/ai/test", auth.RequireAdmin(http.HandlerFunc(aiSvc.Test)).ServeHTTP)
-	// 宿主声明的每用户供应商（admin；宿主服务身份经交换密钥 + admin 令牌调用）
-	authed.HandleFunc("GET /api/ai/user-providers", auth.RequireAdmin(http.HandlerFunc(aiSvc.GetUserProviders)).ServeHTTP)
-	authed.HandleFunc("PUT /api/ai/user-providers", auth.RequireAdmin(http.HandlerFunc(aiSvc.SaveUserProviders)).ServeHTTP)
+	authed.HandleFunc("GET /api/ai/config", auth.RequirePerm("ai.manage")(http.HandlerFunc(aiSvc.GetConfig)).ServeHTTP)
+	authed.HandleFunc("PUT /api/ai/config", auth.RequirePerm("ai.manage")(http.HandlerFunc(aiSvc.SaveConfig)).ServeHTTP)
+	authed.HandleFunc("POST /api/ai/test", auth.RequirePerm("ai.manage")(http.HandlerFunc(aiSvc.Test)).ServeHTTP)
+	// 宿主声明的每用户供应商（ai.manage；宿主服务身份走 /api/host/ai/user-providers）
+	authed.HandleFunc("GET /api/ai/user-providers", auth.RequirePerm("ai.manage")(http.HandlerFunc(aiSvc.GetUserProviders)).ServeHTTP)
+	authed.HandleFunc("PUT /api/ai/user-providers", auth.RequirePerm("ai.manage")(http.HandlerFunc(aiSvc.SaveUserProviders)).ServeHTTP)
 	// AI 服务状态（所有登录用户可读：设置页展示当前模型与 goder 启用状态，不含密钥）
 	authed.HandleFunc("GET /api/ai/status", func(w http.ResponseWriter, r *http.Request) {
 		_, _, model, _ := aiSvc.Provider()

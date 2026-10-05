@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -28,7 +29,9 @@ type Config struct {
 	GoderAddr      string   // 透传 OPENOS_GODER_ADDR（同机多实例错开 goder-serve 端口）
 	MarketURL      string   // 透传 OPENOS_MARKET_URL（宿主货架 catalog.json；空则用 openos 默认）
 	ExtraEnv       []string // 附加环境（如 OPENOS_VFS=off、OPENOS_MARKET=off）
-	ServiceUser    string   // 服务身份用户名（管理 API 调用时换取 admin 令牌；默认 "host-service"）
+	// ServiceUser 已废弃（仅旧 openos 快照的兼容回落通道使用）：服务身份用户名，
+	// 新面 /api/host/* 全部经 X-Exchange-Secret 直连、不再铸造 admin 服务账号令牌
+	ServiceUser    string
 	// ExternalAuth 身份唯一来源为宿主 SSO（默认 true）：OPENOS_AUTH_MODE=external
 	//（openos 本地账密/改密 403、演示账号不种子）+ OPENOS_SEED_DEMO=0。
 	// 独立双进程形态（宿主无 SSO）才置 false。
@@ -54,6 +57,9 @@ type Manager struct {
 	mu     sync.Mutex
 	client *http.Client
 	proxy  http.Handler
+	// 旧管理 REST 面回落用的服务账号令牌缓存（20h；/api/host/* 新面不需要）
+	svcToken    string
+	svcTokenExp time.Time
 }
 
 // New 创建托管器（未启动）。
@@ -256,14 +262,33 @@ func (m *Manager) Exchange(username, role, displayName string, perms []string) (
 	return parsed.Token, nil
 }
 
-// serviceCall 以服务身份（ExchangeSecret + 服务用户令牌）调用 openos 管理 API，
-// 2xx 时把响应 JSON 解到 out（可为 nil）。openos 以交换密钥头识别宿主服务调用
-// （如应用注册携带 locked 时仅此身份可信）。
+// serviceCall 机对机调用 openos 管理 API：X-Exchange-Secret 直连（/api/host/* 组，
+// openos ≥ v0.0.46）——不再铸造 admin 服务账号令牌，与 OPENOS_EXCHANGE_ROLES
+// 白名单解耦、不再产生假 admin 用户行。2xx 时把响应 JSON 解到 out（可为 nil）。
+//
+// 兼容回落：宿主业务代码经 Call 逃生通道自行传入的旧管理 REST 路径（如
+// /api/ai/user-providers、/api/apps/role-labels）走登录中间件鉴权，密钥直连会被
+// 拒——此时自动回落「服务账号 exchange → Bearer」重试一次（需白名单放行 admin
+// 或未配白名单），保证宿主随旧调用面升级 openos 快照时不断路。
 func (m *Manager) serviceCall(method, path string, body, out any) error {
-	token, err := m.Exchange(m.cfg.ServiceUser, "admin", "Host Service", nil)
-	if err != nil {
-		return err
+	raw0, err0 := m.doCall(method, path, body, "")
+	if err0 == nil {
+		return decodeOut(path, raw0, out)
 	}
+	if !strings.HasPrefix(path, "/api/host/") {
+		if token, err := m.serviceToken(); err == nil {
+			raw1, err1 := m.doCall(method, path, body, token)
+			if err1 == nil {
+				return decodeOut(path, raw1, out)
+			}
+			return err1
+		}
+	}
+	return err0
+}
+
+// doCall 单次 HTTP 调用（bearer 空时仅凭 X-Exchange-Secret）。
+func (m *Manager) doCall(method, path string, body any, bearer string) ([]byte, error) {
 	var rd io.Reader
 	if body != nil {
 		raw, _ := json.Marshal(body)
@@ -271,20 +296,26 @@ func (m *Manager) serviceCall(method, path string, body, out any) error {
 	}
 	req, err := http.NewRequest(method, "http://"+m.cfg.Addr+path, rd)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 	req.Header.Set("X-Exchange-Secret", m.cfg.ExchangeSecret)
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("%s %s → %d: %s", method, path, resp.StatusCode, string(raw))
+		return nil, fmt.Errorf("%s %s → %d: %s", method, path, resp.StatusCode, string(raw))
 	}
+	return raw, nil
+}
+
+func decodeOut(path string, raw []byte, out any) error {
 	if out != nil && len(raw) > 0 {
 		if err := json.Unmarshal(raw, out); err != nil {
 			return fmt.Errorf("%s 响应解析失败: %w", path, err)
@@ -293,7 +324,25 @@ func (m *Manager) serviceCall(method, path string, body, out any) error {
 	return nil
 }
 
-// Call 逃生通道：直接调 openos 管理 API（SDK 未封装的新端点）。
+// serviceToken 兼容回落的旧服务账号令牌（缓存 20h；仅旧 openos 快照需要，
+// 新面 /api/host/* 不经过这里）。deprecated：宿主快照全量升级后可移除。
+func (m *Manager) serviceToken() (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.svcToken != "" && time.Now().Before(m.svcTokenExp) {
+		return m.svcToken, nil
+	}
+	tok, err := m.Exchange(m.cfg.ServiceUser, "admin", "Host Service", nil)
+	if err != nil {
+		return "", err
+	}
+	m.svcToken = tok
+	m.svcTokenExp = time.Now().Add(20 * time.Hour)
+	return tok, nil
+}
+
+// Call 逃生通道：直接调 openos 管理 API（SDK 未封装的新端点）。推荐使用
+// /api/host/* 组（密钥直连）；旧管理 REST 路径自动走兼容回落。
 func (m *Manager) Call(method, path string, body, out any) error {
 	return m.serviceCall(method, path, body, out)
 }
@@ -368,20 +417,75 @@ func (m *Manager) NotifyPerm(perm string, users []string, title, body, appID str
 	}
 }
 
-// SyncUser 同步单个 openos 用户的角色/显示名/禁用态/权限快照（PUT /api/users/{name}，
-// 变化自动吊销其全部旧令牌）。perms 传 nil 表示不变。
+// HostUser GET /api/host/users 返回的用户条目（全字段，含权限快照与 token 版本）。
+type HostUser struct {
+	ID           int64    `json:"id"`
+	Username     string   `json:"username"`
+	DisplayName  string   `json:"displayName"`
+	Role         string   `json:"role"`
+	Disabled     bool     `json:"disabled"`
+	Perms        []string `json:"perms"`
+	TokenVersion int64    `json:"tokenVersion"`
+	CreatedAt    string   `json:"createdAt"`
+}
+
+// UserSync 批量同步的单个用户条目（与 openos /api/host/users/sync 入参同构；
+// 指针/nil 语义：Disabled nil=不变；Perms nil=不变、非 nil 含空数组=覆盖）。
+type UserSync struct {
+	Username    string   `json:"username"`
+	Role        string   `json:"role"`
+	DisplayName string   `json:"displayName"`
+	Disabled    *bool    `json:"disabled"`
+	Perms       []string `json:"perms"`
+}
+
+// SyncUser 同步单个 openos 用户的角色/显示名/禁用态/权限快照（PUT /api/host/users/{name}，
+// 变化即时生效、不吊销该用户其它设备的令牌）。perms 传 nil 表示不变。
 func (m *Manager) SyncUser(username, role, displayName string, disabled bool, perms []string) error {
 	body := map[string]any{"role": role, "displayName": displayName, "disabled": disabled}
 	if perms != nil {
 		body["perms"] = perms
 	}
-	return m.serviceCall(http.MethodPut, "/api/users/"+url.PathEscape(username), body, nil)
+	return m.serviceCall(http.MethodPut, "/api/host/users/"+url.PathEscape(username), body, nil)
 }
 
-// DeleteUser 删除 openos 用户（openos 侧级联清其设置/文件/磁盘数据）。
-// 失败由调用方旁路记日志（员工档案已删，孤儿桌面用户无法再经 exchange 换令牌）。
+// SyncUsers 批量幂等同步用户（POST /api/host/users/sync：不存在开通、存在按字段
+// 更新；不在名单内的用户不动）。返回 created/updated/skipped 统计。
+func (m *Manager) SyncUsers(users []UserSync) (created, updated int, skipped []string, err error) {
+	var out struct {
+		Created  int      `json:"created"`
+		Updated  int      `json:"updated"`
+		Skipped  []string `json:"skipped"`
+	}
+	if err := m.serviceCall(http.MethodPost, "/api/host/users/sync", map[string]any{"users": users}, &out); err != nil {
+		return 0, 0, nil, err
+	}
+	return out.Created, out.Updated, out.Skipped, nil
+}
+
+// ListUsers 全量用户列表（含权限快照/token 版本/禁用态——宿主对账用）。
+func (m *Manager) ListUsers() ([]HostUser, error) {
+	var out []HostUser
+	if err := m.serviceCall(http.MethodGet, "/api/host/users", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// CreateUser 显式创建用户（宿主权威通道；密码留空 → 随机值，登录只能经 exchange）。
+func (m *Manager) CreateUser(username, password, role, displayName string, perms []string) error {
+	body := map[string]any{"username": username, "password": password, "role": role, "displayName": displayName}
+	if perms != nil {
+		body["perms"] = perms
+	}
+	return m.serviceCall(http.MethodPost, "/api/host/users", body, nil)
+}
+
+// DeleteUser 删除 openos 用户（openos 侧级联清其设置/文件/聊天/分享/反馈/AI 供应商/
+// 附件与磁盘数据）。失败由调用方旁路记日志（员工档案已删，孤儿桌面用户无法再经
+// exchange 换令牌）。
 func (m *Manager) DeleteUser(username string) error {
-	return m.serviceCall(http.MethodDelete, "/api/users/"+url.PathEscape(username), nil, nil)
+	return m.serviceCall(http.MethodDelete, "/api/host/users/"+url.PathEscape(username), nil, nil)
 }
 
 // RoleDecl declare 声明的单个角色（权威在宿主库，openos 侧只读投影）。
@@ -409,25 +513,30 @@ func (m *Manager) Declare(roles []RoleDecl, perms []PermDecl) error {
 	return m.serviceCall(http.MethodPost, "/api/host/declare", body, nil)
 }
 
-// RoleAppMap 当前角色 → 应用授权映射（GET /api/apps/access）。
+// RoleAppMap 当前角色 → 应用授权映射（GET /api/host/apps/access）。
 func (m *Manager) RoleAppMap() (map[string][]string, error) {
 	var out struct {
 		Access map[string][]string `json:"access"`
 	}
-	if err := m.serviceCall(http.MethodGet, "/api/apps/access", nil, &out); err != nil {
+	if err := m.serviceCall(http.MethodGet, "/api/host/apps/access", nil, &out); err != nil {
 		return nil, err
 	}
 	return out.Access, nil
 }
 
-// SetRoleApps 覆盖某角色的应用授权（PUT /api/apps/access；Declare 已含此语义，
+// SetRoleApps 覆盖某角色的应用授权（PUT /api/host/apps/access；Declare 已含此语义，
 // 仅存量宿主渐进迁移用）。
 func (m *Manager) SetRoleApps(role string, apps []string) error {
-	return m.serviceCall(http.MethodPut, "/api/apps/access", map[string]any{"role": role, "apps": apps}, nil)
+	return m.serviceCall(http.MethodPut, "/api/host/apps/access", map[string]any{"role": role, "apps": apps}, nil)
 }
 
-// UpsertApp 注册/更新应用（POST /api/apps；带 locked=true 时仅宿主服务身份可信，
-// 设置页禁编辑删除——宿主业务应用标配）。
+// SetRoleLabels 覆盖角色显示名映射（PUT /api/host/apps/role-labels）。
+func (m *Manager) SetRoleLabels(labels map[string]string) error {
+	return m.serviceCall(http.MethodPut, "/api/host/apps/role-labels", map[string]any{"labels": labels}, nil)
+}
+
+// UpsertApp 注册/更新应用（POST /api/host/apps；宿主通道恒信任 locked——
+// 设置页禁编辑删除，宿主业务应用标配）。
 func (m *Manager) UpsertApp(app map[string]any) error {
-	return m.serviceCall(http.MethodPost, "/api/apps", app, nil)
+	return m.serviceCall(http.MethodPost, "/api/host/apps", app, nil)
 }

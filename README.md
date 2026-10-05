@@ -78,6 +78,7 @@ export OPENOS_AI_MODEL=glm-4-flash
 | `OPENOS_GODER=off` | 停用 goder（不启动子进程、下架应用）——纯业务宿主不必携带 AI IDE |
 | `OPENOS_SEED_DEMO=0` | 不种默认演示账号与 VFS 示例文件（宿主模式账号体系完全交由集成方） |
 | `OPENOS_EXCHANGE_ROLES` | exchange 角色白名单（逗号分隔，如 `front,boss,manager`）——共享密钥泄露也无法铸造 admin |
+| `OPENOS_TOKEN_TTL` | 令牌有效期（Go duration，默认 `24h`；长会话场景如 `168h`，前端按响应 `tokenTtl` 自适应续期间隔） |
 | `OPENOS_AUDIT_RETENTION_DAYS` | 审计日志保留天数（默认 90，0=永久）；启动与每日自动清理 |
 | `OPENOS_CHAT_RETENTION_DAYS` | AI 对话历史保留天数（默认 90，0=永久），含终端伪用户 `__term__` 孤儿数据 |
 
@@ -430,7 +431,15 @@ curl -X POST http://127.0.0.1:8081/api/auth/exchange \
 
 **令牌自愈**：`GET /api/auth/refresh` 会**回发新 token**（并续种 Cookie）。宿主的 401
 自愈可直接调它换新令牌，无需每次回 SSO 重新交换（openos 令牌仍有效、仅酒店会话过期
-等场景）；独立部署下前端已内置每 12 小时 + 回前台的滑动续期，长开桌面不掉线。
+等场景）；独立部署下前端已内置每 12 小时 + 回前台的滑动续期，长开桌面不掉线。登录/
+续期/交换响应均携带 `tokenTtl`（秒），服务端配置 `OPENOS_TOKEN_TTL` 后前端自动按
+实际 TTL 的一半调整续期间隔。
+
+**登录态稳定化（身份与授权分离，2026-10）**：token_version 吊销只发生在**密码变更/
+重置**；角色、权限、显示名变化**不再吊销令牌**（授权每请求实时读库、变更即失效 +
+`sys:user` 总线推送让前端就地回正，角色变化另广播 `sys:apps-changed` 刷新应用列表）；
+禁用/删号靠实时判定拦截（REST 立即 401、总线连接 30s 内踢下线）。宿主同步用户、
+角色调整、declare 投影都不会再把已登录用户踢下线。
 
 **认证反向互通（业务后端验证 OpenOS JWT）**——`POST /api/auth/introspect`：
 
@@ -467,8 +476,9 @@ func introspect(openosToken string) (id struct {
 }
 ```
 
-- 判定与 REST/WS 同源（签名/有效期/用户存在/角色未变/token_version/禁用态），被吊销
-  令牌（改密/禁用/删号/角色变更）立即 `active:false`；
+- 判定与 REST/WS 同源（签名/有效期/用户存在/token_version/禁用态），被吊销令牌
+  （改密/删号）或禁用账号立即 `active:false`；**角色变化不再 inactive**——授权实时
+  生效（身份与授权分离），返回的 `role` 为实时库值；
 - 响应恒 200：有效 `{"active":true,"sub","username","role","displayName","exp","iat"}`，
   无效 `{"active":false}`；
 - 逐请求一跳有代价，业务后端应缓存结论（建议 TTL 取 `min(exp-now, 60s)`，对齐服务端
@@ -477,10 +487,31 @@ func introspect(openosToken string) (id struct {
   `OPENOS_JWT_SECRET` 时两方共享同一密钥即可），但持有签发密钥等于可伪造任意令牌——
   跨信任边界一律走内省。
 
-**批量用户同步**：`POST /api/users/sync`（admin）幂等推送用户清单——不存在则开通
-（随机密码），存在则按字段更新（角色/显示名/禁用态/权限点快照，变化即热吊销）；最后一名管理员
-的降级/禁用会被跳过并在响应 `skipped` 中说明。配合 exchange 的惰性开通，宿主可选
-「登录时开通」或「启动时全量同步」两种策略。
+**宿主机对机 API（`/api/host/*`，2026-10 用户体系全面开放）**：与 declare 同一把
+`X-Exchange-Secret` 守护的服务端到服务端接口组，宿主不再需要「exchange 铸造 admin
+服务账号令牌再调管理 REST」（与角色白名单解耦、不再产生假 admin 用户）：
+
+| 端点 | 说明 |
+|---|---|
+| `GET /api/host/users` | 全字段用户列表（含 perms 快照/token 版本/禁用态） |
+| `POST /api/host/users` | 显式建用户（密码留空 → 随机值，登录只能经 exchange） |
+| `POST /api/host/users/sync` | 批量幂等同步（语义同下述 REST 版） |
+| `PUT /api/host/users/{name}` | 字段级更新（role/displayName/disabled/perms/password） |
+| `DELETE /api/host/users/{name}` | 删除并级联清理 |
+| `GET /api/host/roles` | 角色目录 + 权限点目录（对账/展示） |
+| `POST /api/host/apps` / `DELETE /api/host/apps/{id}` | 应用注册（恒信任 locked）/ 强制删除 |
+| `GET`/`PUT /api/host/apps/access`、`PUT /api/host/apps/role-labels` | 角色应用授权与显示名 |
+| `GET`/`PUT /api/host/ai/user-providers` | AI 每用户供应商 |
+
+hostsdk 的 `Manager`（SyncUser/SyncUsers/ListUsers/CreateUser/DeleteUser/RoleAppMap/
+SetRoleApps/UpsertApp…）已全部切到本组；旧管理 REST 路径的 `Call` 逃生通道自动回落
+兼容。审计 operator 记为 `host`。
+
+**批量用户同步**：`POST /api/users/sync`（users.manage，宿主走 `/api/host/users/sync`）
+幂等推送用户清单——不存在则开通（随机密码），存在则按字段更新（角色/显示名/禁用态/
+权限点快照，**变化即时生效、不吊销令牌**）；最后一名管理员的降级/禁用会被跳过并在
+响应 `skipped` 中说明。配合 exchange 的惰性开通，宿主可选「登录时开通」或「启动时
+全量同步」两种策略。
 
 **角色目录与功能级权限（2026-10 P2）**：应用级授权（role_apps）之上新增功能级权限点模型，
 双模式并存：
@@ -502,19 +533,24 @@ func introspect(openosToken string) (id struct {
   }
   ```
 
-  幂等收敛：清单外既有 host 角色整体移除（级联清权限与授权）、system 角色不动、
-  保存即广播 `sys:apps-changed`；取代宿主侧 os_role_seed 标记表这类种子 workaround。
+  幂等收敛：清单外既有 host 角色移除（级联清权限与授权；**仍被用户绑定的角色不删**，
+  响应 `unresolved` 报告，宿主先把这些用户的角色同步走再重 declare 即收敛——直接删
+  会让用户挂着不存在的角色悬空）、system 角色不动、保存即广播 `sys:apps-changed`、
+  整体清用户态缓存权限即时生效；取代宿主侧 os_role_seed 标记表这类种子 workaround。
   host 角色在设置页只读展示（「宿主托管」徽标）。
-- **权限快照**：`POST /api/auth/exchange` 与 `/api/users/sync` 支持可选 `perms[]` 字段——
-  宿主权威库算出的该用户权限并集写入 users.perms（变化即热吊销）；未传时按角色权限矩阵
-  推导。JWT claims 与 `/api/auth/me` 均携带 `perms`。
+- **权限快照**：`POST /api/auth/exchange`、`/api/users/sync` 与 `PUT /api/users/{name}`
+  均支持可选 `perms[]` 字段——宿主权威库算出的该用户权限并集写入 users.perms（变化
+  即时生效、不吊销令牌）；未传时按角色权限矩阵推导。JWT claims 与 `/api/auth/me`
+  均携带 `perms`（服务端判定一律走实时库值）。
 - **前端门控**：`import { can } from '@openos/framework'`——`can('room.view')` /
   `v-perm="'room.view'"` 指令；语义与服务端一致（admin 直通、`*` 通配、精确匹配）。
-- **openos 内置权限点**：`users.manage` / `apps.manage` / `market.manage` / `ai.manage` /
-  `system.manage`（admin 恒持 `*`；服务端 `auth.RequirePerm` 中间件已就位，现有管理端点
-  行为不变，为后续细分授权留位）。
+- **openos 内置权限点（2026-10 起实际接管管理端点）**：`users.manage` → `/api/users*`
+  全组、`apps.manage` → 应用注册/删除/授权矩阵、`market.manage` → 商店源与安装、
+  `ai.manage` → AI 配置与每用户供应商、`system.manage` → 审计/统计/角色目录写
+  （admin 恒直通）。防提权约束：持 users.manage 的非 admin 不可操作 admin 用户、
+  不可授予 admin 角色。
 - 角色目录 API：`GET /api/roles`（登录态，含每角色 perms/apps 快照与权限点目录）、
-  `PUT /api/roles/{key}` / `DELETE /api/roles/{key}`（admin；host 角色只读拒绝）。
+  `PUT /api/roles/{key}` / `DELETE /api/roles/{key}`（system.manage；host 角色只读拒绝）。
 
 **裁剪部署（数据边界）**：宿主以 SQLite 只保存**演示数据与每用户界面设置**为目标时：
 
@@ -527,8 +563,9 @@ OPENOS_EXCHANGE_SECRET=<密钥> OPENOS_EXCHANGE_ROLES=front,boss,manager \
 - VFS/终端类与 goder 内置应用整体下架（含授权矩阵回收），`/api/fs/*` 返回 503；
 - 无演示账号、无示例文件，用户全部经 exchange / users/sync 进入；
 - 用户禁用（`PUT /api/users/{name}` `{"disabled":true}`）即时生效：REST 立即 401、
-  在线总线连接 30s 内踢下线；
-- 删除用户级联清理磁盘数据（真实终端沙箱目录、goder 会话目录）；
+  在线总线连接 30s 内踢下线（不吊销令牌，重新启用后会话恢复）；
+- 删除用户级联清理：设置/文件/聊天（私聊+聊天室）/分享链接/反馈/AI 每用户供应商/
+  附件（行+磁盘文件）与磁盘数据（真实终端沙箱目录、goder 会话目录）；
 - 审计与对话历史按保留期自动清理，jwt_secret 存于独立的 `system_kv` 表
   （用户设置数据可安全导出/清理，不波及系统密钥）。
 
@@ -882,10 +919,12 @@ git tag v0.0.1 && git push origin v0.0.1   # 推送 tag 即触发发布
 
 - 密码 pbkdf2-SHA256（**600000 轮** + 随机盐，2026-10 安全审计自 20000 上调；
   20000/4096 轮的存量 hash 登录时自动透明升级）
-- JWT HS256，24 小时有效，携带 token_version：**改角色/改密码/删用户/禁用后旧令牌立即失效**
-  （REST 每请求实时核对；WebSocket 升级时同套校验，已建立的总线连接经 30s 周期复核踢下线，
-  客户端以续期后的令牌自动重连，吊销令牌重连被拒；新建用户 token_version 以当前时间初始化，
-  杜绝「删号重建后旧令牌复活」）
+- JWT HS256，默认 24 小时有效（`OPENOS_TOKEN_TTL` 可配），携带 token_version。
+  **身份与授权分离（2026-10）**：token_version 吊销只发生在密码变更/重置；角色/权限/
+  显示名变化实时生效（10s 缓存 + 变更即失效）**不掉线**，禁用/删号靠实时判定拦截
+  （REST 每请求核对；已建立的总线连接经 30s 周期复核踢下线，客户端以续期后的令牌
+  自动重连，吊销令牌重连被拒；新建用户 token_version 以当前时间初始化，杜绝
+  「删号重建后旧令牌复活」）
 - **query 鉴权走一次性短票**（2026-10 安全审计）：`POST /api/auth/ws-ticket` 签发
   30s 用后即焚的短票，`/ws`、附件下载、商店 bundle 取件等无法携带 header 的场景
   用 `?ticket=` 替代长期 JWT 入 URL（`?token=` 兼容期内仍可用）；会话 Cookie 统一
@@ -900,6 +939,10 @@ git tag v0.0.1 && git push origin v0.0.1   # 推送 tag 即触发发布
 - exchange 令牌交换：密钥恒定时间比较；可选角色白名单（`OPENOS_EXCHANGE_ROLES`，
   **强烈建议配置**——密钥配置而白名单为空时启动日志会告警）；
   已禁用用户拒绝交换；显示名变更留审计
+- **`/api/host/*` 机对机组与 declare 同为全信任通道**：`OPENOS_EXCHANGE_SECRET`
+  持有者可管理全部用户体系（含设置 admin 角色）——密钥等同管理员凭证，仅在宿主
+  后端与 openos（同机/可信网络）之间使用并妥善保管；`OPENOS_EXCHANGE_ROLES` 仅
+  约束 exchange 的**用户令牌铸造面**。宿主全部管理调用入审计（operator=`host`）
 - 审计日志 / AI 对话历史按保留期自动清理（默认 90 天，可配置），防止无限膨胀
 - 应用代理（`webproxy`）：SSRF 防线在拨号层（域名单次解析校验后按 IP 直连，堵
   DNS rebinding TOCTOU；配置目标主机放行、其余主机拒绝内网地址）、

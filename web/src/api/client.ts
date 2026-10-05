@@ -66,6 +66,15 @@ export function triggerUnauthorized() {
  *  （跨 location.reload / SSO 跳转存活，见 bus.ts）。 */
 export const AUTH_NOTICE_KEY = 'openos_auth_notice'
 
+/** 跨标签页登出同步：storage 事件不在发起方标签页触发——其它标签清掉令牌时
+ *  （登出/被踢/tokenRecovery 失败链路），本标签同样走全局登出（多标签登录态
+ *  一致；仅 newValue===null 的删除事件，换新令牌不触发）。 */
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', (e) => {
+    if (e.key === TOKEN_KEY && e.newValue === null && getToken()) triggerUnauthorized()
+  })
+}
+
 export class ApiError extends Error {
   status: number
   constructor(status: number, msg: string) { super(msg); this.status = status }

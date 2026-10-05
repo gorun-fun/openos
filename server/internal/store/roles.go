@@ -37,15 +37,16 @@ type PermDef struct {
 	ManagedBy string `json:"managedBy"` // system | host
 }
 
-// builtinPermDefs openos 自身的功能级权限点（demo 模式下 admin 恒持 `*`）。
-// 现阶段仅作能力就位（端点仍走 RequireAdmin），为后续细分授权留位；宿主经
-// declare 注入自己的业务权限点（managed_by='host'）。
+// builtinPermDefs openos 自身的功能级权限点（2026-10 起实际接管对应管理端点：
+// users.manage→/api/users* 全组、system.manage→审计/统计/角色目录写、apps.manage
+// →应用注册与授权、market.manage→商店、ai.manage→AI 配置；admin 恒直通）。
+// 宿主经 declare 注入自己的业务权限点（managed_by='host'）。
 var builtinPermDefs = []PermDef{
 	{Code: "users.manage", Group: "system", Label: "用户管理（创建/角色/禁用/删除）", ManagedBy: "system"},
 	{Code: "apps.manage", Group: "system", Label: "应用注册与管理", ManagedBy: "system"},
 	{Code: "market.manage", Group: "system", Label: "商店目录源与安装", ManagedBy: "system"},
 	{Code: "ai.manage", Group: "system", Label: "AI 服务配置", ManagedBy: "system"},
-	{Code: "system.manage", Group: "system", Label: "系统信息与审计日志", ManagedBy: "system"},
+	{Code: "system.manage", Group: "system", Label: "系统信息、审计日志与角色目录", ManagedBy: "system"},
 }
 
 // builtinRoles demo/独立部署的内置三角色。
@@ -298,23 +299,32 @@ type HostRoleEntry struct {
 	Apps  []string `json:"apps"`
 }
 
+// StaleRole declare 收敛时未能移除的清单外 host 角色（仍被用户绑定）。
+type StaleRole struct {
+	Key        string `json:"key"`
+	BoundUsers int    `json:"boundUsers"`
+}
+
 // DeclareHostRoles 宿主声明式全量同步（交换密钥已在路由层守护）：
 //   - 清单内角色 upsert 为 managed_by='host'（label/perms/apps 全量覆盖）；
-//   - 清单外的既有 host 角色整体移除（权限点与应用授权级联清理）；
+//   - 清单外的既有 host 角色整体移除（权限点与应用授权级联清理）；**仍被用户
+//     绑定的角色不删**，改为在返回值 unresolved 中报告（宿主先把这些用户的
+//     角色同步走再重新 declare，幂等收敛）——直接删除会让用户挂着不存在的
+//     角色悬空（权限/应用授权全空且无从对账）；
 //   - system 角色不动（宿主与 openos 内置共存）；
 //   - 权限点目录随声明幂等登记（managed_by='host'）。
 // 幂等：重复声明同样内容不产生实际变更（内容相同不写，SQLite 自然幂等）。
-func (db *DB) DeclareHostRoles(entries []HostRoleEntry, permDefs []PermDef) error {
+func (db *DB) DeclareHostRoles(entries []HostRoleEntry, permDefs []PermDef) ([]StaleRole, error) {
 	// 宿主声明的权限点一律标记 host 归属（防止空值/伪造 system 覆盖内置目录语义）
 	for i := range permDefs {
 		permDefs[i].ManagedBy = "host"
 	}
 	if err := db.UpsertPermDefs(permDefs); err != nil {
-		return err
+		return nil, err
 	}
 	tx, err := db.Begin()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback()
 	declared := map[string]bool{}
@@ -326,64 +336,73 @@ func (db *DB) DeclareHostRoles(entries []HostRoleEntry, permDefs []PermDef) erro
 		if _, err := tx.Exec(`INSERT INTO roles(key,label,builtin,managed_by,sort) VALUES(?,?,0,'host',10)
 			ON CONFLICT(key) DO UPDATE SET label=excluded.label, managed_by='host'`,
 			e.Key, e.Label); err != nil {
-			return err
+			return nil, err
 		}
 		if _, err := tx.Exec(`DELETE FROM role_perms WHERE role=?`, e.Key); err != nil {
-			return err
+			return nil, err
 		}
 		for _, p := range e.Perms {
 			if p == "" {
 				continue
 			}
 			if _, err := tx.Exec(`INSERT OR IGNORE INTO role_perms(role,perm) VALUES(?,?)`, e.Key, p); err != nil {
-				return err
+				return nil, err
 			}
 		}
 		// Apps=nil 表示该角色的应用授权**不在宿主权威内**（如 grf-hotel 的
 		// role_apps 是运行期唯一存储），不动 role_apps；非 nil 才覆盖。
 		if e.Apps != nil {
 			if _, err := tx.Exec(`DELETE FROM role_apps WHERE role=?`, e.Key); err != nil {
-				return err
+				return nil, err
 			}
 			for _, a := range e.Apps {
 				if a == "" {
 					continue
 				}
 				if _, err := tx.Exec(`INSERT OR IGNORE INTO role_apps(role,app_id) VALUES(?,?)`, e.Key, a); err != nil {
-					return err
+					return nil, err
 				}
 			}
 		}
 	}
-	// 清单外的 host 角色移除
+	// 清单外的 host 角色移除（仍被用户绑定的除外——见函数注释）
 	rows, err := tx.Query(`SELECT key FROM roles WHERE managed_by='host'`)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var stale []string
 	for rows.Next() {
 		var k string
 		if err := rows.Scan(&k); err != nil {
 			rows.Close()
-			return err
+			return nil, err
 		}
 		if !declared[k] {
 			stale = append(stale, k)
 		}
 	}
 	rows.Close()
+	var unresolved []StaleRole
 	for _, k := range stale {
+		var n int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM users WHERE role=?`, k).Scan(&n); err != nil {
+			return nil, err
+		}
+		if n > 0 {
+			unresolved = append(unresolved, StaleRole{Key: k, BoundUsers: n})
+			continue
+		}
 		for _, stmt := range []string{
 			`DELETE FROM roles WHERE key=? AND managed_by='host'`,
 			`DELETE FROM role_perms WHERE role=?`,
 			`DELETE FROM role_apps WHERE role=?`,
 		} {
 			if _, err := tx.Exec(stmt, k); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
-	return tx.Commit()
+	return unresolved, tx.Commit()
 }
 
 // HasPermJudge 权限判定（与 grf-hotel Claims.HasPerm 同语义）：

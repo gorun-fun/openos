@@ -64,6 +64,32 @@ func New(dir string, db *store.DB) (*Store, error) {
 // FilePath 附件文件落盘路径（id 已限 hex 字符集）。
 func (s *Store) FilePath(id string) string { return filepath.Join(s.dir, id) }
 
+// DeleteByUploader 删除某用户的全部附件（元数据行 + 磁盘文件；删号级联用，
+// main 注入的 onUserDeleted 钩子调用——auth 包的行级清理够不到磁盘文件）。
+func (s *Store) DeleteByUploader(uploader string) {
+	if uploader == "" {
+		return
+	}
+	rows, err := s.db.Query(`SELECT id FROM attachments WHERE uploader=?`, uploader)
+	if err != nil {
+		return
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil && id != "" {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	s.db.Exec(`DELETE FROM attachments WHERE uploader=?`, uploader)
+	for _, id := range ids {
+		if err := os.Remove(s.FilePath(id)); err != nil && !os.IsNotExist(err) {
+			log.Printf("attach: 删号清理附件文件失败 %s: %v", id, err)
+		}
+	}
+}
+
 // Save 解析 multipart 上传（字段名 file，取第一个），单次流式读完成
 // 大小限长、内容嗅探与落盘，成功后入库。请求体应先经 http.MaxBytesReader。
 func (s *Store) Save(uploader string, r *http.Request) (Meta, error) {

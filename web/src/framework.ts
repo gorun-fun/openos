@@ -245,7 +245,7 @@ export { bus } from './bus/bus'
 export {
   api, fsApi, rawFileUrl, fetchRawBlob, downloadFile,
   getToken, setToken, clearToken,
-  setUnauthorizedHandler, ApiError,
+  setUnauthorizedHandler, setTokenRecovery, ApiError,
 } from './api/client'
 export type { SessionUser, AppDef, VFile } from './api/client'
 export * from './ui'

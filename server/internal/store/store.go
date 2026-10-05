@@ -50,7 +50,11 @@ type User struct {
 	DisplayName string `json:"displayName"`
 	Role        string `json:"role"`
 	Disabled    bool   `json:"disabled"`
-	CreatedAt   string `json:"createdAt"`
+	// Perms 用户级权限快照（空=无覆盖，回落角色推导）；TokenVersion 供管理端
+	// 对账（身份级吊销版本，密码重置递增）。
+	Perms        []string `json:"perms"`
+	TokenVersion int64    `json:"tokenVersion"`
+	CreatedAt    string   `json:"createdAt"`
 }
 
 // File 虚拟文件系统中的条目。
