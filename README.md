@@ -500,6 +500,7 @@ func introspect(openosToken string) (id struct {
 | `DELETE /api/host/users/{name}` | 删除并级联清理 |
 | `GET /api/host/roles` | 角色目录 + 权限点目录（对账/展示） |
 | `POST /api/host/apps` / `DELETE /api/host/apps/{id}` | 应用注册（恒信任 locked）/ 强制删除 |
+| `GET /api/host/apps` | 全量应用列表（宿主对账/清退旧应用） |
 | `GET`/`PUT /api/host/apps/access`、`PUT /api/host/apps/role-labels` | 角色应用授权与显示名 |
 | `GET`/`PUT /api/host/ai/user-providers` | AI 每用户供应商 |
 

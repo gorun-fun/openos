@@ -373,6 +373,15 @@ func main() {
 	mux.HandleFunc("DELETE /api/host/users/{name}", authSvc.HostDeleteUser)
 	// 角色与权限点目录（只读对账；投影写入走 POST /api/host/declare）
 	mux.HandleFunc("GET /api/host/roles", authSvc.HostRoles)
+	// 全量应用列表（宿主对账/清退旧应用用；数据面同 REST GET /api/apps?all=1）
+	mux.HandleFunc("GET /api/host/apps", hostOnly(func(w http.ResponseWriter, r *http.Request) {
+		apps, err := db.ListApps()
+		if err != nil {
+			http.Error(w, "读取应用列表失败", 500)
+			return
+		}
+		writeJSON(w, apps)
+	}))
 	// 应用注册（宿主通道恒信任 locked——密钥本身即宿主身份）与强制删除
 	mux.HandleFunc("POST /api/host/apps", hostOnly(func(w http.ResponseWriter, r *http.Request) {
 		var a store.AppDef

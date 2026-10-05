@@ -535,6 +535,33 @@ func (m *Manager) SetRoleLabels(labels map[string]string) error {
 	return m.serviceCall(http.MethodPut, "/api/host/apps/role-labels", map[string]any{"labels": labels}, nil)
 }
 
+// HostApp GET /api/host/apps 返回的应用条目（与 openos store.AppDef 同构的
+// 常用字段子集——宿主对账/清退旧应用用）。
+type HostApp struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Builtin bool   `json:"builtin"`
+	Locked  bool   `json:"locked"`
+	Hidden  bool   `json:"hidden"`
+	Source  string `json:"source"`
+	Version string `json:"version"`
+}
+
+// ListApps 全量应用列表（GET /api/host/apps；含 builtin/locked 标记，宿主清理
+// 旧版应用的对账依据）。
+func (m *Manager) ListApps() ([]HostApp, error) {
+	var out []HostApp
+	if err := m.serviceCall(http.MethodGet, "/api/host/apps", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// DeleteApp 强制删除应用（DELETE /api/host/apps/{id}；宿主清退自己的 locked 应用）。
+func (m *Manager) DeleteApp(id string) error {
+	return m.serviceCall(http.MethodDelete, "/api/host/apps/"+url.PathEscape(id), nil, nil)
+}
+
 // UpsertApp 注册/更新应用（POST /api/host/apps；宿主通道恒信任 locked——
 // 设置页禁编辑删除，宿主业务应用标配）。
 func (m *Manager) UpsertApp(app map[string]any) error {
