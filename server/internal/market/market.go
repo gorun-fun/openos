@@ -375,9 +375,14 @@ func validSourceURL(u string) bool {
 	if len(u) > MaxSourceURLLen {
 		return false
 	}
-	// https 强制（安全审计 2026-10）：http 源可被中间人投毒目录（bundle/web 条目）
+	// https 强制（安全审计 2026-10）：http 源可被中间人投毒目录（bundle/web 条目）；
+	// 回环 http 例外——与 marketGet 的拉取例外对齐（本地开发自建货架不出网卡，
+	// 无 MITM 面），否则配置层直接拒掉拉取层声称支持的形态
 	p, err := url.Parse(u)
-	return err == nil && p.Scheme == "https" && p.Host != ""
+	if err != nil || p.Host == "" {
+		return false
+	}
+	return p.Scheme == "https" || (p.Scheme == "http" && isLoopbackHost(p.Hostname()))
 }
 
 // Sources 当前全部远程源（去重副本）：自定义源在前（遮蔽默认源同 id 条目），默认源垫底。

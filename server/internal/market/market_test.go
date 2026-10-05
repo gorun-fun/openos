@@ -354,6 +354,7 @@ func TestParseDefaultSources(t *testing.T) {
 		{"多项保序", "https://a/x.json, https://b/y.json", []string{"https://a/x.json", "https://b/y.json"}},
 		{"去重", "https://a/x.json,https://a/x.json", []string{"https://a/x.json"}},
 		{"非法丢弃", "http://insecure/x.json,https://a/x.json", []string{"https://a/x.json"}},
+		{"回环 http 例外", "http://127.0.0.1:8899/catalog.json,http://localhost/c.json", []string{"http://127.0.0.1:8899/catalog.json", "http://localhost/c.json"}},
 		{"全非法为空表", "http://a/x.json,not-a-url", nil},
 	}
 	for _, c := range cases {
