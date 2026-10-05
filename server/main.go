@@ -883,14 +883,11 @@ func main() {
 	// ---- 应用商店（OPENOS_MARKET=off 时路由不注册，商店应用也不入种子）----
 	// 目录对所有登录用户可浏览（安装按钮仅管理员）；安装 = 写 apps 表 + 按所选角色授权。
 	// 目录源多级：自定义源（管理员经商店设置维护，system_kv 持久化）+ 官方默认源
-	// （OPENOS_MARKET_URL，=off 只关默认源、自定义源仍可用）并发拉取合并（自定义源
-	// 排前可遮蔽同 id 条目），任一源成功即生效、全部失败沿用现行，初始兜底 = 随
-	// 二进制发布的内置清单。更新货架只改远端 JSON 无需发版。
+	// （OPENOS_MARKET_URL 逗号分隔多个，=off 只关默认源、自定义源仍可用）并发拉取
+	// 合并（自定义源排前可遮蔽同 id 条目），任一源成功即生效、全部失败沿用现行，
+	// 初始兜底 = 随二进制发布的内置清单。更新货架只改远端 JSON 无需发版。
 	if envOr("OPENOS_MARKET", "") != "off" {
-		marketDefault := envOr("OPENOS_MARKET_URL", "https://download.gorun.fun/openos/market/catalog.json")
-		if marketDefault == "off" {
-			marketDefault = ""
-		}
+		marketDefaults := market.ParseDefaultSources(envOr("OPENOS_MARKET_URL", "https://download.gorun.fun/openos/market/catalog.json"))
 		// bundle 组件落盘目录（安装时下载、运行期本地提供）
 		market.SetBundleDir(filepath.Join(dataDir, "market", "bundles"))
 		// 先恢复持久化的自定义源（system_kv market_sources，JSON 数组）再启动拉取循环：
@@ -909,14 +906,14 @@ func main() {
 				hub.Publish("sys:apps-changed", map[string]any{"id": u.ID})
 			}
 		})
-		market.StartRemote(marketDefault)
+		market.StartRemote(marketDefaults)
 		// 目录源管理（admin）：GET 查看默认/自定义源；PUT 全量覆盖自定义源并立即拉取
 		authed.HandleFunc("GET /api/market/sources", func(w http.ResponseWriter, r *http.Request) {
 			if !auth.FromContext(r).Can("market.manage") {
 				http.Error(w, "需要权限：market.manage", http.StatusForbidden)
 				return
 			}
-			writeJSON(w, map[string]any{"default": market.DefaultURL(), "custom": market.CustomSources()})
+			writeJSON(w, map[string]any{"defaults": market.DefaultURLs(), "custom": market.CustomSources()})
 		})
 		authed.HandleFunc("PUT /api/market/sources", func(w http.ResponseWriter, r *http.Request) {
 			id := auth.FromContext(r)

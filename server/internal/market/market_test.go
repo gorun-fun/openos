@@ -282,19 +282,55 @@ func TestSetCustomSources(t *testing.T) {
 	}
 }
 
-// TestSourcesOrder 源序：自定义在前、默认垫底、与默认重复的自定义去重。
+// TestSourcesOrder 源序：自定义在前、默认垫底（多默认源按声明序）、跨级重复去重。
 func TestSourcesOrder(t *testing.T) {
 	mu.Lock()
-	prevCustom, prevDefault := customSrcs, defaultURL
+	prevCustom, prevDefault := customSrcs, defaultURLs
 	customSrcs = []string{"https://mine/x.json", "https://default/x.json"}
-	defaultURL = "https://default/x.json"
+	defaultURLs = []string{"https://default/x.json", "https://alt/x.json"}
 	mu.Unlock()
-	t.Cleanup(func() { mu.Lock(); customSrcs, defaultURL = prevCustom, prevDefault; mu.Unlock() })
+	t.Cleanup(func() { mu.Lock(); customSrcs, defaultURLs = prevCustom, prevDefault; mu.Unlock() })
 
 	got := Sources()
-	want := []string{"https://mine/x.json", "https://default/x.json"}
-	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
-		t.Errorf("源序错误: %v", got)
+	want := []string{"https://mine/x.json", "https://default/x.json", "https://alt/x.json"}
+	if len(got) != len(want) {
+		t.Fatalf("源序错误: %v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("源序错误: %v", got)
+			break
+		}
+	}
+}
+
+// TestParseDefaultSources OPENOS_MARKET_URL 多默认源解析：off/空 = 关闭；逗号分隔
+// 逐项清洗；非法地址（非 https/超长）丢弃不拖垮列表；去重保序。
+func TestParseDefaultSources(t *testing.T) {
+	cases := []struct {
+		name, raw string
+		want      []string
+	}{
+		{"空串关闭", "", nil},
+		{"off 关闭", " off ", nil},
+		{"单项", "https://a/x.json", []string{"https://a/x.json"}},
+		{"多项保序", "https://a/x.json, https://b/y.json", []string{"https://a/x.json", "https://b/y.json"}},
+		{"去重", "https://a/x.json,https://a/x.json", []string{"https://a/x.json"}},
+		{"非法丢弃", "http://insecure/x.json,https://a/x.json", []string{"https://a/x.json"}},
+		{"全非法为空表", "http://a/x.json,not-a-url", nil},
+	}
+	for _, c := range cases {
+		got := ParseDefaultSources(c.raw)
+		if len(got) != len(c.want) {
+			t.Errorf("%s: %v（期望 %v）", c.name, got, c.want)
+			continue
+		}
+		for i := range c.want {
+			if got[i] != c.want[i] {
+				t.Errorf("%s: %v（期望 %v）", c.name, got, c.want)
+				break
+			}
+		}
 	}
 }
 
@@ -313,27 +349,32 @@ func TestRefreshNowMultiSource(t *testing.T) {
 	def := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `{"version":1,"apps":[%s,%s]}`, entry("shared", "官方版"), entry("def-only", "官方独占"))
 	}))
+	alt := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"version":1,"apps":[%s,%s]}`, entry("shared", "官方alt版"), entry("alt-only", "第二默认源独占"))
+	}))
 	defer mine.Close()
 	defer off.Close()
 	defer def.Close()
+	defer alt.Close()
 
 	restore := func() {
 		mu.Lock()
-		customSrcs, defaultURL = nil, ""
+		customSrcs, defaultURLs = nil, nil
 		active = embeddedList
 		mu.Unlock()
 	}
 	t.Cleanup(restore)
 
-	// 1) 自定义(含失败源) + 默认：失败源缺席，shared 取自定义版（首见优先）
+	// 1) 自定义(含失败源) + 多默认源：失败源缺席，shared 取自定义版（首见优先）、
+	// 两个默认源独占条目都在、默认源间同 id 以前者为准
 	mu.Lock()
 	customSrcs = []string{mine.URL, off.URL}
-	defaultURL = def.URL
+	defaultURLs = []string{def.URL, alt.URL}
 	active = embeddedList
 	mu.Unlock()
 	okN, total := RefreshNow()
-	if okN != 2 || total != 3 {
-		t.Errorf("合并计数错误: ok=%d total=%d（期望 2/3）", okN, total)
+	if okN != 3 || total != 4 {
+		t.Errorf("合并计数错误: ok=%d total=%d（期望 3/4）", okN, total)
 	}
 	shared, _ := Find("shared")
 	if shared.Name != "自定义版" {
@@ -345,11 +386,14 @@ func TestRefreshNowMultiSource(t *testing.T) {
 	if _, err := Find("def-only"); err != nil {
 		t.Error("默认源独占条目应存在")
 	}
+	if _, err := Find("alt-only"); err != nil {
+		t.Error("第二默认源独占条目应存在")
+	}
 
 	// 2) 全部源失败：沿用现行（上一步的合并结果仍在）
 	mu.Lock()
 	customSrcs = []string{off.URL}
-	defaultURL = off.URL
+	defaultURLs = []string{off.URL}
 	mu.Unlock()
 	okN, total = RefreshNow()
 	if okN != 0 {
@@ -358,8 +402,8 @@ func TestRefreshNowMultiSource(t *testing.T) {
 	if _, err := Find("mine-only"); err != nil {
 		t.Error("全部失败后应沿用现行目录")
 	}
-	if total != 3 {
-		t.Errorf("沿用现行时 total 应为现行条目数 3: %d", total)
+	if total != 4 {
+		t.Errorf("沿用现行时 total 应为现行条目数 4: %d", total)
 	}
 }
 

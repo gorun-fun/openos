@@ -2,9 +2,10 @@
 //
 // 目录源多级：内置清单（catalog.json 随二进制发布，go:embed）为兜底基线；
 // 远程清单并发拉取（每 10 分钟 + 保存即拉取）——自定义源（管理员经商店设置添加，
-// 持久化 system_kv）排前、官方默认源（OPENOS_MARKET_URL，=off 关闭）垫底，
-// 合并去重按 id **首见优先**：自定义源可遮蔽官方同 id 条目。任一源成功即以成功
-// 源合并结果为生效目录；全部失败沿用现行目录。更新货架只改远端 JSON，无需发版。
+// 持久化 system_kv）排前、官方默认源（OPENOS_MARKET_URL 逗号分隔多个，=off 全关）
+// 垫底，合并去重按 id **首见优先**：自定义源可遮蔽默认源同 id 条目、默认源按声明
+// 顺序前者遮蔽后者。任一源成功即以成功源合并结果为生效目录；全部失败沿用现行
+// 目录。更新货架只改远端 JSON，无需发版。
 //
 // 清单 apps 字段兼容两种形态：数组（官方目录）与 id→条目对象映射（宿主把 App
 // 发布货架与商店共用同一 catalog.json 时，如 grf-hotel 的 remoteApps 货架）——
@@ -114,10 +115,10 @@ var (
 	embeddedOnce sync.Once
 	embeddedList []Entry
 
-	mu         sync.RWMutex
-	active     []Entry  // 当前生效目录：全部远程源合并结果，或内置兜底
-	defaultURL string   // 官方默认源（OPENOS_MARKET_URL；=off 时为空 = 只剩自定义源）
-	customSrcs []string // 管理员自定义源（有序，首见优先遮蔽默认源同 id 条目）
+	mu          sync.RWMutex
+	active      []Entry  // 当前生效目录：全部远程源合并结果，或内置兜底
+	defaultURLs []string // 官方默认源列表（OPENOS_MARKET_URL 逗号分隔；空 = off 只剩自定义源）
+	customSrcs  []string // 管理员自定义源（有序，首见优先遮蔽默认源同 id 条目）
 
 	refreshMu       sync.Mutex // 串行化刷新（周期循环与保存即拉取互斥）
 	refreshInterval = 10 * time.Minute
@@ -282,9 +283,9 @@ func parseApps(raw json.RawMessage) ([]Entry, error) {
 
 // StartRemote 启动远程目录同步循环（market 启用时恒起；默认源为空则只等自定义源）：
 // 启动即拉取一次，此后按固定间隔刷新。
-func StartRemote(def string) {
+func StartRemote(defs []string) {
 	mu.Lock()
-	defaultURL = def
+	defaultURLs = defs
 	mu.Unlock()
 	go func() {
 		RefreshNow()
@@ -296,11 +297,38 @@ func StartRemote(def string) {
 	}()
 }
 
-// DefaultURL 官方默认源地址（空 = 已由 OPENOS_MARKET_URL=off 关闭）。
-func DefaultURL() string {
+// ParseDefaultSources 解析 OPENOS_MARKET_URL：整体 "off"/空 = 关闭默认源（nil）；
+// 否则逗号分隔多个 catalog 地址，逐项 trim、按 validSourceURL 过滤（非法项记日志
+// 丢弃，不拖垮整个列表——宿主笔误时其余源仍可用）、去重保序。
+func ParseDefaultSources(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "off" {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, part := range strings.Split(raw, ",") {
+		u := strings.TrimSpace(part)
+		if u == "" || seen[u] {
+			continue
+		}
+		if !validSourceURL(u) {
+			log.Printf("market: 默认源地址非法，已忽略 %q", u)
+			continue
+		}
+		seen[u] = true
+		out = append(out, u)
+	}
+	return out
+}
+
+// DefaultURLs 官方默认源列表（空 = 已由 OPENOS_MARKET_URL=off 关闭）。
+func DefaultURLs() []string {
 	mu.RLock()
 	defer mu.RUnlock()
-	return defaultURL
+	out := make([]string, len(defaultURLs))
+	copy(out, defaultURLs)
+	return out
 }
 
 // CustomSources 当前自定义源列表（副本）。
@@ -353,7 +381,7 @@ func validSourceURL(u string) bool {
 func Sources() []string {
 	mu.RLock()
 	defer mu.RUnlock()
-	out := make([]string, 0, len(customSrcs)+1)
+	out := make([]string, 0, len(customSrcs)+len(defaultURLs))
 	seen := map[string]bool{}
 	for _, u := range customSrcs {
 		if !seen[u] {
@@ -361,8 +389,11 @@ func Sources() []string {
 			out = append(out, u)
 		}
 	}
-	if defaultURL != "" && !seen[defaultURL] {
-		out = append(out, defaultURL)
+	for _, u := range defaultURLs {
+		if !seen[u] {
+			seen[u] = true
+			out = append(out, u)
+		}
 	}
 	return out
 }

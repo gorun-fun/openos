@@ -194,7 +194,7 @@ async function onVerPick(ev: Event) {
 // ---- 商店设置：目录源管理（admin）——默认官方源不可删，自定义源可添加多个，
 //      排在前面可遮蔽官方同 id 条目；保存后服务端立即拉取全部源合并生效 ----
 const settingsOpen = ref(false)
-const srcDefault = ref('')
+const srcDefaults = ref<string[]>([])
 const srcCustom = ref<string[]>([])
 const srcInput = ref('')
 const srcMsg = ref('')
@@ -229,8 +229,8 @@ async function openSettings() {
   settingsOpen.value = true
   srcMsg.value = ''
   try {
-    const d = await api.get<{ default: string; custom: string[] }>('/api/market/sources')
-    srcDefault.value = d.default || ''
+    const d = await api.get<{ defaults: string[]; custom: string[] }>('/api/market/sources')
+    srcDefaults.value = d.defaults || []
     srcCustom.value = d.custom || []
   } catch (e: any) {
     srcMsg.value = e.message
@@ -327,11 +327,15 @@ const icoGear = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fil
         <h4>目录源</h4>
         <p class="s-desc">
           应用目录从以下 JSON 地址拉取（每 10 分钟自动刷新，保存后立即拉取）。
-          自定义源排在官方源之前，与官方目录同 id 的条目以自定义源为准。
+          自定义源排在官方源之前，与官方目录同 id 的条目以自定义源为准；多个官方源按列出顺序前者为准。
         </p>
-        <div class="src-row">
+        <div v-for="u in srcDefaults" :key="u" class="src-row">
           <span class="src-badge">官方</span>
-          <span class="src-url">{{ srcDefault || '（官方源已关闭：OPENOS_MARKET_URL=off）' }}</span>
+          <span class="src-url" :title="u">{{ u }}</span>
+        </div>
+        <div v-if="!srcDefaults.length" class="src-row">
+          <span class="src-badge">官方</span>
+          <span class="src-url">（官方源已关闭：OPENOS_MARKET_URL=off）</span>
         </div>
         <div v-for="(u, i) in srcCustom" :key="u" class="src-row">
           <span class="src-badge custom">自定义</span>
