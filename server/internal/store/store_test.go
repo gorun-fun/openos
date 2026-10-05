@@ -188,3 +188,72 @@ func TestChatRoomHistory(t *testing.T) {
 		t.Fatalf("无附件消息 Attach 应为 nil: %+v", page[4])
 	}
 }
+
+// TestExternalIdentityRoleFiltering 外部身份模式（OPENOS_AUTH_MODE=external）下
+// user/guest 是宿主机制角色，不进角色目录与角色清单；独立部署模式保持内置三角色。
+func TestExternalIdentityRoleFiltering(t *testing.T) {
+	// 模拟宿主集成库：guest 用户存在（访客兜底桌面）且持有应用授权
+	seedGuest := func(db *DB) {
+		if _, err := db.Exec(`INSERT INTO users(username,password_hash,salt,role,display_name,token_version)
+			VALUES('g1','','','guest','访客甲',0)`); err != nil {
+			t.Fatalf("seed guest user: %v", err)
+		}
+		if _, err := db.Exec(`INSERT OR IGNORE INTO role_apps(role,app_id) VALUES('guest','calculator')`); err != nil {
+			t.Fatalf("seed guest access: %v", err)
+		}
+	}
+	has := func(list []string, k string) bool {
+		for _, s := range list {
+			if s == k {
+				return true
+			}
+		}
+		return false
+	}
+
+	standalone := openTestDB(t)
+	seedGuest(standalone)
+	if roles, err := standalone.ListRoles(); err != nil {
+		t.Fatalf("ListRoles: %v", err)
+	} else if !has(roles, "admin") || !has(roles, "user") || !has(roles, "guest") {
+		t.Fatalf("独立部署应含内置三角色: %v", roles)
+	}
+	if defs, err := standalone.ListRoleDefs(); err != nil {
+		t.Fatalf("ListRoleDefs: %v", err)
+	} else {
+		keys := map[string]bool{}
+		for _, d := range defs {
+			keys[d.Key] = true
+		}
+		if !keys["user"] || !keys["guest"] {
+			t.Fatalf("独立部署角色目录应含 user/guest: %v", keys)
+		}
+	}
+
+	external := openTestDB(t, ExternalIdentity())
+	seedGuest(external)
+	if roles, err := external.ListRoles(); err != nil {
+		t.Fatalf("ListRoles: %v", err)
+	} else if has(roles, "user") || has(roles, "guest") {
+		t.Fatalf("外部身份模式角色清单不应含 user/guest: %v", roles)
+	} else if !has(roles, "admin") {
+		t.Fatalf("外部身份模式应保留 admin: %v", roles)
+	}
+	if defs, err := external.ListRoleDefs(); err != nil {
+		t.Fatalf("ListRoleDefs: %v", err)
+	} else {
+		for _, d := range defs {
+			if d.Key == "user" || d.Key == "guest" {
+				t.Fatalf("外部身份模式角色目录不应含 %s（访客机制角色只留数据不进目录）", d.Key)
+			}
+		}
+	}
+	// 存储不动：guest 的授权仍在（访客桌面 Dock 靠它）
+	m, err := external.RoleAccessMap()
+	if err != nil {
+		t.Fatalf("RoleAccessMap: %v", err)
+	}
+	if len(m["guest"]) == 0 {
+		t.Fatalf("guest 应用授权应保留: %v", m)
+	}
+}

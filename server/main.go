@@ -58,6 +58,10 @@ func main() {
 	if envOr("OPENOS_MARKET", "") == "off" {
 		storeOpts = append(storeOpts, store.WithoutMarket())
 	}
+	// 外部身份模式（身份托管宿主/IdP）：user/guest 退化为宿主机制角色，角色目录不收录
+	if os.Getenv("OPENOS_AUTH_MODE") == "external" {
+		storeOpts = append(storeOpts, store.ExternalIdentity())
+	}
 	db, err := store.Open(dataDir, storeOpts...)
 	if err != nil {
 		log.Fatal("打开数据库失败:", err)

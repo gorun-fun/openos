@@ -21,6 +21,10 @@ var Version = "dev"
 // DB 包裹 sql.DB，提供统一的访问入口。
 type DB struct {
 	*sql.DB
+	// externalIdentity 外部身份模式（OPENOS_AUTH_MODE=external）：user/guest 是
+	// 宿主与 openos 之间的机制角色（如访客兜底桌面），不构成 openos 侧可管理的
+	// 角色概念——角色目录/角色清单读取时过滤，存储与授权数据不动。
+	externalIdentity bool
 }
 
 // AppDef 应用注册信息（内置与第三方统一对待）。
@@ -276,9 +280,10 @@ const StorageQuota = 100 * 1024 * 1024
 // ---- 功能裁剪选项（宿主集成：SQLite 只保留演示数据与每用户界面设置） ----
 
 type config struct {
-	withoutVFS    bool
-	withoutGoder  bool
-	withoutMarket bool
+	withoutVFS       bool
+	withoutGoder     bool
+	withoutMarket    bool
+	externalIdentity bool
 }
 
 // Option 功能裁剪选项，配合 Open 使用。
@@ -292,6 +297,11 @@ func WithoutGoder() Option { return func(c *config) { c.withoutGoder = true } }
 
 // WithoutMarket 下架应用商店（OPENOS_MARKET=off 时由 main 传入）。
 func WithoutMarket() Option { return func(c *config) { c.withoutMarket = true } }
+
+// ExternalIdentity 外部身份模式（OPENOS_AUTH_MODE=external 时由 main 传入）：
+// 身份托管于宿主/IdP，user/guest 退化为宿主侧机制角色（访客兜底桌面等），
+// 角色目录与角色清单不再返回它们（admin 保留：openos 自身管理语义仍在）。
+func ExternalIdentity() Option { return func(c *config) { c.externalIdentity = true } }
 
 // Open 打开（或创建）数据库并完成迁移与种子数据。
 func Open(dir string, opts ...Option) (*DB, error) {
@@ -307,11 +317,11 @@ func Open(dir string, opts ...Option) (*DB, error) {
 	if _, err := d.Exec(schema); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
-	db := &DB{d}
 	cfg := &config{}
 	for _, o := range opts {
 		o(cfg)
 	}
+	db := &DB{DB: d, externalIdentity: cfg.externalIdentity}
 	if err := db.migrateColumns(); err != nil {
 		return nil, err
 	}
@@ -1059,6 +1069,7 @@ func (db *DB) SetAppRoles(appID string, roles []string) error {
 }
 
 // ListRoles 返回系统中出现过的全部角色（用户表与授权矩阵的并集，含宿主应用注入的自定义角色）。
+// 外部身份模式下 user/guest 是宿主机制角色，不进清单（见 DB.externalIdentity）。
 func (db *DB) ListRoles() ([]string, error) {
 	rows, err := db.Query(`SELECT role FROM users UNION SELECT role FROM role_apps`)
 	if err != nil {
@@ -1066,8 +1077,13 @@ func (db *DB) ListRoles() ([]string, error) {
 	}
 	defer rows.Close()
 	seen := map[string]bool{}
-	out := []string{"admin", "user", "guest"} // 基础三角色恒在（可能尚无用户/授权记录）
+	// 三基础角色恒占 seen（可能尚无用户/授权记录，也防 UNION 同名重复）；
+	// 外部身份模式下 user/guest 是宿主机制角色，只占位不进清单
 	seen["admin"], seen["user"], seen["guest"] = true, true, true
+	out := []string{"admin"}
+	if !db.externalIdentity {
+		out = append(out, "user", "guest")
+	}
 	for rows.Next() {
 		var r string
 		if err := rows.Scan(&r); err != nil {

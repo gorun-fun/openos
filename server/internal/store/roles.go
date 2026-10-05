@@ -96,6 +96,7 @@ func (db *DB) EnsureRolesBootstrap() error {
 }
 
 // ListRoleDefs 全部角色目录（含每角色权限点与应用授权，按 sort、key 稳定排序）。
+// 外部身份模式下 user/guest 是宿主机制角色，不进目录（见 DB.externalIdentity）。
 func (db *DB) ListRoleDefs() ([]RoleDef, error) {
 	rows, err := db.Query(`SELECT key,label,builtin,managed_by,sort FROM roles ORDER BY sort, key`)
 	if err != nil {
@@ -108,6 +109,9 @@ func (db *DB) ListRoleDefs() ([]RoleDef, error) {
 		var builtin int
 		if err := rows.Scan(&r.Key, &r.Label, &builtin, &r.ManagedBy, &r.Sort); err != nil {
 			return nil, err
+		}
+		if db.externalIdentity && (r.Key == "user" || r.Key == "guest") {
+			continue
 		}
 		r.Builtin = builtin == 1
 		r.Perms = []string{}
