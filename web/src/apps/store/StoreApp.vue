@@ -111,6 +111,7 @@ function openDetail(s: MarketState) {
   const granted = Object.keys(accessMap.value).filter((r) => accessMap.value[r]?.includes(s.id))
   selectedRoles.value = granted.length ? granted : ['admin', 'user']
   if (!selectedRoles.value.includes('admin')) selectedRoles.value.push('admin')
+  selVer.value = s.installedVersion || s.version
 }
 function toggleRole(r: string) {
   const i = selectedRoles.value.indexOf(r)
@@ -155,8 +156,10 @@ function openApp(s: MarketState) {
 }
 
 // ---- 版本切换（回滚，仅 bundle 且已安装）：POST install 带 version，服务端保留授权、
-//      本地已有该版本组件文件则直接复用（离线可回滚） ----
-async function switchVersion(s: MarketState, v: string) {
+//      本地已有该版本组件文件则直接复用（离线可回滚）。返回是否切换成功（取消/失败
+//      时调用方把下拉选值弹回当前版本） ----
+const selVer = ref('')
+async function switchVersion(s: MarketState, v: string): Promise<boolean> {
   const warn = autoUp.value && v !== s.version
     ? '\n注意：自动升级已开启，下次目录刷新会自动升回最新版；如需保持旧版请先在商店设置关闭自动升级。'
     : ''
@@ -164,18 +167,28 @@ async function switchVersion(s: MarketState, v: string) {
     title: '切换版本',
     body: `将「${s.name}」从 v${s.installedVersion || '—'} 切换到 v${v}，授权保持不变。${warn}`,
     confirmText: '切换',
-  }))) return
+  }))) return false
   busy.value = true
   try {
     await api.post('/api/market/install', { id: s.id, version: v })
     toast(`${s.name} 已切换到 v${v}`, { type: 'success' })
     await Promise.all([load(), apps.refresh()])
     detail.value = states.value.find((x) => x.id === s.id) || null
+    selVer.value = v
+    return true
   } catch (e: any) {
     toast(e.message, { type: 'error' })
+    return false
   } finally {
     busy.value = false
   }
+}
+// 下拉选中即触发：未切走是空操作；取消/失败把选值弹回当前版本
+async function onVerPick(ev: Event) {
+  const v = (ev.target as HTMLSelectElement).value
+  const s = detail.value
+  if (!s || v === s.installedVersion) return
+  if (!(await switchVersion(s, v))) selVer.value = s.installedVersion || s.version
 }
 
 // ---- 商店设置：目录源管理（admin）——默认官方源不可删，自定义源可添加多个，
@@ -251,7 +264,7 @@ async function saveSources() {
 
 const icoSearch = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.6"/><path d="M10.6 10.6 14 14"/></svg>'
 const icoBack = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 3.5 5 8l4.5 4.5"/></svg>'
-const icoGear = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><circle cx="8" cy="8" r="2.1"/><path d="M8 1.9v1.6M8 12.5v1.6M1.9 8h1.6M12.5 8h1.6M3.7 3.7l1.1 1.1M11.2 11.2l1.1 1.1M12.3 3.7l-1.1 1.1M4.8 11.2l-1.1 1.1"/></svg>'
+const icoGear = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="1.9"/><circle cx="8" cy="8" r="4.2"/><path d="M8 1.6v2.4M8 12v2.4M1.6 8h2.4M12 8h2.4M3.47 3.47l1.66 1.66M12.53 3.47l-1.66 1.66M3.47 12.53l1.66-1.66M12.53 12.53l-1.66-1.66"/></svg>'
 </script>
 
 <template>
@@ -359,13 +372,12 @@ const icoGear = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fil
       <div v-if="isAdmin && detail.installed && detail.managed && detail.versions?.length" class="d-sec">
         <h4>版本切换（回滚）</h4>
         <p class="s-desc">切换到指定历史版本：授权保持不变，本地已有该版本文件时离线可切。当前 v{{ detail.installedVersion }}。</p>
-        <div class="vers">
-          <div v-for="v in detail.versions" :key="v" class="ver" :class="{ cur: v === detail.installedVersion }">
-            <span class="v-num">v{{ v }}</span>
-            <span v-if="v === detail.version" class="v-tag">最新</span>
-            <span v-if="v === detail.installedVersion" class="v-tag now">当前</span>
-            <button v-if="v !== detail.installedVersion" class="ghost v-btn" :disabled="busy" @click="switchVersion(detail, v)">切换</button>
-          </div>
+        <div class="ver-row">
+          <select v-model="selVer" class="ver-select" :disabled="busy" @change="onVerPick">
+            <option v-for="v in detail.versions" :key="v" :value="v">
+              v{{ v }}{{ v === detail.version ? '（最新）' : '' }}{{ v === detail.installedVersion ? ' · 当前' : '' }}
+            </option>
+          </select>
         </div>
       </div>
       <div v-if="detail.perms?.length" class="d-sec">
@@ -509,17 +521,10 @@ html.dark .d-warn { background: rgba(255, 159, 10, .16); color: #ffb340; }
 .s-msg { margin-top: 8px; font-size: 12px; color: #e0343c; }
 
 /* 版本切换（回滚） */
-.vers { display: flex; flex-direction: column; gap: 6px; }
-.ver {
-  display: flex; align-items: center; gap: 8px; padding: 7px 12px; border-radius: 8px;
-  background: rgba(125, 125, 125, .1);
+.ver-row { display: flex; gap: 8px; align-items: center; }
+.ver-select {
+  height: 30px; max-width: 280px; padding: 0 8px; border-radius: 8px; font-size: 12.5px;
+  border: 1px solid var(--os-border-strong); background: var(--os-panel-solid); color: var(--os-text, #222); outline: none;
 }
-.ver.cur { background: rgba(52, 168, 83, .12); }
-.v-num { font-size: 12.5px; font-weight: 600; color: var(--os-text, #222); }
-.v-tag {
-  font-size: 10.5px; padding: 1px 8px; border-radius: 8px; flex: none;
-  background: var(--os-accent); color: #fff;
-}
-.v-tag.now { background: #34a853; }
-.v-btn { margin-left: auto; padding: 4px 14px; font-size: 11.5px; }
+.ver-select:focus { border-color: var(--os-accent); }
 </style>
