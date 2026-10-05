@@ -55,10 +55,35 @@ func TestUpsertAIProvider(t *testing.T) {
 		return upsertAIProviders(p, c, nil, nil, force)
 	}
 
-	t.Run("无 settings.json 跳过", func(t *testing.T) {
-		wrote, err := upsert(filepath.Join(t.TempDir(), "settings.json"), cfg, true)
+	t.Run("无 settings.json 起播（新建目录写入）", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "users", "u1", "grf-home") // 目录不存在
+		p := filepath.Join(dir, "settings.json")
+		def := store.AIUserProvider{UID: "u1", Name: "TokenHub", BaseURL: "https://th/v1", APIKey: "sk", Models: []string{"m1"}, IsDefault: true}
+		wrote, err := upsertAIProviders(p, cfg, []store.AIUserProvider{def}, []string{"TokenHub"}, false)
+		if !wrote || err != nil {
+			t.Fatalf("期望起播写盘: wrote=%v err=%v", wrote, err)
+		}
+		m := readSettings(t, p)
+		var got string
+		json.Unmarshal(m["default"], &got)
+		if got != "TokenHub/m1" {
+			t.Fatalf("起播 default 不对: %q", got)
+		}
+		var provs map[string]json.RawMessage
+		json.Unmarshal(m["providers"], &provs)
+		if provs["TokenHub"] == nil || provs["OpenOS"] == nil {
+			t.Fatal("起播应含托管与声明条目")
+		}
+	})
+
+	t.Run("无文件且无内容不建空文件", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "settings.json")
+		wrote, err := upsertAIProviders(p, ProviderConfig{}, nil, nil, false)
 		if wrote || err != nil {
-			t.Fatalf("期望跳过，得到 wrote=%v err=%v", wrote, err)
+			t.Fatalf("空配置不应起播: wrote=%v err=%v", wrote, err)
+		}
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatal("不应创建文件")
 		}
 	})
 

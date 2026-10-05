@@ -14,8 +14,9 @@
 // 从 settings.json 清除（宿主是唯一写者，声明外名字不碰）。
 //
 // 写盘规则与 osmcp 的插件 upsert 同一套路：map[string]json.RawMessage 保留
-// 未知键、内容不变不写、0600。settings.json 尚不存在（goder-serve 还没为该
-// 用户播种）时跳过，待 EnsureAIUser 在后续 /goder-api 请求补齐。
+// 未知键、内容不变不写、0600。settings.json 尚不存在（用户还没打开过 goder）
+// 时以空白配置起播并建目录——必须赶在 goder-serve 播种与 gh 首次启动之前，
+// 否则 gh 启动读走无条目配置后不再重读盘（gh 仅启动时读，空闲 30m 才回收）。
 package goder
 
 import (
@@ -69,11 +70,20 @@ type aiMark struct{ mtime, size int64 }
 func upsertAIProviders(settingsPath string, cfg ProviderConfig, extras []store.AIUserProvider, managedNames []string, forceDefault bool) (bool, error) {
 	raw, err := os.ReadFile(settingsPath)
 	if err != nil {
-		return false, nil // 无文件 = 尚未播种，跳过
+		// 无文件 = 该用户尚未打开过 goder：以空白配置起播而非跳过——否则首请求
+		// 时 goder-serve 先播种空 settings.json、gh 随即启动读走无托管/声明条目的
+		// 配置（gh 只在启动时读盘），第二轮 Ensure 补写也追不上。先写则 goder-serve
+		// 的 GODER_SETTINGS_SEED（仅文件不存在时复制）跳过，gh 首启即带条目
+		raw = nil
 	}
 	var all map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &all); err != nil {
-		return false, nil // 损坏文件不碰（与 osmcp upsertSettings 同策略）
+	if raw != nil {
+		if err := json.Unmarshal(raw, &all); err != nil {
+			return false, nil // 损坏文件不碰（与 osmcp upsertSettings 同策略）
+		}
+	}
+	if all == nil {
+		all = map[string]json.RawMessage{}
 	}
 
 	provs := all["providers"]
@@ -169,13 +179,24 @@ func upsertAIProviders(settingsPath string, cfg ProviderConfig, extras []store.A
 	} else {
 		all["providers"] = mustMarshalRaw(providers)
 	}
+	// 无原文件且渲染后既无供应商也无默认模型：不值得起播（避免为空白配置建文件）
+	if raw == nil && len(providers) == 0 {
+		if d, ok := all["default"]; !ok || string(d) == `""` {
+			return false, nil
+		}
+	}
 	out, err := json.MarshalIndent(all, "", "  ")
 	if err != nil {
 		return false, err
 	}
 	out = append(out, '\n')
-	if string(out) == string(raw) {
+	if raw != nil && string(out) == string(raw) {
 		return false, nil // 内容未变不写（不惊动 mtime，osmcp 的指纹也不失效）
+	}
+	if raw == nil { // 起播：用户目录可能尚未建立（从未打开过 goder）
+		if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+			return false, err
+		}
 	}
 	return true, os.WriteFile(settingsPath, out, 0o600)
 }
@@ -254,7 +275,7 @@ func (m *Manager) managedNamesSnapshot() []string {
 
 // managedProvider 把平台配置转换为写进 settings.json 的托管条目：
 // 代理注入时指向 /api/ai/v1/* 并换每用户密钥；未注入（兼容形态）或平台未配置
-//（三要素不全——启动自愈/声明渲染会带 invalid cfg 进来）时保持原样，让 upsert
+// （三要素不全——启动自愈/声明渲染会带 invalid cfg 进来）时保持原样，让 upsert
 // 走清除分支，绝不凭代理地址把「未配置」写成有效条目。
 // 密钥派生统一用清洗后的 uid（SyncAIProvider 只能拿到目录名，两路派生必须一致，
 // 否则每次全量同步都会改写 settings.json 触发指纹抖动）。
