@@ -18,6 +18,9 @@ export interface WidgetDef {
   singleton?: boolean
   /** 新建时写入 widget 条目的默认字段 */
   defaults?: Record<string, any>
+  /** 声明占用格数（横向 sc × 纵向 sr）。声明后卡片恒为该尺寸、组件可 100% 撑满；
+   *  未声明则按内容自然尺寸自动换算格数，卡片撑满格子、内容居中。 */
+  span?: { sc: number; sr: number }
 }
 
 const defs = new Map<string, WidgetDef>()

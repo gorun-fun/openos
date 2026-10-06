@@ -50,11 +50,13 @@ const offs: (() => void)[] = []
 
 const keyOf = (w: { type: string; noteId?: string; id?: string }) =>
   w.type === 'note' ? `w:note:${w.noteId}` : (w.id ? `w:${w.type}:${w.id}` : `w:${w.type}`)
-const spanOf = (w: Widget) =>
-  w.type === 'note' ? { sc: w.sc || 2, sr: w.sr || 2 } : (spans.value[w.type] || { sc: 2, sr: 1 })
-/** 便签小组件像素尺寸 = 跨格数 × 格宽 - 8（8 为格间隙，保证与网格精确对齐）。 */
-const noteW = (w: Widget) => (w.sc || 2) * GRID.cw - 8
-const noteH = (w: Widget) => (w.sr || 2) * GRID.ch - 8
+
+/** 占用格数：便签用自身 sc/sr；其余优先测量结果，注册表声明 span 的作初始兜底。 */
+const spanOf = (w: Widget) => {
+  if (w.type === 'note') return { sc: w.sc || 2, sr: w.sr || 2 }
+  const def = widgetDef(w.type)
+  return spans.value[w.type] || (def?.span ? { ...def.span } : { sc: 2, sr: 1 })
+}
 
 onMounted(() => {
   notes.load()
@@ -134,15 +136,24 @@ watch(
   },
 )
 
-/** 测量时钟/监控实际尺寸 → 换算占用格数并登记（便签尺寸即网格整数倍，免测）。 */
+/** 测量时钟/监控/自定义小组件的内容自然尺寸 → 换算占用格数并登记。
+ *  卡片自身恒撑满占用格（见 widgetStyle），不能作测量对象，须测 .w-body 里
+ *  未受卡片约束的内容根；便签尺寸即 sc/sr、注册表声明 span 的组件免测。 */
 async function measure() {
   await nextTick()
   const els = document.querySelectorAll<HTMLElement>('.widgets .widget')
   els.forEach((el) => {
     const type = el.dataset.type!
     if (type === 'note') return
-    const sc = Math.max(1, Math.ceil((el.offsetWidth + 8) / GRID.cw))
-    const sr = Math.max(1, Math.ceil((el.offsetHeight + 8) / GRID.ch))
+    const declared = widgetDef(type)?.span
+    if (declared) {
+      spans.value[type] = { ...declared }
+      return
+    }
+    const body = el.querySelector<HTMLElement>(':scope > .w-body > *')
+    if (!body) return
+    const sc = Math.max(1, Math.ceil((body.offsetWidth + 8) / GRID.cw))
+    const sr = Math.max(1, Math.ceil((body.offsetHeight + 8) / GRID.ch))
     spans.value[type] = { sc, sr }
   })
   relayout()
@@ -308,17 +319,18 @@ function onNoteInput(w: Widget, e: Event) {
   if (n) notes.setText(n.id, (e.target as HTMLTextAreaElement).value)
 }
 
-/** 小组件定位样式：拖动中跟手，否则吸附网格；便签附加整数倍尺寸与纸面底色。 */
+/** 小组件定位样式：拖动中跟手，否则吸附网格。所有卡片恒撑满占用的格子
+ *  （跨格数 × 格宽/高 − 8 格间隙，与网格精确对齐），占用与视觉一致——
+ *  注册表占多少格、肉眼就看得到多少格，拖动落点所见即所得；便签附加纸面底色。 */
 function widgetStyle(w: Widget) {
   const p = posOf(w)
+  const sp = spanOf(w)
   const s: Record<string, string> = dragging.value?.key === keyOf(w)
     ? { left: dragging.value.x + 'px', top: dragging.value.y + 'px' }
     : { left: p.x + 'px', top: p.y + 'px' }
-  if (w.type === 'note') {
-    s.width = noteW(w) + 'px'
-    s.height = noteH(w) + 'px'
-    s.background = colorOf(w).bg
-  }
+  s.width = sp.sc * GRID.cw - 8 + 'px'
+  s.height = sp.sr * GRID.ch - 8 + 'px'
+  if (w.type === 'note') s.background = colorOf(w).bg
   return s
 }
 
@@ -355,40 +367,43 @@ defineExpose({ add, remove, cycleNoteColor, relayout })
     >
       <div class="handle" @pointerdown="onHandleDown($event, w)" @dblclick.prevent title="拖动移动" />
 
-      <!-- 时钟 -->
-      <div v-if="w.type === 'clock'" class="clock">
-        <div class="time">{{ clockTime() }}</div>
-        <div class="date">{{ clockDate() }}</div>
-      </div>
+      <!-- 内容层：卡片撑满占用格，内容自然尺寸居中（便签的 textarea/角标相对它铺满） -->
+      <div class="w-body">
+        <!-- 时钟 -->
+        <div v-if="w.type === 'clock'" class="clock">
+          <div class="time">{{ clockTime() }}</div>
+          <div class="date">{{ clockDate() }}</div>
+        </div>
 
-      <!-- 便签：内容与便签应用实时同步，右下角把手缩放（吸附网格） -->
-      <template v-else-if="w.type === 'note'">
-        <textarea
-          :value="textOf(w)"
-          :style="{ color: colorOf(w).text }"
-          placeholder="记点什么…（自动保存）"
-          spellcheck="false"
-          @input="onNoteInput(w, $event)"
-          @pointerdown.stop
+        <!-- 便签：内容与便签应用实时同步，右下角把手缩放（吸附网格） -->
+        <template v-else-if="w.type === 'note'">
+          <textarea
+            :value="textOf(w)"
+            :style="{ color: colorOf(w).text }"
+            placeholder="记点什么…（自动保存）"
+            spellcheck="false"
+            @input="onNoteInput(w, $event)"
+            @pointerdown.stop
+          />
+          <div class="resize" title="拖动缩放（吸附网格）" @pointerdown.stop.prevent="onResizeDown($event, w)" />
+        </template>
+
+        <!-- 系统监控 -->
+        <div v-else-if="w.type === 'monitor'" class="monitor">
+          <div class="row"><span>👥 在线</span><b>{{ online }}</b></div>
+          <div class="row"><span>✦ AI</span><b>{{ aiOn ? '已接入' : '演示' }}</b></div>
+          <div class="row"><span>🪟 窗口</span><b>{{ windows.list.length }}</b></div>
+          <div class="row"><span>💾 存储</span><b :title="fmtMB(usage.used) + ' / ' + fmtMB(usage.quota)">{{ fmtMB(usage.used) }}</b></div>
+        </div>
+
+        <!-- 宿主/第三方注册的自定义小组件（widgetRegistry） -->
+        <component
+          v-else
+          :is="widgetDef(w.type)?.component"
+          :widget="w"
+          :update="(patch: Record<string, any>) => updateWidget(w, patch)"
         />
-        <div class="resize" title="拖动缩放（吸附网格）" @pointerdown.stop.prevent="onResizeDown($event, w)" />
-      </template>
-
-      <!-- 系统监控 -->
-      <div v-else-if="w.type === 'monitor'" class="monitor">
-        <div class="row"><span>👥 在线</span><b>{{ online }}</b></div>
-        <div class="row"><span>✦ AI</span><b>{{ aiOn ? '已接入' : '演示' }}</b></div>
-        <div class="row"><span>🪟 窗口</span><b>{{ windows.list.length }}</b></div>
-        <div class="row"><span>💾 存储</span><b :title="fmtMB(usage.used) + ' / ' + fmtMB(usage.quota)">{{ fmtMB(usage.used) }}</b></div>
       </div>
-
-      <!-- 宿主/第三方注册的自定义小组件（widgetRegistry） -->
-      <component
-        v-else
-        :is="widgetDef(w.type)?.component"
-        :widget="w"
-        :update="(patch: Record<string, any>) => updateWidget(w, patch)"
-      />
     </div>
   </div>
 </template>
@@ -424,7 +439,13 @@ defineExpose({ add, remove, cycleNoteColor, relayout })
 .handle:active { cursor: grabbing; }
 .handle:active::after { background: rgba(255,255,255,.45); }
 
-.clock { padding: 18px 22px 14px; text-align: center; min-width: 120px; }
+/* 内容层：铺满卡片、内容自然尺寸居中（占 2×2 格的卡片即显示在四格区域正中）。
+   内容根禁止 flex 收缩/拉伸，保持自然宽度（max-content/固定宽），
+   measure 以它换算占用格数——被压缩会导致测格数永远偏小。 */
+.w-body { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+.w-body > * { flex: none; }
+
+.clock { padding: 18px 22px 14px; text-align: center; min-width: 120px; width: max-content; }
 .clock .time { font-size: 34px; font-weight: 200; font-variant-numeric: tabular-nums; letter-spacing: 1px; }
 .clock .date { font-size: 12px; opacity: .75; margin-top: 2px; }
 
@@ -449,7 +470,7 @@ defineExpose({ add, remove, cycleNoteColor, relayout })
     rgba(0,0,0,.22) 68% 76%, transparent 76% 84%, rgba(0,0,0,.22) 84% 92%, transparent 92%);
 }
 
-.monitor { padding: 12px 16px; min-width: 150px; display: flex; flex-direction: column; gap: 7px; }
+.monitor { padding: 12px 16px; min-width: 150px; width: max-content; display: flex; flex-direction: column; gap: 7px; }
 .monitor .row { display: flex; justify-content: space-between; gap: 14px; font-size: 12px; }
 .monitor .row span { opacity: .72; }
 .monitor .row b { font-weight: 600; font-variant-numeric: tabular-nums; }
