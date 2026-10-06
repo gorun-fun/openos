@@ -33,10 +33,16 @@ interface Widget {
 const session = useSession()
 const windows = useWindows()
 const notes = useNotes()
-/** v2：网格坐标（c/r 格子）。旧版为像素（x/y），首次加载时迁移。 */
+/** v2：网格坐标（c/r 格子）。旧版为像素（x/y），首次加载时迁移。
+ *  权威存储在服务端 user_settings 的 desktop.widgets 键（同一账号换设备布局一致），
+ *  localStorage 仅作即时缓存与离线兜底；服务端无数据时把本地布局一次性迁移上云。 */
+const SETTINGS_KEY = 'desktop.widgets'
 const KEY = () => `openos_widgets_v2_${session.user!.username}`
 const OLD_KEY = () => `openos_widgets_${session.user!.username}`
 const NOTE_KEY = () => `openos_note_${session.user!.username}`
+let serverReady = false // 服务端数据已就位（就位后的变更才回写服务端）
+let saveTimer = 0 // 服务端写回防抖
+let lastSynced = '' // 最近一次已知服务端内容（无变化不回写，防访问即改库）
 
 const list = ref<Widget[]>([])
 /** 时钟/监控/自定义小组件按实际尺寸换算的格子数（挂载后测量）；便签用自身 sc/sr。 */
@@ -56,6 +62,48 @@ const spanOf = (w: Widget) => {
   if (w.type === 'note') return { sc: w.sc || 2, sr: w.sr || 2 }
   const def = widgetDef(w.type)
   return spans.value[w.type] || (def?.span ? { ...def.span } : { sc: 2, sr: 1 })
+}
+
+/** 全量重建网格占位注册（服务端数据替换本地缓存后调用）。 */
+function registerAll() {
+  for (const w of list.value) {
+    const sp = spanOf(w)
+    registerItem(keyOf(w), { c: w.c, r: w.r, sc: sp.sc, sr: sp.sr, kind: 'widget' })
+  }
+}
+function unregisterAll() {
+  for (const w of list.value) unregisterItem(keyOf(w))
+}
+
+/** 服务端同步：本地缓存先上屏（含旧格式迁移），服务端数据到达后校正；无数据时迁移上云。 */
+async function syncServer() {
+  try {
+    const s = await api.get<Record<string, string>>('/api/settings')
+    serverReady = true // 同步判定已定，后续变更可回写
+    if (s[SETTINGS_KEY] !== undefined) {
+      let next: Widget[] | null = null
+      try {
+        const parsed = JSON.parse(s[SETTINGS_KEY])
+        if (Array.isArray(parsed)) next = parsed
+      } catch { /* 数据损坏：保留本地缓存并回写覆盖 */ }
+      if (next === null) {
+        persistServer()
+      } else {
+        if (JSON.stringify(next) !== JSON.stringify(list.value)) {
+          unregisterAll()
+          list.value = next
+          registerAll()
+          localStorage.setItem(KEY(), JSON.stringify(list.value)) // 刷新本地缓存
+          void measure() // 服务端布局可能带本页未测量的组件类型
+        }
+        lastSynced = JSON.stringify(next)
+        pruneOrphans()
+      }
+    } else if (list.value.length) {
+      persistServer() // 旧版本布局只在 localStorage：一次性迁移到服务端
+    }
+  } catch { /* 离线容忍：继续用本地缓存 */ }
+  serverReady = true
 }
 
 onMounted(() => {
@@ -80,6 +128,7 @@ onMounted(() => {
   } catch { list.value = [] }
   migrateLegacyNote()
   pruneOrphans()
+  void syncServer()
   void measure()
   timer = window.setInterval(() => {
     now.value = new Date()
@@ -168,7 +217,21 @@ async function refreshMonitor() {
   } catch { /* ignore */ }
 }
 
-function save() { localStorage.setItem(KEY(), JSON.stringify(list.value)) }
+function save() {
+  localStorage.setItem(KEY(), JSON.stringify(list.value))
+  persistServer()
+}
+/** 服务端写回（400ms 防抖；内容与最近已知服务端一致时跳过，防 measure 重排造成无谓回写）。 */
+function persistServer() {
+  if (!serverReady) return
+  const v = JSON.stringify(list.value)
+  if (v === lastSynced) return
+  clearTimeout(saveTimer)
+  saveTimer = window.setTimeout(() => {
+    lastSynced = v
+    api.put('/api/settings', { key: SETTINGS_KEY, value: v }).catch(() => { lastSynced = '' })
+  }, 400)
+}
 
 /** 向本页便签应用广播当前钉到桌面的便签 id 集合。 */
 function emitNotes() {

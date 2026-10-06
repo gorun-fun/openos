@@ -63,12 +63,18 @@ onMounted(async () => {
 
   // 语言同步：服务端 user_settings 的 locale 优先（多端一致），未设置则保持本地；
   // 顺带读取「使用指南不再自动打开」偏好（WelcomeApp「不再显示」按钮写入）
+  // 与上次会话窗口（session.windows，换设备登录恢复同一组窗口）
   let welcomeHidden = false
+  let savedWins: { appId: string; props?: any; title?: string }[] | null = localWins()
   try {
     const kv = await api.get<Record<string, string>>('/api/settings')
     const saved = kv?.[LOCALE_SETTINGS_KEY]
     if ((saved === 'zh-CN' || saved === 'en-US') && saved !== locale()) setLocale(saved)
     welcomeHidden = kv?.[WELCOME_HIDDEN_KEY] === '1'
+    const sw = kv?.[WIN_SETTINGS_KEY]
+    if (sw !== undefined) {
+      try { savedWins = JSON.parse(sw) } catch { /* 损坏退回本地缓存 */ }
+    }
   } catch { /* ignore */ }
 
   // 通知中心：加载历史/偏好 + 订阅总线 sys:notify（服务端定向与其他端广播）
@@ -90,8 +96,9 @@ onMounted(async () => {
     installAgentBridge(),
   )
 
-  // 恢复上次会话的窗口（按用户持久化），首次进入打开欢迎窗口（「不再显示」时跳过）
-  const restored = restoreWindows()
+  // 恢复上次会话的窗口（服务端权威 + 本地缓存，同一账号换设备一致），
+  // 首次进入打开欢迎窗口（「不再显示」时跳过）
+  const restored = restoreWindows(savedWins)
   if (!restored && windows.list.length === 0 && !welcomeHidden) windows.open('welcome')
 
   // 快捷方式/小组件都已挂载登记，统一重排一次：吸附网格、解决重叠
@@ -317,25 +324,37 @@ function onSystemKeyUp({ info }: KeyCtx) {
   }
 }
 
-// ---- 窗口状态持久化（同用户刷新后恢复） ----
+// ---- 窗口状态持久化（同一账号刷新/换设备后恢复一致） ----
+// 服务端 user_settings 的 session.windows 键为权威，localStorage 作离线兜底缓存。
 const STATE_KEY = () => `openos_wins_${session.user!.username}`
+const WIN_SETTINGS_KEY = 'session.windows'
 let saveTimer = 0
+let lastSynced = '' // 最近一次写往服务端的内容（无变化不回写）
+/** 读本地缓存的窗口列表（服务端数据到达前的兜底）。 */
+function localWins(): { appId: string; props?: any; title?: string }[] | null {
+  try {
+    const raw = localStorage.getItem(STATE_KEY())
+    return raw ? JSON.parse(raw) : null
+  } catch { return null }
+}
 watch(
   () => windows.list.map((w) => `${w.appId}|${JSON.stringify(w.props)}|${w.title}`).join(';'),
   () => {
     clearTimeout(saveTimer)
     saveTimer = window.setTimeout(() => {
       const saved = windows.list.slice(0, 12).map((w) => ({ appId: w.appId, props: w.props, title: w.title }))
-      localStorage.setItem(STATE_KEY(), JSON.stringify(saved))
+      const v = JSON.stringify(saved)
+      localStorage.setItem(STATE_KEY(), v)
+      if (v === lastSynced) return
+      lastSynced = v
+      api.put('/api/settings', { key: WIN_SETTINGS_KEY, value: v }).catch(() => { lastSynced = '' })
     }, 600)
   },
 )
 
-function restoreWindows(): boolean {
+function restoreWindows(saved: { appId: string; props?: any; title?: string }[] | null): boolean {
   try {
-    const raw = localStorage.getItem(STATE_KEY())
-    if (!raw) return false
-    const saved: { appId: string; props?: any; title?: string }[] = JSON.parse(raw)
+    if (!Array.isArray(saved) || !saved.length) return false
     const allowed = new Set(apps.apps.map((a) => a.id))
     const valid = saved.filter((s) => allowed.has(s.appId)) // 权限变化后不再恢复
     // 移动形态：只恢复最近 1 个窗口并挂后台（回到桌面，多任务卡片中可见）

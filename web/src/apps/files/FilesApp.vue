@@ -6,7 +6,7 @@ import type { WinState } from '../../stores/windows'
 import { useWindows } from '../../stores/windows'
 import { useApps } from '../../stores/apps'
 import { useSession } from '../../stores/session'
-import { fsApi, downloadFile, fetchRawBlob, type VFile, type ShareDef } from '../../api/client'
+import { fsApi, api, downloadFile, fetchRawBlob, type VFile, type ShareDef } from '../../api/client'
 import { bus } from '../../bus/bus'
 import { OsInput, OsButton, OsEmpty, OsModal, MobileNavToggle, OsTbOverflow, toast, useMenu, menuPos, icons, resolveFileDialog, type FileDialogRequest } from '../../ui'
 import { openPath, openWithApps, isImage, fileEmoji, kindOf, extOf, fmtSize, IMAGE_EXTS, parentOf } from '../openWith'
@@ -35,13 +35,58 @@ onBeforeUnmount(() => { if (pickerReq) resolveFileDialog(pickerReq.reqId, null) 
 const entries = ref<VFile[]>([])
 const loading = ref(true)
 const query = ref('')
-const sortBy = ref(localStorage.getItem('openos_files_sort') || 'name')
-const sortDir = ref<1 | -1>(1)
+// 视图/排序偏好：服务端 user_settings 的 files.prefs 键权威（同一账号跨设备一致），
+// localStorage 按用户分键缓存；旧版全局键（不分用户）首次读取时迁移。
+const PREFS_SETTINGS_KEY = 'files.prefs'
+const PREFS_KEY = () => `openos_files_prefs_${session.user!.username}`
 // 四种视图：图标 / 列表 / 分栏 / 画廊（仿 macOS Finder，全局记忆）
 type View = 'icon' | 'list' | 'column' | 'gallery'
-const view = ref<View>((localStorage.getItem('openos_files_view') as View) || 'icon')
-watch(view, (v) => localStorage.setItem('openos_files_view', v))
-watch(sortBy, (v) => localStorage.setItem('openos_files_sort', v))
+function readPrefsCache(): { view?: View; sortBy?: string } {
+  try {
+    const raw = localStorage.getItem(PREFS_KEY())
+    if (raw) return JSON.parse(raw)
+  } catch { /* ignore */ }
+  const v = localStorage.getItem('openos_files_view') as View | null
+  const s = localStorage.getItem('openos_files_sort')
+  return { view: v || undefined, sortBy: s || undefined }
+}
+const prefs0 = readPrefsCache()
+const sortBy = ref(prefs0.sortBy || 'name')
+const sortDir = ref<1 | -1>(1)
+const view = ref<View>(prefs0.view || 'icon')
+let prefsReady = false // 服务端数据已就位（就位后的变更才回写服务端）
+let prefsTimer = 0
+let prefsSynced = '' // 最近一次写往服务端的内容（无变化不回写）
+function persistPrefs() {
+  try { localStorage.setItem(PREFS_KEY(), JSON.stringify({ view: view.value, sortBy: sortBy.value })) } catch { /* ignore */ }
+  if (!prefsReady) return
+  const v = JSON.stringify({ view: view.value, sortBy: sortBy.value })
+  if (v === prefsSynced) return
+  clearTimeout(prefsTimer)
+  prefsTimer = window.setTimeout(() => {
+    prefsSynced = v
+    api.put('/api/settings', { key: PREFS_SETTINGS_KEY, value: v }).catch(() => { prefsSynced = '' })
+  }, 400)
+}
+watch([view, sortBy], persistPrefs)
+onMounted(async () => {
+  try {
+    const s = await api.get<Record<string, string>>('/api/settings')
+    prefsReady = true
+    const raw = s[PREFS_SETTINGS_KEY]
+    if (raw !== undefined) {
+      try {
+        const p = JSON.parse(raw)
+        if (p?.view) view.value = p.view
+        if (p?.sortBy) sortBy.value = p.sortBy
+      } catch { /* 损坏忽略 */ }
+      prefsSynced = JSON.stringify({ view: view.value, sortBy: sortBy.value })
+    } else {
+      persistPrefs() // 旧版本偏好只在 localStorage：一次性迁移到服务端
+    }
+  } catch { /* 离线容忍 */ }
+  prefsReady = true
+})
 const usage = ref({ used: 0, quota: 100 * 1024 * 1024 })
 const uploadInput = ref<HTMLInputElement>()
 const contentEl = ref<HTMLElement>()

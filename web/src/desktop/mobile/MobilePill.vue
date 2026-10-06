@@ -7,6 +7,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useWindows } from '../../stores/windows'
 import { useApps } from '../../stores/apps'
+import { useSession } from '../../stores/session'
 import AppIcon from '../../ui/AppIcon.vue'
 import { mobileViewportH } from '../../ui/formfactor'
 
@@ -21,9 +22,10 @@ const EDGE = 8
 type Mode = 'pill' | 'ball'
 const mode = ref<Mode>('pill')
 const ball = ref({ x: 0, y: 0 }) // 球位置（视口左上原点）
-const KEY = 'openos_pill_pos'
+// 位置记忆在 localStorage（按用户分键：坐标随屏幕尺寸而变，只做设备级偏好不随账号上云）
+const KEY = () => `openos_pill_pos_${useSession().user?.username || 'default'}`
 try {
-  const raw = localStorage.getItem(KEY)
+  const raw = localStorage.getItem(KEY())
   if (raw) {
     const v = JSON.parse(raw)
     if (v.mode === 'ball' && typeof v.x === 'number') {
@@ -75,7 +77,7 @@ let safeBottom = -1
 
 function save() {
   try {
-    localStorage.setItem(KEY, JSON.stringify({ mode: mode.value, ...ball.value }))
+    localStorage.setItem(KEY(), JSON.stringify({ mode: mode.value, ...ball.value }))
   } catch { /* 私隐模式等存储失败可忽略 */ }
 }
 

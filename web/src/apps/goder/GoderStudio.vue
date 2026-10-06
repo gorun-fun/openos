@@ -57,10 +57,49 @@ async function init() {
     return
   }
 
-  // 3. 连接配置：同源网关，身份由 OpenOS 后端注入（浏览器不持有 gh 令牌）
+  // 3. 连接配置：同源网关，身份由 OpenOS 后端注入（浏览器不持有 gh 令牌）。
+  //    scope 按用户分键（openos:<username>）：goder 的分组索引等本地键以 scope
+  //    命名（goder:<scope>:index），同一浏览器切换 OpenOS 账号互不串台。
   const me = session.user!
+  const scope = `openos:${me.username}`
+  // 3.5 分组索引持久化注入：默认落浏览器 localStorage，换设备即丢分组与自定义
+  //     标题（会话本体在服务端不丢）。注入服务端镜像——load 服务端优先（user_settings
+  //     的 goder.index 键），无数据回落本地并经 save 迁移上云；save 双写（本地缓存
+  //     + 400ms 防抖回写）。旧版 goder.js 未导出 setPersistence 时保持默认行为。
+  if (typeof ui.setPersistence === 'function') {
+    let saveTimer = 0
+    let lastSynced = ''
+    const SERVER_KEY = 'goder.index'
+    ui.setPersistence({
+      async load(sc: string) {
+        let local: string | null = null
+        try { local = localStorage.getItem(`goder:${sc}:index`) } catch { /* ignore */ }
+        try {
+          const s = await api.get<Record<string, string>>('/api/settings')
+          if (s[SERVER_KEY] !== undefined) {
+            lastSynced = s[SERVER_KEY]
+            try { localStorage.setItem(`goder:${sc}:index`, s[SERVER_KEY]) } catch { /* ignore */ }
+            return JSON.parse(s[SERVER_KEY])
+          }
+        } catch { /* 离线回落本地 */ }
+        // 迁移源优先级：本 scope 本地键 > 旧共享键（scope 分用户化之前 goder:openos:index）
+        const legacy = local || localStorage.getItem('goder:openos:index')
+        return legacy ? JSON.parse(legacy) : null
+      },
+      async save(_sc: string, idx: unknown) {
+        const v = JSON.stringify(idx)
+        try { localStorage.setItem(`goder:${_sc}:index`, v) } catch { /* ignore */ }
+        if (v === lastSynced) return
+        clearTimeout(saveTimer)
+        saveTimer = window.setTimeout(() => {
+          lastSynced = v
+          api.put('/api/settings', { key: SERVER_KEY, value: v }).catch(() => { lastSynced = '' })
+        }, 400)
+      },
+    })
+  }
   try {
-    ui.configure('openos', {
+    ui.configure(scope, {
       baseUrl: '/goder-api',
       auth: {
         onUnauthorized: () => {
@@ -95,7 +134,7 @@ async function init() {
   loading.value = false
   await nextTick()
   const shell = document.createElement('goder-app-shell')
-  shell.setAttribute('scope', 'openos')
+  shell.setAttribute('scope', scope)
   shell.setAttribute('panels', 'sessions,chat,sidebar,console')
   shell.style.cssText = 'width:100%;height:100%'
   hostEl.value!.append(shell)
