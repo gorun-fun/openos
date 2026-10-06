@@ -3,6 +3,8 @@
 // 拖动把手移动，释放后吸附网格并与其他小组件/快捷方式互不覆盖；
 // 右键（经桌面菜单）移除或换色，经桌面右键菜单或 defineExpose 的 add() 添加。
 // 位置持久化；自定义小组件经 { widget, update } props 读写自己的持久化字段。
+// type 未注册（宿主下线组件 / 宿主回退旧版）渲染「已失效」占位卡，可移除
+// 不静默清除——宿主升级回来布局仍在。
 //
 // 便签小组件与便签应用（NotesApp）共用 notes 仓库：每张便签可单独钉到桌面，
 // 尺寸为网格的整数倍（sc×sr 格，精确到像素对齐），右下角把手缩放时吸附网格。
@@ -459,6 +461,14 @@ defineExpose({ add, remove, cycleNoteColor, relayout })
           <div class="row"><span>💾 存储</span><b :title="fmtMB(usage.used) + ' / ' + fmtMB(usage.quota)">{{ fmtMB(usage.used) }}</b></div>
         </div>
 
+        <!-- 已失效小组件（type 不在注册表：宿主下线该组件 / 宿主回退旧版后布局
+             残留）：占位提示 + 移除按钮，不静默清除——宿主升级回来布局仍在 -->
+        <div v-else-if="!widgetDef(w.type)" class="unknown">
+          <div class="u-title">小组件已失效</div>
+          <div class="u-type" :title="w.type">{{ w.type }}</div>
+          <button class="u-rm" @click="remove(w.type)">移除</button>
+        </div>
+
         <!-- 宿主/第三方注册的自定义小组件（widgetRegistry） -->
         <component
           v-else
@@ -537,4 +547,20 @@ defineExpose({ add, remove, cycleNoteColor, relayout })
 .monitor .row { display: flex; justify-content: space-between; gap: 14px; font-size: 12px; }
 .monitor .row span { opacity: .72; }
 .monitor .row b { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* 已失效小组件占位（type 未注册）：居中提示 + 移除入口（右键菜单同款能力） */
+.unknown {
+  padding: 14px 16px; min-width: 150px; max-width: 210px; text-align: center;
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+}
+.u-title { font-size: 12.5px; color: rgba(255, 255, 255, .78); }
+.u-type {
+  font-size: 11px; color: rgba(255, 255, 255, .45); font-family: ui-monospace, monospace;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.u-rm {
+  margin-top: 5px; padding: 3px 16px; border-radius: 7px; font-size: 12px; cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, .25); background: rgba(255, 255, 255, .1); color: #f2f3f7;
+}
+.u-rm:hover { background: rgba(255, 255, 255, .18); }
 </style>

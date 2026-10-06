@@ -26,7 +26,7 @@ import { fsApi } from '../api/client'
 import { toast } from '../ui/toast'
 import { useMenu, menuPos } from '../ui/menu'
 import { onKey, isTextFieldEvent, setModal, KEY_PRIORITY, type KeyCtx } from '../ui/keys'
-import { widgetDefs, widgetDef } from './widgetRegistry'
+import { widgetDefs } from './widgetRegistry'
 import { appForPath } from '../apps/openWith'
 import { installAgentBridge } from './agentBridge'
 import { shell } from '../shell'
@@ -399,7 +399,9 @@ function onContext(e: MouseEvent) {
   const widgetHost = t.closest<HTMLElement>('.widget')
   const shortcutHost = t.closest<HTMLElement>('.shortcut')
   const widgetType = widgetHost?.dataset.type
-  if (widgetType && widgetDef(widgetType)) {
+  // type 未注册（宿主下线该组件 / 宿主回退旧版后布局残留）也认作小组件目标：
+  // 右键仍给「移除」入口，与 Widgets.vue 的失效占位卡配套，不留删不掉的空卡
+  if (widgetType) {
     target = { kind: 'widget', type: widgetType, noteId: widgetHost?.dataset.note || undefined }
   } else if (shortcutHost?.dataset.id) {
     target = { kind: 'shortcut', key: shortcutHost.dataset.id }
