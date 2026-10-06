@@ -543,11 +543,15 @@ func AutoUpgrade(db *store.DB) []AutoUpgraded {
 	skips := skipVersions(db)
 	var changed []AutoUpgraded
 	for _, a := range apps {
-		if a.Source != SourceMarket {
+		e, err := Find(a.ID)
+		if err != nil {
 			continue
 		}
-		e, err := Find(a.ID)
-		if err != nil || a.Version == e.Version {
+		// 商店安装（managed）与宿主预装（host，登记版本对齐货架）都参与自动升级
+		if a.Source != SourceMarket && e.Type != "host" {
+			continue
+		}
+		if a.Version == e.Version {
 			continue
 		}
 		if skips[a.ID] == e.Version {
@@ -699,7 +703,8 @@ func List(db *store.DB) []State {
 			st.Installed = true
 			st.InstalledVersion = cur.Version
 			st.Managed = cur.Source == SourceMarket
-			st.Upgradable = st.Managed && cur.Version != e.Version
+			// host 与商店安装（managed）同样参与版本对齐（货架热更新登记）
+			st.Upgradable = (st.Managed || e.Type == "host") && cur.Version != e.Version
 			if cur.Builtin || cur.Locked {
 				st.Protected = true
 			} else if !st.Managed {
@@ -739,8 +744,20 @@ func Install(db *store.DB, id string, roles []string) (Entry, error) {
 	if err != nil {
 		return e, err
 	}
+	// host = 宿主预装应用：仅当本机已注册时允许"更新"——对齐登记版本（保留
+	// locked/授权/配置，组件实际加载走宿主货架热更新通道）；本机没有则不可装
+	//（宿主 runtimeComponents 在其他部署无处渲染）
 	if e.Type == "host" {
-		return e, ErrNotInstallable
+		cur, ok := db.AppByID(e.ID)
+		if !ok {
+			return e, ErrNotInstallable
+		}
+		cur.Version = e.Version
+		if err := db.UpsertApp(cur); err != nil {
+			return e, err
+		}
+		setSkipVersion(db, e.ID, "")
+		return e, nil
 	}
 	if cur, ok := db.AppByID(e.ID); ok && (cur.Builtin || cur.Locked) {
 		return e, ErrProtected

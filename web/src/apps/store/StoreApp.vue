@@ -366,7 +366,7 @@ const icoGear = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fil
           <div class="d-actions">
             <button v-if="!detail.installed && isAdmin && detail.type !== 'host'" class="primary" :disabled="busy || detail.protected" @click="install(detail)">安装</button>
             <button v-else-if="detail.upgradable && isAdmin" class="primary" :disabled="busy" @click="install(detail)">更新到 v{{ detail.version }}</button>
-            <span v-if="detail.installed && detail.managed && !detail.upgradable" class="ok">✓ 已是最新版本</span>
+            <span v-if="detail.installed && (detail.managed || detail.type === 'host') && !detail.upgradable" class="ok">✓ 已是最新版本</span>
             <button v-if="detail.installed && apps.byId(detail.id)" class="ghost" @click="openApp(detail)">打开</button>
             <button v-if="detail.installed && isAdmin && !detail.protected" class="ghost danger" :disabled="busy" @click="uninstall(detail)">卸载</button>
           </div>
@@ -393,7 +393,10 @@ const icoGear = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fil
         <p class="d-log">{{ detail.changelog }}</p>
       </div>
       <div v-if="detail.conflict" class="d-warn">本机已存在 ID 为「{{ detail.id }}」的手工注册应用，安装将覆盖其配置。</div>
-      <div v-if="detail.protected" class="d-warn">应用 ID 与内置或宿主锁定应用冲突，不可安装。</div>
+      <div v-if="detail.protected" :class="detail.type === 'host' ? 'd-note' : 'd-warn'">
+        <template v-if="detail.type === 'host'">宿主预装应用：随宿主系统发布，新版本经应用货架自动热更新，无需重装；此处「更新」仅对齐登记版本。</template>
+        <template v-else>应用 ID 与内置或宿主锁定应用冲突，不可安装。</template>
+      </div>
       <div v-if="!isAdmin" class="d-note">安装与更新需要管理员权限。</div>
       <div v-if="isAdmin && !detail.protected" class="d-sec">
         <h4>授权角色（安装时应用）</h4>

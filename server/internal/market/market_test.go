@@ -196,9 +196,39 @@ func TestHostEntry(t *testing.T) {
 		t.Fatalf("host 条目 Install 应拒绝: %v", err)
 	}
 	db.UpsertApp(store.AppDef{ID: "rooms", Name: "房态盘", Locked: true, Version: "v1"})
+	if err := db.SetAppRoles("rooms", []string{"admin", "boss"}); err != nil {
+		t.Fatalf("SetAppRoles: %v", err)
+	}
 	st := findState(List(db), "rooms")
 	if st == nil || !st.Installed || !st.Protected || st.Managed {
 		t.Errorf("本机已注册的 host 条目状态应 Installed+Protected+非托管: %+v", st)
+	}
+	if st.Upgradable {
+		t.Errorf("登记版本等于目录版本时不应可更新: %+v", st)
+	}
+
+	// 目录升版（v2）：状态可更新；Install = 仅对齐登记版本——locked/名称保留、
+	// 授权不动、source 不变为 market
+	list[0].Version = "v2"
+	mu.Lock(); active = list; mu.Unlock()
+	st = findState(List(db), "rooms")
+	if st == nil || !st.Upgradable {
+		t.Fatalf("目录新版本时 host 应可更新: %+v", st)
+	}
+	if _, err := Install(db, "rooms", []string{"user"}); err != nil {
+		t.Fatalf("host 已注册应允许版本对齐: %v", err)
+	}
+	cur, _ := db.AppByID("rooms")
+	if cur.Version != "v2" || !cur.Locked || cur.Name != "房态盘" || cur.Source == SourceMarket {
+		t.Errorf("版本对齐不应破坏 locked/名称/来源: %+v", cur)
+	}
+	roles := appRoles(db, "rooms")
+	if len(roles) != 2 { // admin+boss 保持，Install 传入的 user 不生效
+		t.Errorf("host 更新不应改授权: %v", roles)
+	}
+	st = findState(List(db), "rooms")
+	if st == nil || st.Upgradable {
+		t.Errorf("对齐后不应再可更新: %+v", st)
 	}
 }
 
