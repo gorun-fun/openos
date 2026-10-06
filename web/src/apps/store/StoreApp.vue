@@ -104,6 +104,13 @@ function typeLabel(t: string) {
   return t === 'web' ? '网页应用' : t === 'proxy' ? '代理网页' : t === 'schema' ? '声明式' : t === 'bundle' ? '组件应用' : t === 'host' ? '宿主应用' : t
 }
 
+// 版本展示：条目版本可能是裸版本号（1.0.0）或自带 v 前缀（宿主货架=CI tag，
+// v0.0.38）——补 v 但不重复；空版本（纯展示条目）显示 —
+function fmtVer(v?: string) {
+  if (!v) return '—'
+  return v.startsWith('v') ? v : `v${v}`
+}
+
 function openDetail(s: MarketState) {
   settingsOpen.value = false
   detail.value = s
@@ -127,7 +134,7 @@ async function install(s: MarketState) {
   busy.value = true
   try {
     await api.post('/api/market/install', { id: s.id, roles: selectedRoles.value })
-    toast(`${s.name} 已安装（v${s.version}）`, { type: 'success' })
+    toast(`${s.name} 已安装（${fmtVer(s.version)}）`, { type: 'success' })
     await Promise.all([load(), apps.refresh()])
     detail.value = states.value.find((x) => x.id === s.id) || null
   } catch (e: any) {
@@ -161,17 +168,17 @@ function openApp(s: MarketState) {
 const selVer = ref('')
 async function switchVersion(s: MarketState, v: string): Promise<boolean> {
   const note = autoUp.value && v !== s.version
-    ? `\n自动升级会跳过 v${s.version}（视为问题版本），目录发布更新的版本时才会自动升级。`
+    ? `\n自动升级会跳过 ${fmtVer(s.version)}（视为问题版本），目录发布更新的版本时才会自动升级。`
     : ''
   if (!(await osConfirm({
     title: '切换版本',
-    body: `将「${s.name}」从 v${s.installedVersion || '—'} 切换到 v${v}，授权保持不变。${note}`,
+    body: `将「${s.name}」从 ${fmtVer(s.installedVersion)} 切换到 ${fmtVer(v)}，授权保持不变。${note}`,
     confirmText: '切换',
   }))) return false
   busy.value = true
   try {
     await api.post('/api/market/install', { id: s.id, version: v })
-    toast(`${s.name} 已切换到 v${v}`, { type: 'success' })
+    toast(`${s.name} 已切换到 ${fmtVer(v)}`, { type: 'success' })
     await Promise.all([load(), apps.refresh()])
     detail.value = states.value.find((x) => x.id === s.id) || null
     selVer.value = v
@@ -360,12 +367,12 @@ const icoGear = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fil
         <div class="d-info">
           <div class="d-name">{{ detail.name }}</div>
           <div class="d-meta">
-            {{ detail.category }} · {{ typeLabel(detail.type) }} · 目录 v{{ detail.version }}
-            <template v-if="detail.installed"> · 本机 v{{ detail.installedVersion || '—' }}</template>
+            {{ detail.category }} · {{ typeLabel(detail.type) }} · 目录 {{ fmtVer(detail.version) }}
+            <template v-if="detail.installed"> · 本机 {{ fmtVer(detail.installedVersion) }}</template>
           </div>
           <div class="d-actions">
             <button v-if="!detail.installed && isAdmin && detail.type !== 'host'" class="primary" :disabled="busy || detail.protected" @click="install(detail)">安装</button>
-            <button v-else-if="detail.upgradable && isAdmin" class="primary" :disabled="busy" @click="install(detail)">更新到 v{{ detail.version }}</button>
+            <button v-else-if="detail.upgradable && isAdmin" class="primary" :disabled="busy" @click="install(detail)">更新到 {{ fmtVer(detail.version) }}</button>
             <span v-if="detail.installed && (detail.managed || detail.type === 'host') && !detail.upgradable" class="ok">✓ 已是最新版本</span>
             <button v-if="detail.installed && apps.byId(detail.id)" class="ghost" @click="openApp(detail)">打开</button>
             <button v-if="detail.installed && isAdmin && !detail.protected" class="ghost danger" :disabled="busy" @click="uninstall(detail)">卸载</button>
@@ -375,11 +382,11 @@ const icoGear = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fil
       <p class="d-desc">{{ detail.description }}</p>
       <div v-if="isAdmin && detail.installed && detail.managed && detail.versions?.length" class="d-sec">
         <h4>版本切换（回滚）</h4>
-        <p class="s-desc">切换到指定历史版本：授权保持不变，本地已有该版本文件时离线可切。当前 v{{ detail.installedVersion }}。</p>
+        <p class="s-desc">切换到指定历史版本：授权保持不变，本地已有该版本文件时离线可切。当前 {{ fmtVer(detail.installedVersion) }}。</p>
         <div class="ver-row">
           <select v-model="selVer" class="ver-select" :disabled="busy" @change="onVerPick">
             <option v-for="v in detail.versions" :key="v" :value="v">
-              v{{ v }}{{ v === detail.version ? '（最新）' : '' }}{{ v === detail.installedVersion ? ' · 当前' : '' }}
+              {{ fmtVer(v) }}{{ v === detail.version ? '（最新）' : '' }}{{ v === detail.installedVersion ? ' · 当前' : '' }}
             </option>
           </select>
         </div>
