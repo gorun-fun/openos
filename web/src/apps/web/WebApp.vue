@@ -17,11 +17,16 @@ const windows = useWindows()
 const apps = useApps()
 
 const def = WEB_APPS[props.win.appId]
-// 动态注册的网页应用：config = {"kind":"web"|"proxy","url":…}，地址与名称存在 apps 表。
-// proxy 形态（应用代理）：iframe 指向服务端反代 /app/<id>/<目标>，由服务端剥掉
-// X-Frame-Options/CSP 等拒绝嵌入的响应头并重写资源地址，可嵌入禁止 iframe 的站点
+// 动态注册的网页应用：config = {"kind":"web"|"proxy","url":…[,desktopProxy]}，地址与
+// 名称存在 apps 表。proxy 形态（应用代理）：iframe 指向服务端反代 /app/<id>/<目标>，由
+// 服务端剥掉 X-Frame-Options/CSP 等拒绝嵌入的响应头并重写资源地址，可嵌入禁止 iframe
+// 的站点。desktopProxy（可选，proxy 形态专属）：桌面客户端模式也走服务端反代、不直连
+// ——用于"壳可嵌但内部内容 iframe 带防嵌头"的站点（网易云音乐：/discover 等内容页
+// X-Frame-Options: sameorigin，祖先链含 OpenOS 源必被拒；CDP Fetch 改头晚于判定、
+// fulfillResponse 该版本不可用，客户端层无解，只能回反代）；未声明的 proxy 应用在
+// 桌面模式直连真实地址（美团等微前端容器依赖直连形态）
 const dyn = computed(() => apps.byId(props.win.appId))
-const dynCfg = computed<{ kind?: string; url?: string }>(() => {
+const dynCfg = computed<{ kind?: string; url?: string; desktopProxy?: boolean }>(() => {
   const c = dyn.value?.config as any
   if (!c) return {}
   if (typeof c === 'string') { try { return JSON.parse(c) } catch { return {} } }
@@ -35,22 +40,26 @@ const host = computed(() => { try { return new URL(url.value).host } catch { ret
 // 不写 :// —— 含 // 的路径会被 Go ServeMux 的 cleanPath 折叠成 307 清洗重定向）；
 // 入口也可直接用 /app/<id>/ 由服务端重定向到配置目标
 const pxCompact = (u: string) => u.replace(/^([a-zA-Z][a-zA-Z0-9+.-]*):\/\//, (_m, s: string) => `${s}/`)
-// 桌面端形态（openos-desktop 经 CDP 在每个新文档注入只读标记）：代理应用不经
-// 服务端反代、iframe 直连真实地址——Chrome 以 --disable-web-security + 关闭站点
-// 隔离启动，跨源 iframe 不被同源策略/X-Frame-Options/CSP frame-ancestors 拦截，
+// 桌面端形态（openos-desktop 经 CDP 在每个新文档注入只读标记）：未声明 desktopProxy
+// 的代理应用不经服务端反代、iframe 直连真实地址——Chrome 以 --disable-web-security +
+// 关闭站点隔离启动，跨源 iframe 不被同源策略/X-Frame-Options/CSP frame-ancestors 拦截，
 // 且携带真实浏览器登录态，跨域问题随之消解。惰性读取，晚注入也能生效
 const desktopMode = () => !!(window as any).__OPENOS_DESKTOP__
 const src = computed(() => {
   if (!url.value) return ''
-  if (dynCfg.value.kind === 'proxy' && !desktopMode()) return `/app/${props.win.appId}/${pxCompact(url.value)}`
+  if (dynCfg.value.kind === 'proxy' && (!desktopMode() || dynCfg.value.desktopProxy)) return `/app/${props.win.appId}/${pxCompact(url.value)}`
   return url.value
 })
 
-// 桌面端形态的 iframe 不加 sandbox：美团等微前端容器（WebShell/new-workbench）会在
-// sandbox 语境下判定环境异常，上报「目标路由不合法」整页 404（实测摘掉即恢复）。
-// framebusting（top.location 自拔）防走失由桌面客户端监听主帧导航兜底回捕
+// 桌面端形态的 iframe 仅「直连的代理应用」（kind=proxy 且未声明 desktopProxy）不加
+// sandbox：美团等微前端容器（WebShell/new-workbench）会在 sandbox 语境下判定环境异常，
+// 上报「目标路由不合法」整页 404（实测摘掉即恢复），其防走失（framebusting
+// top.location 自拔）由桌面客户端监听主帧导航兜底回捕。其余形态（含 desktopProxy 走
+// 反代的、普通 web 的）桌面端仍带 sandbox（同浏览器模式）：这类站点 framebusting 时
+// 拔走主帧，客户端回捕虽能拉回但整页重载=窗口全丢，观感即「打开闪退」（网易云音乐
+// 实测踩中），sandbox 从浏览器层面直接挡住导航
 const sandboxAttr = computed(() =>
-  desktopMode() ? undefined : 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads')
+  desktopMode() && dynCfg.value.kind === 'proxy' && !dynCfg.value.desktopProxy ? undefined : 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads')
 
 // ---- 桌面端专用：美团系 ME 微前端的父容器握手应答。子页向父容器发
 // {eventType:"hotel-query-container", signature:"ME_IFRAME_…"} 探测，3s 无应答则按
@@ -116,6 +125,13 @@ onMounted(() => {
   if (url.value) windows.setTitle(props.win.id, title.value)
   window.addEventListener('message', onDeskHandshake)
   window.addEventListener('message', onIframeKey)
+  // 代理页 hook 的越权导航代执行：外层 iframe 带 sandbox（防 framebusting），sandbox
+  // 内文档无权导航子帧（网易云音乐壳页导航内容 iframe 必抛 SecurityError）——hook
+  // 捕获后经同源 parent 转发到顶层（此处，非 sandbox，有权导航任何同源帧）。挂
+  // window 上幂等覆盖，多窗口共用；窗口关闭后残留无引用无害
+  ;(window as any).__osPxNav__ = (loc: Location, navUrl: string) => {
+    try { loc.href = navUrl } catch { /* 帧可能已销毁 */ }
+  }
   anchorTimer = window.setInterval(checkAnchorNow, 1500)
   // 宿主标签页 API：挂在窗体根元素上（hook.js 经 frameElement.closest 认领，
   // 多个代理窗口互不干扰）。openTab 同步返回一个惰性转发到新 tab 真实
@@ -279,7 +295,9 @@ function openExternal() { if (activeTab.value) window.open(activeTab.value.url, 
 // ---- 桌面端登录辅助：跨站会话 Cookie（未标注 SameSite）在第三方 iframe 上下文里
 // 无法落地/携带，站内登录常常卡在 settoken 一类环节。桌面端改在顶层独立窗口（第一方
 // 上下文）完成登录/SSO/设 Cookie——桌面客户端会把 jar 统一归一为 SameSite=None，登录
-// 完成回到窗体内刷新即恢复会话 ----
+// 完成回到窗体内刷新即恢复会话。直连形态的 proxy 应用：Cookie 归一后 iframe 内直接
+// 生效；desktopProxy 形态：客户端镜像循环（desktop/main.go mirrorLoop）会把 jar 里
+// 目标域 Cookie 推到代理路径，同样刷新即恢复。----
 const loginAvailable = computed(() => desktopMode() && dynCfg.value.kind === 'proxy' && !!url.value)
 function desktopLogin() {
   if (!url.value) return

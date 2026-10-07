@@ -40,13 +40,16 @@ func TestInjectSourcesSyntax(t *testing.T) {
 		t.Error("设置服务降级时标记不应含 settingsUrl")
 	}
 	checkJS(t, dir, "shim", cookieShimSource())
-	// 设置页 HTML：提取全部 <script> 块（head 的 embed 检测 + body 的页面逻辑）校验
-	page := renderSettingsPage("https://os.example.com", []string{"https://os.example.com"}, "https://down.example.com")
-	scripts := regexp.MustCompile(`(?s)<script>(.*?)</script>`).FindAllStringSubmatch(page, -1)
-	if len(scripts) < 2 {
-		t.Fatal("设置页应至少有两个 <script> 块（embed 检测 + 页面逻辑）")
-	}
-	for i, m := range scripts {
-		checkJS(t, dir, "settings-page-"+strconv.Itoa(i), m[1])
+	// 设置页 HTML：提取全部 <script> 块（head 的 embed 检测 + body 的页面逻辑）校验。
+	// pick 形态与默认形态共用骨架、脚本块相同，取 pick 形态一并覆盖
+	for _, pick := range []bool{false, true} {
+		page := renderSettingsPage("https://os.example.com", []string{"https://os.example.com"}, "https://down.example.com", pick)
+		scripts := regexp.MustCompile(`(?s)<script>(.*?)</script>`).FindAllStringSubmatch(page, -1)
+		if len(scripts) < 2 {
+			t.Fatal("设置页应至少有两个 <script> 块（embed 检测 + 页面逻辑）")
+		}
+		for i, m := range scripts {
+			checkJS(t, dir, "settings-page-"+strconv.Itoa(i), m[1])
+		}
 	}
 }

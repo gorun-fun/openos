@@ -1,18 +1,21 @@
 package main
 
 // 服务器设置：桌面客户端可配置「OpenOS 兼容端」地址（任何 OpenOS 部署，本地或在线），
-// 运行中即可切换。三个部件：
+// 运行中即可切换。四个部件：
 //  1. 持久化配置 <profile>/config.json（url=当前服务器，recent=最近使用）；
 //  2. 回环设置页（默认 http://127.0.0.1:17700，端口被占自动递增）：表单输入 / 最近
-//     列表一键连接，POST /api/connect 校验落盘并导航主窗口；两种形态——独立页
-//     （chrome-error 兜底转入选中）与内嵌 iframe（OpenOS 前端「系统设置 → 服务器」
-//     分区，桌面模式专属，见 markSource 的 settingsUrl 标记）；
+//     列表一键连接，POST /api/connect 校验落盘并导航主窗口；三种形态——启动选择页
+//     （?pick=1，默认每次启动先选服务器再进入）与独立页（chrome-error 兜底转入选中）
+//     共用同一骨架（pick 文案经占位符切换），内嵌 iframe（OpenOS 前端「系统设置 →
+//     服务器」分区，桌面模式专属，见 markSource 的 settingsUrl 标记）；
 //  3. 目标地址打不开（chrome-error:// 页不跑任何注入脚本）时客户端自动转入设置页
 //     兜底（frameNavigated + initialWatch 补附身竞态）。
 //
-// URL 优先级：-url 参数（显式指定仅本次生效、不落盘）> config.json 的 url >
-// http://127.0.0.1:8081。连接的源运行期随切换动态更新：主帧防走失守卫、Fetch
-// Referer 改写、Cookie jar 归一化豁免域全部经 serverConf 取值（见 watchTargets）。
+// URL 优先级：-url 参数（显式指定仅本次生效、不落盘，跳过启动选择页直连）> -auto
+// （直连 config.json 的 url，不弹选择页）> 默认启动选择页（选定后落盘并进入）。
+// 无任何配置时选择页预填 http://127.0.0.1:8081。连接的源运行期随切换动态更新：主帧
+// 防走失守卫、Fetch Referer 改写、Cookie jar 归一化豁免域全部经 serverConf 取值
+//（见 watchTargets）。
 
 import (
 	"encoding/json"
@@ -261,6 +264,9 @@ func initialWatch(c *cdp, sessionId string, sw *serverConf, selfBase string) {
 				}, sessionId)
 				return
 			}
+			if strings.HasPrefix(href, selfBase) {
+				return // 已在本地设置页（启动选择页形态）：首开就没落在目标源，无可探测
+			}
 			if strings.HasPrefix(href, sw.Origin()) {
 				return // 打开成功
 			}
@@ -281,7 +287,8 @@ func (h *settingsHandler) page(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	page := renderSettingsPage(h.conf.Current(), h.conf.recentList(), r.URL.Query().Get("unreachable"))
+	q := r.URL.Query()
+	page := renderSettingsPage(h.conf.Current(), h.conf.recentList(), q.Get("unreachable"), q.Get("pick") == "1")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = io.WriteString(w, page)
@@ -316,10 +323,30 @@ func (h *settingsHandler) connect(w http.ResponseWriter, r *http.Request) {
 
 // renderSettingsPage 渲染设置页：动态值以占位符替换——__DATA__（页面初始数据 JSON，
 // encoding/json 默认转义 <>&，内嵌 <script> 安全）、__UNREACHABLE_BLOCK__（地址
-// 打不开提示块，query 参数带出，html.EscapeString 转义）
-func renderSettingsPage(current string, recent []string, unreachable string) string {
+// 打不开提示块，query 参数带出，html.EscapeString 转义）、__TITLE__/__H1__/__SUB__/
+// __CUR_LBL__/__HINT__（pick=启动选择页形态的文案切换：默认「服务器设置」，pick 为
+// 「选择服务器」——每次启动先选后端再进入的落地页）
+func renderSettingsPage(current string, recent []string, unreachable string, pick bool) string {
 	data, _ := json.Marshal(map[string]any{"current": current, "recent": recent})
 	page := strings.Replace(settingsPageHTML, "__DATA__", string(data), 1)
+	title, h1, sub, curLbl, hint := "OpenOS · 服务器设置", "OpenOS 桌面客户端",
+		"连接 OpenOS 兼容端——任何 OpenOS 部署的地址（本地或在线均可），随时可切换。",
+		"当前连接",
+		"地址保存在 <code>~/.openos-desktop/config.json</code>，下次启动自动连接；<br>"+
+			"窗口内等于本机真实浏览器会话，勿连接不可信的 OpenOS 实例。"
+	if pick {
+		title, h1, sub, curLbl, hint = "OpenOS · 选择服务器", "选择服务器",
+			"选择要连接的 OpenOS 兼容端——任何 OpenOS 部署的地址（本地或在线均可）。",
+			"上次连接",
+			"选择后进入对应桌面；地址保存在 <code>~/.openos-desktop/config.json</code>。<br>"+
+				"窗口内等于本机真实浏览器会话，勿连接不可信的 OpenOS 实例。"
+	}
+	for _, r := range [...][2]string{
+		{"__TITLE__", title}, {"__H1__", h1}, {"__SUB__", sub},
+		{"__CUR_LBL__", curLbl}, {"__HINT__", hint},
+	} {
+		page = strings.Replace(page, r[0], r[1], 1)
+	}
 	block := ""
 	if unreachable != "" {
 		block = `<div class="warn">⚠ 无法打开 <code>` + html.EscapeString(unreachable) + `</code>——请检查地址与网络，或改连其它服务器。</div>`
@@ -334,7 +361,7 @@ const settingsPageHTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OpenOS · 服务器设置</title>
+<title>__TITLE__</title>
 <script>
 // 内嵌形态（OpenOS「系统设置 → 服务器」分区的 iframe）：融入窗口背景并跟随宿主
 // 主题。桌面模式已关同源策略，可跨源读父窗口 html.dark（读不到则维持默认深色）
@@ -405,8 +432,8 @@ if(window.self!==window.top){
 <body>
 <main class="card">
   <div class="logo">OS</div>
-  <h1>OpenOS 桌面客户端</h1>
-  <p class="sub">连接 OpenOS 兼容端——任何 OpenOS 部署的地址（本地或在线均可），随时可切换。</p>
+  <h1>__H1__</h1>
+  <p class="sub">__SUB__</p>
   __UNREACHABLE_BLOCK__
   <div class="lbl" id="addrLbl">服务器地址</div>
   <form class="row" id="f">
@@ -414,12 +441,11 @@ if(window.self!==window.top){
     <button class="go" id="go" type="submit">连接</button>
   </form>
   <div class="err" id="err"></div>
-  <div class="lbl" id="curLbl">当前连接</div>
+  <div class="lbl" id="curLbl">__CUR_LBL__</div>
   <div class="cur" id="cur"></div>
   <div class="lbl" id="recLbl">最近使用</div>
   <div class="pills" id="rec"></div>
-  <p class="hint">地址保存在 <code>~/.openos-desktop/config.json</code>，下次启动自动连接；<br>
-  窗口内等于本机真实浏览器会话，勿连接不可信的 OpenOS 实例。</p>
+  <p class="hint">__HINT__</p>
 </main>
 <script>
 var DATA=__DATA__;
@@ -437,6 +463,9 @@ var rec=$('rec');
 });
 if(!(DATA.recent||[]).length){rec.style.display='none';$('recLbl').style.display='none'}
 if(!DATA.current){$('cur').style.display='none';$('curLbl').style.display='none'}
+// 独立页形态（启动选择页 / 切换服务器 / 打不开兜底）：聚焦输入框，回车即连；
+// 内嵌 iframe 形态不抢设置窗口的焦点
+if(window.self===window.top){try{$('u').focus()}catch(e){}}
 var err=$('err'),btn=$('go');
 function reset(){btn.disabled=false;btn.textContent='连接'}
 function go(u){

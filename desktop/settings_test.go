@@ -134,16 +134,50 @@ func TestSettingsConnectAPI(t *testing.T) {
 	}
 }
 
+func TestSettingsPagePickParam(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	sw := newServerConf(path, desktopConfig{URL: "http://127.0.0.1:8081"}, "http://127.0.0.1:8081")
+	h := &settingsHandler{conf: sw, nav: func(string) {}}
+
+	// ?pick=1 → 启动选择页形态
+	req := httptest.NewRequest("GET", "/?pick=1", nil)
+	w := httptest.NewRecorder()
+	h.page(w, req)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "选择服务器") ||
+		strings.Contains(w.Body.String(), "下次启动自动连接") {
+		t.Fatalf("pick 形态响应异常: %d %s", w.Code, w.Body.String())
+	}
+
+	// 无参数 → 默认设置页形态
+	req = httptest.NewRequest("GET", "/", nil)
+	w = httptest.NewRecorder()
+	h.page(w, req)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "下次启动自动连接") {
+		t.Fatalf("默认形态响应异常: %d %s", w.Code, w.Body.String())
+	}
+}
+
 func TestRenderSettingsPage(t *testing.T) {
-	page := renderSettingsPage("https://os.example.com", []string{"https://os.example.com"}, "https://down.example.com")
-	for _, want := range []string{"https://os.example.com", "无法打开", "https://down.example.com"} {
+	page := renderSettingsPage("https://os.example.com", []string{"https://os.example.com"}, "https://down.example.com", false)
+	for _, want := range []string{"https://os.example.com", "无法打开", "https://down.example.com",
+		"OpenOS · 服务器设置", "当前连接", "下次启动自动连接"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("设置页缺 %q", want)
 		}
 	}
 	// 无 unreachable 时不渲染提示块
-	page = renderSettingsPage("", nil, "")
+	page = renderSettingsPage("", nil, "", false)
 	if strings.Contains(page, "无法打开") {
 		t.Fatal("无 unreachable 不应渲染提示块")
+	}
+	// pick 形态（启动选择页）：标题与文案切换，且不出现「自动连接」语义
+	page = renderSettingsPage("https://os.example.com", []string{"https://os.example.com"}, "", true)
+	for _, want := range []string{"OpenOS · 选择服务器", "上次连接", "选择后进入对应桌面"} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("pick 形态缺 %q", want)
+		}
+	}
+	if strings.Contains(page, "下次启动自动连接") || strings.Contains(page, "OpenOS · 服务器设置") {
+		t.Fatal("pick 形态不应保留设置页形态的文案")
 	}
 }

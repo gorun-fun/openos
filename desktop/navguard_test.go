@@ -52,3 +52,44 @@ func TestNavRequestInGuard(t *testing.T) {
 		}
 	}
 }
+
+// 请求头改写单测：OpenOS 源的 Referer 改写为目标站自身源，目标站自身的值原样
+// 保留，Sec-Fetch-* 整组剥除。
+func TestRewriteHeadersReferer(t *testing.T) {
+	in := map[string]string{
+		"Referer":        "http://127.0.0.1:8081/",
+		"User-Agent":     "test",
+		"Sec-Fetch-Site": "cross-site",
+	}
+	out, changed := rewriteHeaders(in, "https://www.kdocs.cn/api/v3/x", "http://127.0.0.1:8081")
+	if !changed {
+		t.Fatal("应判定需要改写")
+	}
+	m := map[string]string{}
+	for _, h := range out {
+		m[h["name"]] = h["value"]
+	}
+	if m["Referer"] != "https://www.kdocs.cn/" {
+		t.Fatalf("Referer 改写错误: %q", m["Referer"])
+	}
+	if m["User-Agent"] != "test" {
+		t.Fatalf("无关头被误改: %q", m["User-Agent"])
+	}
+	if _, ok := m["Sec-Fetch-Site"]; ok {
+		t.Fatal("Sec-Fetch-Site 应被剥除")
+	}
+	// 目标站自身的 Referer 不动
+	keep := map[string]string{"Referer": "https://me.meituan.com/x"}
+	out2, changed2 := rewriteHeaders(keep, "https://me.meituan.com/x", "http://127.0.0.1:8081")
+	if changed2 {
+		t.Fatal("目标站自身 Referer 不应触发改写")
+	}
+	_ = out2
+	// 发往 OpenOS 自身的请求（反代 /app/*）Referer 本就指向 OpenOS：不改写——
+	// continueRequest 整组替换会丢暂停视图里不存在的 Cookie（kdocs 403 修复）
+	self := map[string]string{"Referer": "http://127.0.0.1:8081/app/wps-kdocs/https/www.kdocs.cn/latest"}
+	_, changed3 := rewriteHeaders(self, "http://127.0.0.1:8081/app/wps-kdocs/https/www.kdocs.cn/api/x", "http://127.0.0.1:8081")
+	if changed3 {
+		t.Fatal("发往 OpenOS 源的请求不应触发 Referer 改写")
+	}
+}

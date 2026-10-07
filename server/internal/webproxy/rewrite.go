@@ -156,6 +156,29 @@ func writeTag(out *bytes.Buffer, rest []byte, prefix string, base *url.URL) (str
 			p++
 		}
 		attr := strings.ToLower(string(rest[ns:p]))
+		if attr == "integrity" {
+			// SRI 与重写代理天然不兼容：子资源内容虽字节透传，但 integrity 摘要
+			// 在跨源重写语境下浏览器校验频繁误杀（kdocs 的懒加载模块 init.*/docManager
+			// 全灭 → 新建菜单永不渲染），剥除属性让浏览器不再校验
+			if p < n && rest[p] == '=' {
+				p++
+				if p < n && (rest[p] == '"' || rest[p] == '\'') {
+					q := rest[p]
+					p++
+					for p < n && rest[p] != q {
+						p++
+					}
+					if p < n {
+						p++
+					}
+				} else {
+					for p < n && !isSpace(rest[p]) && rest[p] != '>' {
+						p++
+					}
+				}
+			}
+			continue
+		}
 		if p < n && rest[p] == '=' {
 			out.Write(rest[ns : p+1])
 			p++

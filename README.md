@@ -812,14 +812,17 @@ ebooking），代价是依赖客户端环境（需本机 Chrome）。
 
 ```bash
 make desktop                     # 构建 → ./openos-desktop
-./openos-desktop                 # 打开 http://127.0.0.1:8081
+./openos-desktop                 # 先弹「选择服务器」页，选定后进入（默认每次启动先选）
+./openos-desktop -auto           # 跳过选择页，直连已保存配置（无配置 = http://127.0.0.1:8081）
 ./openos-desktop -url http://localhost:5173   # 开发模式（vite 只监听 IPv6 localhost）
 ```
 
-**原理**：CDP 驱动 Chrome 以 `--app=<url>` + 专用 profile（`~/.openos-desktop`，登录态
+**原理**：CDP 驱动 Chrome 以 `--app=<首开地址>` + 专用 profile（`~/.openos-desktop`，登录态
 持久化）启动，`--disable-web-security` + 关闭站点隔离——跨源 iframe 不再被同源策略 /
 X-Frame-Options / CSP frame-ancestors 拦截，网页应用（kind=proxy）经注入标记
 `window.__OPENOS_DESKTOP__` 检测后直连 `config.url` 真实地址而非 `/app/<id>/` 反代。
+首开地址默认为客户端回环设置页的「选择服务器」形态（先选后端再进入），`-url` 显式
+与 `-auto` 直连。
 
 **SameSite 三层桥**（跨站登录的命门，Chrome 154 实测）：跨源 iframe 属第三方上下文，
 目标站未标注 SameSite 的会话 Cookie 按 Lax 语义被整体拒收（Set-Cookie 与

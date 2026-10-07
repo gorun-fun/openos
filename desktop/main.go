@@ -10,8 +10,9 @@
 //
 // 职责：
 //  1. 定位 Chrome（-chrome / $OPENOS_CHROME 可覆盖），用专用用户目录拉起
-//     --app=<OpenOS 地址>（-url 显式 > <profile>/config.json 已保存配置 > 默认
-//     http://127.0.0.1:8081）；
+//     --app=<首开地址>。默认首开本地设置页的启动选择形态（?pick=1，先选服务器
+//     再进入）；-url 显式（仅本次生效、不落盘）与 -auto（直连已保存配置）跳过
+//     选择页，目标 = -url > <profile>/config.json 的 url > http://127.0.0.1:8081；
 //  2. 在调试端口起 CDP，连浏览器级 WebSocket，对每个页面目标注入
 //     window.__OPENOS_DESKTOP__ 标记——前端 WebApp.vue 检测到该标记后，
 //     代理应用 iframe 直连 config.url 真实地址，而非 /app/<id>/ 反代路径；
@@ -44,6 +45,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -59,7 +61,8 @@ func main() {
 		os.Exit(runReset(os.Args[2:]))
 	}
 
-	urlFlag := flag.String("url", "", "OpenOS 地址（默认读 <profile>/config.json 的已保存配置，无配置用 http://127.0.0.1:8081；显式指定仅本次生效、不落盘，开发模式可指 http://localhost:5173）")
+	urlFlag := flag.String("url", "", "OpenOS 地址（显式指定时跳过启动选择页直连：仅本次生效、不落盘；开发模式可指 http://localhost:5173）")
+	autoFlag := flag.Bool("auto", false, "跳过启动选择页，自动连接已保存的服务器地址（默认每次启动先选择服务器再进入）")
 	chromeFlag := flag.String("chrome", "", "Chrome/Chromium/Edge 可执行文件路径（默认自动探测，$OPENOS_CHROME 同效）")
 	profileFlag := flag.String("profile", "", "专用用户数据目录（默认 ~/.openos-desktop，登录态持久化于此）")
 	portFlag := flag.Int("port", 0, "CDP 调试端口（默认自动选取空闲端口）")
@@ -81,7 +84,8 @@ func main() {
 	_ = os.WriteFile(filepath.Join(profile, "client.pid"), []byte(strconv.Itoa(os.Getpid())), 0o600)
 
 	// 服务器配置（OpenOS 兼容端地址）：-url 显式 > 已保存配置 > 默认本地。
-	// -url 只覆盖本次运行，不写盘——run.sh 透传的开发地址不会顶掉用户保存的在线端
+	// -url 只覆盖本次运行，不写盘——run.sh 透传的开发地址不会顶掉用户保存的在线端。
+	// 未直连时 target 仅作为选择页的「上次连接」预填值展示
 	confPath := filepath.Join(profile, "config.json")
 	cfg := loadDesktopConfig(confPath)
 	target := *urlFlag
@@ -122,15 +126,57 @@ func main() {
 		}
 	}
 
-	cmd := exec.Command(chromePath, chromeArgs(target, profile, port)...)
+	// 主窗口会话 + 导航回调：设置页「连接」与 ⚙ 入口都经它导航主窗口。设置服务先于
+	// Chrome 启动（默认首开就是设置页的选择形态），CDP 连接 / 主窗口会话就绪前先
+	// 暂存导航意图、就绪后重试补发（15s 超时）；后到的意图盖掉先到的——快速连点以
+	// 最后一次为准
+	mw := &mainWindow{}
+	var connP atomic.Pointer[cdp]
+	var navSeq atomic.Int64
+	nav := func(u string) {
+		seq := navSeq.Add(1)
+		go func() {
+			deadline := time.Now().Add(15 * time.Second)
+			for time.Now().Before(deadline) {
+				if seq != navSeq.Load() {
+					return
+				}
+				if c := connP.Load(); c != nil {
+					if sid := mw.get(); sid != "" {
+						if _, err := c.call("Page.navigate", map[string]any{"url": u}, sid); err == nil {
+							return
+						}
+					}
+				}
+				time.Sleep(150 * time.Millisecond)
+			}
+			fmt.Fprintf(os.Stderr, "主窗口导航失败（超时）: %s\n", u)
+		}()
+	}
+	// 回环设置页（服务器设置）：主窗口右下角 ⚙ 进入；目标地址打不开时自动转入
+	selfBase := listenSettings(confPort, sw, nav)
+
+	// 首开地址：默认每次启动先选服务器再进入（设置页 pick 形态，选定后落盘并导航）；
+	// -url 显式（开发/自动化一次性目标）与 -auto（直连已保存地址）跳过；设置服务
+	// 降级（回环端口全被占）时同样退回直连 target
+	pickStart := *urlFlag == "" && !*autoFlag
+	startURL := target
+	if pickStart && selfBase != "" {
+		startURL = selfBase + "/?pick=1"
+	}
+
+	cmd := exec.Command(chromePath, chromeArgs(startURL, profile, port)...)
 	setSysProcAttr(cmd)
 	tail := &tailBuf{}
 	cmd.Stderr = tail
 	if err := cmd.Start(); err != nil {
 		fatal(err)
 	}
-	fmt.Printf("OpenOS 桌面客户端已启动\n  浏览器:   %s\n  地址:     %s\n  调试端口: %d\n  用户目录: %s\n",
-		chromePath, target, port, profile)
+	fmt.Printf("OpenOS 桌面客户端已启动\n  浏览器:   %s\n  打开:     %s\n  调试端口: %d\n  用户目录: %s\n",
+		chromePath, startURL, port, profile)
+	if selfBase != "" {
+		fmt.Printf("  设置页:   %s（窗口右下角 ⚙ 进入；连接的地址保存在 %s）\n", selfBase, confPath)
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
@@ -145,22 +191,9 @@ func main() {
 		killGroup(cmd)
 		fatal(err)
 	}
+	connP.Store(conn)
 
 	done := make(chan struct{}) // 主窗口关闭
-	// 主窗口会话 + 导航回调：设置页「连接」与 ⚙ 入口都经它导航主窗口
-	mw := &mainWindow{}
-	nav := func(u string) {
-		if sid := mw.get(); sid != "" {
-			if _, err := conn.call("Page.navigate", map[string]any{"url": u}, sid); err != nil {
-				fmt.Fprintf(os.Stderr, "主窗口导航失败: %v\n", err)
-			}
-		}
-	}
-	// 回环设置页（服务器设置）：主窗口右下角 ⚙ 进入；目标地址打不开时自动转入
-	selfBase := listenSettings(confPort, sw, nav)
-	if selfBase != "" {
-		fmt.Printf("  设置页:   %s（窗口右下角 ⚙ 进入；连接的地址保存在 %s）\n", selfBase, confPath)
-	}
 	go watchTargets(conn, os.Getpid(), port, sw, docReferrer(), selfBase, mw, done)
 
 	exited := make(chan error, 1)
@@ -221,6 +254,7 @@ func watchTargets(c *cdp, pid, port int, sw *serverConf, docRef, selfBase string
 	firstPage := ""
 	firstSession := func() string { sessMu.Lock(); defer sessMu.Unlock(); return firstPage }
 	go normalizeLoop(c, firstSession, sw)
+	go mirrorLoop(c, firstSession, sw)
 	lastErrNav := time.Time{} // chrome-error 兜底防抖（事件循环单协程访问）
 	mainFrameId := ""         // 主窗口顶层 frame 的 frameId（frameRequestedNavigation 只认它，子帧导航不掺和）
 	leavePass := false        // 最近一次主帧导航请求的目标在守卫源内（SSO 形态：同源端点 302 后外出）
@@ -293,7 +327,7 @@ func watchTargets(c *cdp, pid, port int, sw *serverConf, docRef, selfBase string
 				sess[p.SessionID] = newPageSession()
 			}
 			_, _ = c.call("Page.enable", nil, p.SessionID)
-			// 请求级拦截（fetchHandler）：剥 Sec-Fetch-* / OpenOS 源 Referer 改写。
+			// 请求级拦截（fetchHandler）：剥 Sec-Fetch-* / OpenOS 源 Referer/Origin 改写。
 			// 诊断模式：OSD_NO_FETCH=1 时关闭拦截（排查拦截对目标站 SSO 的影响）
 			if os.Getenv("OSD_NO_FETCH") == "" {
 				_, _ = c.call("Fetch.enable", map[string]any{
@@ -546,7 +580,12 @@ func docReferrer() string {
 
 // rewriteHeaders 产出 continueRequest 的 headers 数组：剥 Sec-Fetch-*、改写指向
 // OpenOS 源的 Referer 为目标站自身源（防按 Referer 风控的接口自曝）。changed=false
-// 表示无需改写（continueRequest 不带 headers 原样放行）
+// 表示无需改写（continueRequest 不带 headers 原样放行）。
+//
+// 注意 Origin 改不到：Chrome 的 requestPaused 暂停视图不含 Origin/Sec-Fetch/Cookie
+// 之外的网络层头，Origin 由网络栈在拦截之后附加（kdocs 实测：其接口按 Origin 判
+// 异源直接 403，跨站 iframe 的 fetch 必带 OpenOS 源 Origin，continueRequest 无法
+// 剥除）。此类站点桌面端只能走 desktopProxy 反代（webproxy 转发时整头剥 Origin）。
 func rewriteHeaders(in map[string]string, reqURL, osdOrigin string) ([]map[string]string, bool) {
 	if len(in) == 0 {
 		return nil, false
@@ -559,7 +598,13 @@ func rewriteHeaders(in map[string]string, reqURL, osdOrigin string) ([]map[strin
 			changed = true
 			continue
 		}
-		if lk == "referer" && osdOrigin != "" && strings.HasPrefix(v, osdOrigin) {
+		// 仅当请求发往 OpenOS 源之外（目标站）才改写其 OpenOS 源 Referer：发往
+		// OpenOS 自身的请求（服务端反代 /app/*、REST API）Referer 本就应指向
+		// OpenOS，且 continueRequest 的 headers 是整组替换——requestPaused 暂停
+		// 视图不含 Cookie/Sec-Fetch 等网络栈后挂头，替换会让这类请求裸奔丢
+		// Cookie（kdocs 代理页实测：创建接口一律 403 SessionDeleted）。发往目标
+		// 站的文档导航（iframe src 直连真实地址）仍按原样改写防 Referer 自曝。
+		if lk == "referer" && osdOrigin != "" && strings.HasPrefix(v, osdOrigin) && !strings.HasPrefix(reqURL, osdOrigin) {
 			if u, err := url.Parse(reqURL); err == nil && u.Host != "" {
 				v = u.Scheme + "://" + u.Host + "/"
 				changed = true
@@ -587,7 +632,116 @@ v=v.replace(/\s+$/,'')+'; SameSite=None';
 }
 }catch(e){}return d.set.call(this,v);}});
 }
-}catch(e){}})();` + globalBridgeSource() + keyForwardSource()
+}catch(e){}})();` + swGuardSource() + globalBridgeSource() + keyForwardSource() + openTabSource()
+}
+
+// openTabSource iframe 内新标签页导航收编（桌面端直连形态）：kdocs 等站点把
+// 「新建文档/打开文档」一律开新标签页——window.open、动态 <a target=_blank> 的
+// 程序化 click()、真实点击 _blank 锚点的默认行为三种通道（kdocs 实测走第二条：
+// 处理器动态建锚点后 a.click()），在直连 iframe 里都会弹成真实 Chrome 窗口逃出
+// OpenOS 桌面。三条通道统一收编为所属 WebApp 窗体内的新 tab：沿 frameElement
+// 跨文档上溯找到窗体根上的 __openosPxHost（webproxy hook.js 的同一宿主协议；
+// SOP 已关可跨 realm 直调）。找不到宿主链（不在任何 WebApp 窗体内的帧，如独立
+// 弹窗的子帧）回落原生行为；反代帧（hook.js 已接管，__openosPx 标记在调用期
+// 存在）不夺权。
+func openTabSource() string {
+	return `(function(){try{
+if(window.__OSD_OPENTAB__)return;
+if(window.top===window.self)return;
+Object.defineProperty(window,'__OSD_OPENTAB__',{value:true});
+var findHost=function(){
+try{
+var fe=window.frameElement;
+while(fe){
+var root=fe.closest?fe.closest('[data-os-webapp]'):null;
+if(root&&root.__openosPxHost&&root.__openosPxHost.openTab)return root.__openosPxHost;
+var w2=fe.ownerDocument.defaultView;
+if(!w2||w2===w2.top)break;
+fe=w2.frameElement;
+}
+}catch(e){}
+return null;
+};
+var asTab=function(url,name){
+try{
+var host=findHost();
+if(host){host.openTab(url,name);return true}
+}catch(e){}
+return false;
+};
+var realUrl=function(u){
+try{
+var s=String(u||'');
+if(!s||s==='about:blank'||s.indexOf('javascript:')===0)return '';
+var a=document.createElement('a');a.href=s;
+return a.href;
+}catch(e){return ''}
+};
+var oo=window.open.bind(window);
+window.open=function(u,n,f){
+try{
+var url=realUrl(u);
+if(url&&!window.__openosPx&&asTab(url,n))return {closed:false,opener:window,close:function(){},focus:function(){},postMessage:function(){},location:{href:url},document:document};
+}catch(e){}
+return oo(u,n,f);
+};
+var ac=window.HTMLAnchorElement.prototype.click;
+window.HTMLAnchorElement.prototype.click=function(){
+try{
+if(String(this.target||'')==='_blank'&&!window.__openosPx){
+var url=realUrl(this.href);
+if(url&&asTab(url))return;
+}
+}catch(e){}
+return ac.apply(this,arguments);
+};
+document.addEventListener('click',function(e){
+try{
+if(!e.isTrusted)return;
+var a=e.target&&e.target.closest?e.target.closest('a[target=_blank]'):null;
+if(!a||window.__openosPx)return;
+var url=realUrl(a.href);
+if(url&&asTab(url))e.preventDefault();
+}catch(x){}
+},true);
+}catch(e){}})();`
+}
+
+// swGuardSource Service Worker 守卫（桌面客户端专用）：目标站的 SW 在客户端
+// 上下文里是毒药——kdocs 的 SW 拦截自家 API 请求后以「SessionDeleted」拒绝
+// （同 Cookie 同源在无 SW 的干净 Chrome 一切正常，实锤归因），且其缓存让
+// 僵尸会话的页面照常渲染、极具迷惑性。判定用运行时帧拓扑而非模板化源：帧自身
+// 与顶层同源（OpenOS 页/设置页自身，或顶层即目标站的独立弹窗内的子帧）不设防，
+// 其余（嵌入应用帧、目标站弹窗顶层）禁掉 navigator.serviceWorker.register 并
+// 异步卸载已注册的——OpenOS 自身的 PWA SW（sw.js 直通清单）不受影响。须在
+// 文档任何脚本前执行（随 markSource 注入主文档与全部子帧；SOP 已关故
+// window.top.location 可跨源读取，读不到时保守不设防）。
+func swGuardSource() string {
+	return `(function(){try{
+if(window.__OSD_SWGUARD__)return;
+Object.defineProperty(window,'__OSD_SWGUARD__',{value:true});
+var top=null;try{top=window.top.location.origin}catch(e){}
+var foreign=top&&location.origin!==top;
+if(!top&&!foreign)return;
+var sw=navigator.serviceWorker;
+if(!sw)return;
+var isProxyScope=function(u){try{var s=String(u==null?'':u);return s.indexOf('/app/')>=0}catch(e){return false}};
+try{
+	var orig=Object.getPrototypeOf(sw).register;
+	Object.defineProperty(sw,'register',{configurable:true,writable:true,value:function(a,o){
+		if(foreign||isProxyScope(a)||isProxyScope(o&&o.scope)){
+			return Promise.reject(new Error('openos-desktop: 目标站 Service Worker 注册已禁用'));
+		}
+		return orig.call(sw,a,o);
+	}});
+}catch(e){}
+try{
+	sw.getRegistrations().then(function(rs){rs.forEach(function(r){
+		var sc='';try{sc=r.scope}catch(e){}
+		if(foreign||isProxyScope(sc)){try{r.unregister()}catch(e){}}
+	})}).catch(function(){});
+}catch(e){}
+}catch(e){}})();`
 }
 
 // keyForwardSource iframe 内全局快捷键转发（SOP 已关、子帧直连真实站点）：
@@ -687,6 +841,121 @@ func patchLoop(c *cdp, sessionId, shim string) {
 // OpenOS 源不动——http 站点（本地服务端 / http 兼容端）的 Cookie 被强加 Secure 会
 // 直接失效，且 OpenOS 自身会话是第一方、无需归一化。OpenOS 源经 serverConf 动态
 // 取值（设置页切换服务器后跟随）。
+// mirrorLoop 周期把目标站域的 Cookie jar 镜像到 desktopProxy 应用的代理路径。
+// desktopProxy（桌面端也走服务端反代）解决「跨站 iframe 请求带 OpenOS 源 Origin
+// 被目标站风控拒绝」的问题（kdocs 创建接口 403 SessionDeleted——requestPaused
+// 暂停视图不含 Origin，客户端层无法剥除，见 rewriteHeaders 注释），但反代页的
+// 会话 Cookie 落在代理路径（127.0.0.1 的 /app/<id>/ 下），真实域 jar 里经顶层
+// 「登录」辅助窗口建立的会话不会自动流转过去。本循环：经页面 fetch /api/apps
+// 取 desktopProxy 应用清单（随登录态），Storage.getCookies 全量取 jar，按目标
+// 主机与注册域后缀（取 hostname 末两段，覆盖 .kdocs.cn 一类父域 Cookie）匹配，
+// 值有变化才 Network.setCookie 推到 <openos源>/app/<id> 路径（http 本地域不
+// Secure、SameSite=Lax——代理页与 OpenOS 同源，第一方语境照常携带）。只在 jar
+// 值变化时推送：代理路径上目标站主动轮换出的新值不会被 jar 里的旧值回写覆盖。
+func mirrorLoop(c *cdp, firstSession func() string, sw *serverConf) {
+	type appHost struct {
+		id   string
+		host string
+		reg  string
+	}
+	lastPushed := map[string]string{} // "<id>\x00<cookie名>" → 上次推送值
+	t := time.NewTicker(2500 * time.Millisecond)
+	defer t.Stop()
+	for range t.C {
+		sid := firstSession()
+		if sid == "" {
+			continue
+		}
+		origin := sw.Origin()
+		if origin == "" {
+			continue
+		}
+		// 应用清单从页面取（带登录态；失败下轮重试）
+		r, err := c.call("Runtime.evaluate", map[string]any{
+			"expression":    `(async()=>{try{const r=await fetch('/api/apps',{credentials:'include'});if(!r.ok)return '';const list=await r.json();const out=[];for(const a of list){let cfg={};try{cfg=typeof a.config==='string'?JSON.parse(a.config):(a.config||{})}catch(e){}if(cfg&&cfg.kind==='proxy'&&cfg.desktopProxy&&cfg.url){let u;try{u=new URL(cfg.url)}catch(e){continue}out.push({id:a.id,host:u.hostname})}}return JSON.stringify(out)}catch(e){return ''}})()`,
+			"awaitPromise":  true,
+			"returnByValue": true,
+		}, sid)
+		if err != nil {
+			continue
+		}
+		var ev struct {
+			Result struct {
+				Value string `json:"value"`
+			} `json:"result"`
+		}
+		if json.Unmarshal(r, &ev) != nil || ev.Result.Value == "" {
+			continue
+		}
+		var raw []struct {
+			ID   string `json:"id"`
+			Host string `json:"host"`
+		}
+		if json.Unmarshal([]byte(ev.Result.Value), &raw) != nil {
+			continue
+		}
+		var apps []appHost
+		for _, a := range raw {
+			if a.ID == "" || a.Host == "" {
+				continue
+			}
+			labels := strings.Split(strings.Trim(a.Host, "."), ".")
+			reg := a.Host
+			if len(labels) >= 2 {
+				reg = strings.Join(labels[len(labels)-2:], ".")
+			}
+			apps = append(apps, appHost{id: a.ID, host: a.Host, reg: reg})
+		}
+		if len(apps) == 0 {
+			continue
+		}
+		jr, err := c.call("Storage.getCookies", nil, sid)
+		if err != nil {
+			continue
+		}
+		var jc struct {
+			Cookies []struct {
+				Name     string  `json:"name"`
+				Value    string  `json:"value"`
+				Domain   string  `json:"domain"`
+				Path     string  `json:"path"`
+				Expires  float64 `json:"expires"`
+				HTTPOnly bool    `json:"httpOnly"`
+			} `json:"cookies"`
+		}
+		if json.Unmarshal(jr, &jc) != nil {
+			continue
+		}
+		for _, app := range apps {
+			for _, ck := range jc.Cookies {
+				d := strings.Trim(strings.ToLower(ck.Domain), ".")
+				if d != app.host && d != app.reg && !strings.HasSuffix(d, "."+app.reg) {
+					continue
+				}
+				key := app.id + "\x00" + ck.Name
+				if lastPushed[key] == ck.Value {
+					continue
+				}
+				params := map[string]any{
+					"name":     ck.Name,
+					"value":    ck.Value,
+					"url":      origin + "/app/" + app.id,
+					"path":     "/app/" + app.id,
+					"httpOnly": ck.HTTPOnly,
+					"secure":   false,
+					"sameSite": "Lax",
+				}
+				if ck.Expires > 0 {
+					params["expires"] = int64(ck.Expires)
+				}
+				if _, err := c.call("Network.setCookie", params, sid); err == nil {
+					lastPushed[key] = ck.Value
+				}
+			}
+		}
+	}
+}
+
 func normalizeLoop(c *cdp, firstSession func() string, sw *serverConf) {
 	t := time.NewTicker(2 * time.Second)
 	defer t.Stop()
@@ -880,11 +1149,12 @@ try{
     }
   }
 }catch(e){}
-})();` + globalBridgeSource() + keyForwardSource()
+})();` + globalBridgeSource() + keyForwardSource() + openTabSource()
 }
 
 // chromeArgs 组装 Chrome 启动参数。核心三件套：
-//   - --app：独立应用窗口（无浏览器地址栏/标签页外壳）
+//   - --app：独立应用窗口（无浏览器地址栏/标签页外壳），url 为首开地址——默认本地
+//     设置页的启动选择形态（先选服务器再进入），-url/-auto 时为 OpenOS 地址
 //   - --disable-web-security：关闭同源策略，跨源 iframe 可嵌入（X-Frame-Options /
 //     CSP frame-ancestors 不再拦截），父页面与 iframe 脚本可互访
 //   - 关闭站点隔离（隔离试验 / site-per-process / IsolateOrigins），iframe 与宿主

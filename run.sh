@@ -26,10 +26,11 @@
 #     （openos.db、homes/、goder 组件等）；前端静态目录以绝对路径注入 OPENOS_DIST，
 #     避免相对 CWD 解析不到 web/dist
 #   - 桌面客户端二进制在仓库根 openos-desktop（缺失或可构建时自动构建；更新代码后
-#     亦可手动 make desktop），日志追加写入 openos-desktop.log；打开地址优先级 =
-#     OPENOS_DESKTOP_URL（显式指定才透传 -url）> 客户端已保存配置
-#     ~/.openos-desktop/config.json（窗口右下角 ⚙ 设置，可连在线 OpenOS 兼容端）>
-#     默认 http://<OPENOS_ADDR>；配置指向远程地址时跳过本地服务端的构建与启动
+#     亦可手动 make desktop），日志追加写入 openos-desktop.log；每次启动先弹「选择
+#     服务器」页（上次地址与最近列表预填，选定后进入）；OPENOS_DESKTOP_URL 显式指定
+#     时透传 -url 跳过选择页直连（直连优先级 = -url > 客户端已保存配置
+#     ~/.openos-desktop/config.json > 默认 http://<OPENOS_ADDR>）；已保存配置指向
+#     远程地址时跳过本地服务端的构建与启动
 #   - 环境变量原样透传（OPENOS_ADDR / OPENOS_DATA / OPENOS_JWT_SECRET / OPENOS_AI_* 等）
 #   - 服务日志追加写入 server/openos-server.log
 #
@@ -54,9 +55,9 @@ case "${ADDR}" in
   *)  HEALTH_ADDR="${ADDR}" ;;
 esac
 PORT="${HEALTH_ADDR##*:}"
-# 桌面客户端打开的 OpenOS 地址：仅在 OPENOS_DESKTOP_URL 显式指定时透传 -url（仅本次
-# 生效、不写盘）；未设置时不传，由客户端读已保存配置（⚙ 设置页保存的兼容端地址），
-# 无配置则用本地服务端健康地址
+# 桌面客户端打开的 OpenOS 地址：仅在 OPENOS_DESKTOP_URL 显式指定时透传 -url 直连
+#（仅本次生效、不写盘）；未设置时不传，客户端默认先弹「选择服务器」页（⚙ 设置页
+# 保存的地址作「上次连接」预填，选定后落盘并进入）
 DESKTOP_URL="${OPENOS_DESKTOP_URL:-}"
 
 # 读桌面客户端已保存的服务器配置（~/.openos-desktop/config.json 的 url 字段）。
@@ -335,15 +336,20 @@ start_desktop() {
   mark=0
   if [ -f "${DESKTOP_LOG}" ]; then mark=$(( $(wc -l < "${DESKTOP_LOG}") + 0 )); fi
 
-  # 打开地址：OPENOS_DESKTOP_URL 显式时透传 -url（仅本次生效）；否则由客户端读
-  # 已保存配置（⚙ 设置页），无配置用默认本地地址——提示按此优先级展示
+  # 打开地址：OPENOS_DESKTOP_URL 显式时透传 -url 直连（仅本次生效）；否则客户端默认
+  # 先弹「选择服务器」页（选定后进入）——提示语按此区分，open_url 仅作「上次/默认」
+  # 参考展示
   open_url="${DESKTOP_URL}"
   if [ -z "${open_url}" ]; then open_url="$(desktop_config_url 2>/dev/null || true)"; fi
   if [ -z "${open_url}" ]; then open_url="http://${HEALTH_ADDR}"; fi
   args=()
   [ -n "${DESKTOP_URL}" ] && args+=(-url "${DESKTOP_URL}")
 
-  echo "→ 启动桌面客户端（${open_url}）..."
+  if [ -n "${DESKTOP_URL}" ]; then
+    echo "→ 启动桌面客户端（直连 ${open_url}）..."
+  else
+    echo "→ 启动桌面客户端（先选择服务器，上次：${open_url}）..."
+  fi
   (
     cd "${ROOT}"
     nohup "${DESKTOP_BIN}" ${args[@]+"${args[@]}"} >> "${DESKTOP_LOG}" 2>&1 &

@@ -495,10 +495,11 @@ func TestServeHTTPProxy(t *testing.T) {
 	if s := w.Body.String(); s != "Ref:"+upstream.URL+"/page|SF:" {
 		t.Errorf("Referer 还原/Sec-Fetch 剥离不符：%s", s)
 	}
-	// 非本应用代理页的 Referer 不发送
+	// 非本应用代理页的 Referer 不原样发送，兜底重建为目标站根地址（kdocs 写
+	// 接口要求 Origin/Referer 至少一个匹配自家域，剥光会被风控拒绝）
 	w = do(upCompact+"/echo-ref", map[string]string{"Referer": "http://example.com/other"})
-	if s := w.Body.String(); s != "Ref:|SF:" {
-		t.Errorf("无关 Referer 应不发送，得到 %s", s)
+	if s := w.Body.String(); s != "Ref:"+upstream.URL+"/|SF:" {
+		t.Errorf("无关 Referer 应兜底重建为目标站根地址，得到 %s", s)
 	}
 
 	// SSRF：目标是回环但并非配置主机（localhost ≠ 127.0.0.1）→ 拒绝

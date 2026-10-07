@@ -10,7 +10,7 @@ import (
 )
 
 // hopReq 转发请求时剥掉的逐跳/会话头。Origin/Referer 整头剥除后按需重建
-//（见 sanitizeOutRequest：Referer 还原为目标站自身地址，Origin 语义在反代后
+// （见 sanitizeOutRequest：Referer 还原为目标站自身地址，Origin 语义在反代后
 // 失真、不重建）。
 var hopReq = []string{
 	"Connection", "Proxy-Connection", "Keep-Alive", "Proxy-Authenticate",
@@ -21,7 +21,7 @@ var hopReq = []string{
 // sanitizeOutRequest 清洗转发上游的请求：剥逐跳/会话头、压缩协商收窄到 gzip、
 // Referer 还原、Sec-Fetch-* 剥除、还原标记与回跳参数改写、会话 Cookie 过滤、
 // X-Forwarded-* 补齐。
-func sanitizeOutRequest(out, orig *http.Request, id string, cfg *proxyConfig) {
+func sanitizeOutRequest(out, orig *http.Request, id string, cfg *proxyConfig, tu *url.URL) {
 	h := out.Header
 	for _, k := range hopReq {
 		h.Del(k)
@@ -37,6 +37,14 @@ func sanitizeOutRequest(out, orig *http.Request, id string, cfg *proxyConfig) {
 			h.Set("Referer", rr)
 		}
 	}
+	// Origin/Referer 兜底重建：kdocs 等站点的写接口要求二者至少一个匹配自家域，
+	// 反代剥光后直接 403「SessionDeleted」（带 X-Forwarded-* 的代理链请求尤其
+	// 严判）。识别不出原始 Referer 的兜底补目标站根地址；Origin 统一补目标站
+	// 自身源——二者值都是目标站自己的，与 Referer 还原同一语义，不泄露宿主信息。
+	if h.Get("Referer") == "" {
+		h.Set("Referer", tu.Scheme+"://"+tu.Host+"/")
+	}
+	h.Set("Origin", tu.Scheme+"://"+tu.Host)
 	// Sec-Fetch-* 描述浏览器视角的源关系（代理后基准源是 OpenOS 宿主，到达目标站
 	// 语义全失真——如跨域跳转显示成 same-origin），整组剥除，服务器按无该头处理
 	for k := range h {

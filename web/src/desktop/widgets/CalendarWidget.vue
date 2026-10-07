@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 日历桌面小组件：今日大字（周几/日期/农历/节日）+ 迷你月历（节假日红字、
-// 调休「班」标、今日高亮）。点任意日期打开日历应用并定位到该天；
+// 右上角「休/班」角标、今日高亮）。点任意日期打开日历应用并定位到该天；
 // 浏览的年月经 update() 持久化在小组件条目上（刷新后停留在原月份）。
 import { computed } from 'vue'
 import { useWindows } from '../../stores/windows'
@@ -97,7 +97,7 @@ function cellTitle(key: string) {
             workday: cal.holidayOf(c.key) && !cal.holidayOf(c.key)!.off,
             wknd: [0, 6].includes(new Date(c.key + 'T00:00:00').getDay()),
           }">{{ c.d }}</span>
-          <i v-if="cal.holidayOf(c.key) && !cal.holidayOf(c.key)!.off" class="ban">班</i>
+          <i v-if="cal.holidayOf(c.key)" class="mk" :class="cal.holidayOf(c.key)!.off ? 'xiu' : 'ban'">{{ cal.holidayOf(c.key)!.off ? '休' : '班' }}</i>
           <!-- 底部一行小点：蓝=日程，彩色=自由日标记 -->
           <span v-if="cal.byDate(c.key).length || cal.marksOf(c.key).length" class="dots">
             <i v-if="cal.byDate(c.key).length" class="evdot" />
@@ -149,10 +149,13 @@ function cellTitle(key: string) {
   background: #ff5f57; color: #fff; font-weight: 700;
   min-width: 19px; height: 19px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
 }
-.ban {
+/* 节假日角标（格右上角）：休=绿、班=红（提示补班），与日历应用的 .mark 同语义 */
+.mk {
   position: absolute; top: 0; right: 1px; font-size: 7.5px; font-style: normal; line-height: 1;
-  background: rgba(255, 95, 87, .85); color: #fff; padding: 1px 2px; border-radius: 3px;
+  padding: 1px 2px; border-radius: 3px; color: #fff;
 }
+.mk.xiu { background: rgba(45, 164, 78, .95); }
+.mk.ban { background: rgba(255, 95, 87, .85); }
 /* 底部小点行：蓝=日程圆点，彩色=自由日标记（最多 3 枚） */
 .dots { position: absolute; bottom: 1.5px; left: 0; right: 0; display: flex; gap: 2px; justify-content: center; }
 .dots i { width: 3px; height: 3px; border-radius: 50%; }

@@ -45,13 +45,14 @@
       "description": "网易云音乐网页版：在线听歌、歌单、每日推荐，支持扫码登录。",
       "category": "娱乐",
       "icon": "https://music.163.com/favicon.ico",
-      "type": "web",
+      "type": "proxy",
       "config": {
-        "kind": "web",
-        "url": "https://music.163.com/"
+        "kind": "proxy",
+        "url": "https://music.163.com/",
+        "desktopProxy": true
       },
-      "version": "1.0.0",
-      "changelog": "初始版本",
+      "version": "1.0.1",
+      "changelog": "修复打开后内容区显示「拒绝连接」：站点内容页带防嵌头（X-Frame-Options），改走服务端代理剥除；桌面客户端同样经代理（desktopProxy），不再直连",
       "perms": [
         "在窗口内加载 music.163.com"
       ],
@@ -95,6 +96,26 @@
       ],
       "width": 1000,
       "height": 720
+    },
+    {
+      "id": "wps-kdocs",
+      "name": "WPS 金山文档",
+      "description": "WPS 金山文档网页版：文档、表格、演示、PDF 在线编辑与云端同步，支持 WPS 账号或扫码登录，多端实时协作。",
+      "category": "效率",
+      "icon": "https://www.wps.cn/favicon.ico",
+      "type": "web",
+      "config": {
+        "kind": "proxy",
+        "url": "https://www.kdocs.cn/latest",
+        "desktopProxy": true
+      },
+      "version": "1.0.1",
+      "changelog": "桌面客户端走服务端反代（desktopProxy）修复创建/编辑接口被 Origin 风控拒绝（403 SessionDeleted）；入口改 /latest",
+      "perms": [
+        "在窗口内加载 www.kdocs.cn"
+      ],
+      "width": 1200,
+      "height": 800
     },
     {
       "id": "github-trending",

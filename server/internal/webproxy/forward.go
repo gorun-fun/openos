@@ -19,7 +19,7 @@ func (p *Proxy) serveHTTPProxy(w http.ResponseWriter, r *http.Request, id string
 	outReq.URL = tu
 	outReq.Host = tu.Host
 	outReq.RequestURI = "" // client 发出的请求必须清空
-	sanitizeOutRequest(outReq, r, id, cfg)
+	sanitizeOutRequest(outReq, r, id, cfg, tu)
 	// 配置头在剥除 OpenOS 会话/逐跳头之后应用：优先级最高（可覆盖 X-Forwarded-*），
 	// 管理员显式写死的目标站凭据（如 Authorization）是本功能的主要用例
 	applyCfgHeaders(outReq.Header, cfg.Headers)

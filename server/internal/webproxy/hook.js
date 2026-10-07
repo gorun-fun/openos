@@ -84,7 +84,9 @@
     if (s.indexOf(PREFIX) === 0) return s; // 已是代理路径（服务端重写过的属性值），勿再包一层
     try {
       var abs;
-      if (s.indexOf('//') === 0) abs = (location.protocol === 'https:' ? 'https:' : 'http:') + s;
+      // 协议相对地址按目标站 scheme 解析（代理页是 http 时 location.protocol 会把
+      // //cdn 降级成 http，CDN 多为 https-only，降级形态被上游 302/拒连打断加载）
+      if (s.indexOf('//') === 0) abs = SCHEME + '://' + s.slice(2);
       else if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) abs = s;
       else if (s.charAt(0) === '/') abs = SCHEME + '://' + AUTH + s;
       else abs = new URL(s, REALBASE).href;
@@ -95,6 +97,12 @@
         var sub = abs.slice(location.origin.length);
         if (sub.indexOf(PREFIX) === 0) return abs;
         abs = SCHEME + '://' + AUTH + sub;
+      } else {
+        // 无端口的本源形态：页面 JS 常以 location.protocol+'//'+location.hostname
+        // 拼绝对地址（hostname 不含端口），如 http://127.0.0.1/discover——不重解释
+        // 会代理到本源 80 端口（必拒）。与带端口形态同语义：按目标站路径重新解释
+        var noPort = location.protocol + '//' + location.hostname + '/';
+        if (abs.indexOf(noPort) === 0) abs = SCHEME + '://' + AUTH + abs.slice(noPort.length - 1);
       }
       var hi = abs.indexOf('#');
       if (hi >= 0) abs = abs.slice(0, hi);
@@ -319,6 +327,37 @@
     } catch (e) { /* 属性不可改写时跳过 */ }
   });
 
+  // ---- integrity 属性全面失能：SRI 与重写代理不兼容（字节透传也常因跨源语境
+  // 校验失败，kdocs 运行时注入的懒加载模块全灭 → 新建菜单不渲染）。三层：
+  // property setter 吞掉、setAttribute 剥除（见下）、MutationObserver 清扫
+  // innerHTML/解析器路径注入的元素 ----
+  try {
+    ['HTMLLinkElement', 'HTMLScriptElement'].forEach(function (k) {
+      var C = window[k]; if (!C) return;
+      var d = Object.getOwnPropertyDescriptor(C.prototype, 'integrity');
+      if (d && d.set) {
+        Object.defineProperty(C.prototype, 'integrity', {
+          configurable: true, enumerable: d.enumerable,
+          get: function () { return d.get ? d.get.call(this) : ''; },
+          set: function () { /* SRI 失能：吞掉 */ },
+        });
+      }
+    });
+    var mo = new MutationObserver(function (muts) {
+      for (var i = 0; i < muts.length; i++) {
+        var add = muts[i].addedNodes;
+        for (var j = 0; j < add.length; j++) {
+          var n = add[j];
+          if (!n.querySelectorAll) continue;
+          if (n.hasAttribute && n.hasAttribute('integrity')) n.removeAttribute('integrity');
+          var els = n.querySelectorAll('[integrity]');
+          for (var k2 = 0; k2 < els.length; k2++) els[k2].removeAttribute('integrity');
+        }
+      }
+    });
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+  } catch (e) { /* 个别环境不支持则跳过 */ }
+
   // ---- setAttribute 通用兜底（srcset 逐项处理）----
   var urlAttrs = {
     href: 1, src: 1, action: 1, formaction: 1, poster: 1,
@@ -328,6 +367,7 @@
   Element.prototype.setAttribute = function (name, value) {
     try {
       var n = String(name).toLowerCase();
+      if (n === 'integrity') return; // SRI 与重写代理不兼容（运行时注入的 chunk 同样剥除）
       if (urlAttrs[n]) value = toProxy(String(value));
       else if (n === 'srcset' && value) {
         value = String(value).split(',').map(function (part) {
@@ -338,4 +378,203 @@
     } catch (e) { /* 保持原参数 */ }
     return sa.call(this, name, value);
   };
+
+  // ---- document.domain 赋值静默化 ----
+  // 反代页运行在本源（如 127.0.0.1:8081），站点壳页跨子域通信脚本常设置
+  // document.domain（网易云音乐壳页）：本源非目标站后缀，非 sandbox 下赋值抛
+  // SecurityError、sandbox 帧直接禁——未捕获会中断页面初始化（壳页后续对内容
+  // iframe 的导航代码不再执行）。反代下跨子域通信已被同源化（都在 /app/ 前缀），
+  // 设置 domain 本就无意义：包装为静默 no-op，页面感知"设置成功"，读取原样。
+  try {
+    var domDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'domain');
+    if (domDesc && domDesc.set && domDesc.configurable) {
+      Object.defineProperty(Document.prototype, 'domain', {
+        configurable: true,
+        get: function () { try { return domDesc.get.call(this); } catch (e) { return location.hostname; } },
+        set: function () { /* 反代页中设置无意义，静默吞掉 */ },
+      });
+    }
+  } catch (e) { /* 不可重定义时忽略 */ }
+
+  // ---- contentWindow.location 导航兜底（about:blank 帧）----
+  // 部分站点的壳页以 location.protocol+'//'+location.hostname 拼绝对地址后，直接对
+  // 子帧 contentWindow.location 赋值导航（网易云音乐壳页的 g_iframe：src 恒
+  // about:blank，经 location 赋值跳 /discover——location 是 Unforgeable，属性包装
+  // 拦不住；拼出的无端口本源地址直连 80 端口必拒，连服务端回捕都够不着）。
+  // 仅对 src 为空/about:blank 的帧生效（此类帧只可能被 JS 经 location 导航）：
+  // 包装 contentWindow 返回代理，location 的赋值/assign/replace 经 toProxy 改写
+  // 回代理路径；同一真窗口与 location 各缓存一份保持引用相等性。有实际地址的帧
+  // 原样返回，零影响（美团等容器的 postMessage 通信不受波及）。
+  try {
+    var cwDesc = Object.getOwnPropertyDescriptor(window.HTMLIFrameElement.prototype, 'contentWindow');
+    if (cwDesc && cwDesc.get && cwDesc.configurable) {
+      var cwCache = new WeakMap();  // iframe → {win, proxy}
+      var locCache = new WeakMap(); // 真 location → 伪装对象
+      // 导航执行器：toProxy 改写后先在当前上下文直接执行（非 sandbox 场景正常
+      // 工作）；被 sandbox 拒（外层 iframe 带 sandbox 防 framebusting 时，文档无权
+      // 导航子帧，Chrome 硬限制，SecurityError 同步抛出）则转发顶层 OpenOS 页
+      //（同源、不在 sandbox 内，有权导航任何同源帧）代为执行；顶层直开代理页
+      //（parent===window）或宿主未挂 __osPxNav__ 时 rethrow 原异常
+      var pxNavRaw = function (loc, pv) {
+        try {
+          loc.href = pv;
+        } catch (e) {
+          if (window.parent !== window && window.parent.__osPxNav__) {
+            window.parent.__osPxNav__(loc, pv);
+            return;
+          }
+          throw e;
+        }
+      };
+      var pxNav = function (loc, v) {
+        var pv;
+        try { pv = toProxy(String(v)); } catch (e) { pv = v; }
+        pxNavRaw(loc, pv);
+      };
+      // 伪装 Location 用普通对象：Proxy 方案在 non-configurable 属性上两头不讨好——
+      // href 等 accessor 经 set trap 包装合法，但 replace/assign 这类 non-configurable
+      // 数据属性 get 必须返回原值（invariant），返回原函数又会被以代理为 this 调用
+      //（Illegal invocation，网易云音乐壳页即踩此坑）。普通对象无 invariant 限制：
+      // 读取属性转发真值，三个导航入口（href 赋值/assign/replace）统一走 pxNav。
+      var wrapFrameLoc = function (loc) {
+        var p = locCache.get(loc);
+        if (p) return p;
+        var shadow = {};
+        ['href', 'hash', 'search', 'host', 'hostname', 'pathname', 'port', 'protocol', 'origin'].forEach(function (k) {
+          try {
+            Object.defineProperty(shadow, k, {
+              configurable: true,
+              get: function () { try { return loc[k]; } catch (e) { return ''; } },
+              set: function (v) { pxNav(loc, v); },
+            });
+          } catch (e) { /* 个别属性不可配则跳过 */ }
+        });
+        try { shadow.toString = function () { return loc.href; }; } catch (e) { }
+        try { shadow.valueOf = function () { return loc.href; }; } catch (e) { }
+        try {
+          shadow.assign = function (u) {
+            var pv; try { pv = toProxy(String(u)); } catch (e) { pv = u; }
+            try { loc.assign(pv); } catch (e) {
+              if (window.parent !== window && window.parent.__osPxNav__) { window.parent.__osPxNav__(loc, pv); return; }
+              throw e;
+            }
+          };
+        } catch (e) { }
+        try {
+          shadow.replace = function (u) {
+            var pv; try { pv = toProxy(String(u)); } catch (e) { pv = u; }
+            try { loc.replace(pv); } catch (e) {
+              if (window.parent !== window && window.parent.__osPxNav__) { window.parent.__osPxNav__(loc, pv); return; }
+              throw e;
+            }
+          };
+        } catch (e) { }
+        try { shadow.reload = function () { try { loc.reload(); } catch (e) { /* 无权重载则放弃 */ } }; } catch (e) { }
+        locCache.set(loc, shadow);
+        return shadow;
+      };
+      Object.defineProperty(window.HTMLIFrameElement.prototype, 'contentWindow', {
+        configurable: true,
+        get: function () {
+          var w = cwDesc.get.call(this);
+          if (!w) return w;
+          var src = this.getAttribute('src');
+          if (src && src !== 'about:blank') return w;
+          var c = cwCache.get(this);
+          if (c && c.win === w) return c.proxy;
+          var bound = Object.create(null);
+          var proxy = new Proxy(w, {
+            get: function (t, k) {
+              if (k === 'location') return wrapFrameLoc(t.location);
+              var v = t[k];
+              if (typeof v === 'function') {
+                // invariant：non-configurable non-writable 数据属性的 get 必须返回原值
+                try {
+                  var d = Object.getOwnPropertyDescriptor(t, k);
+                  if (d && d.configurable === false && d.writable === false) return v;
+                } catch (e) { }
+                return bound[k] || (bound[k] = v.bind(t));
+              }
+              return v;
+            },
+            set: function (t, k, v) {
+              if (k === 'location') { pxNav(t.location, v); return true; }
+              t[k] = v;
+              return true;
+            },
+          });
+          cwCache.set(this, { win: w, proxy: proxy });
+          return proxy;
+        },
+      });
+    }
+  } catch (e) { /* contentWindow 不可重定义时忽略 */ }
+
+  // ---- 初始导航失败自愈 ----
+  // sandbox 帧内的站点初始化脚本若在文档解析期对子帧发起 location 导航，个别时序
+  // 下仍会拿到原始 SecurityError（网易云音乐壳页实测：初始 replace 失败、之后的
+  // hashchange 同路径成功）。error 观察标记"发生过 sandbox 导航拒绝"，load 后若
+  // 页面仍存在 about:blank 帧（初始内容帧从未被导航），补发一次 hashchange 让
+  // 站点自身的 hash 路由重放初始化——对 SPA 幂等，仅补一次。
+  try {
+    var pxNavDenied = false;
+    window.addEventListener('error', function (ev) {
+      try {
+        if (!pxNavDenied && /does not have permission to navigate/.test((ev && ev.message) || '')) {
+          pxNavDenied = true;
+        }
+      } catch (e) { }
+    }, true);
+    var pxHeal = function () {
+      if (!pxNavDenied) return;
+      var frs = document.querySelectorAll('iframe');
+      for (var i = 0; i < frs.length; i++) {
+        var s = frs[i].getAttribute('src');
+        if (!s || s === 'about:blank') {
+          try {
+            var ev2 = document.createEvent('HTMLEvents');
+            ev2.initEvent('hashchange', false, false);
+            window.dispatchEvent(ev2);
+          } catch (e) { }
+          return; // 只补一次
+        }
+      }
+    };
+    if (document.readyState === 'complete') setTimeout(pxHeal, 0);
+    else window.addEventListener('load', function () { setTimeout(pxHeal, 800); });
+  } catch (e) { /* 观察器不可用时忽略 */ }
+
+  // ---- 动态插入的 iframe 兜底 ----
+  // innerHTML/document.write 插入的 iframe，src 由 HTML 解析器设置，不走上面的属性
+  // setter 与 setAttribute（网易云壳页的内容 iframe即此形态：JS 以
+  // location.protocol+'//'+location.hostname 拼绝对地址插入，丢代理前缀与端口，
+  // 直连本源 80 端口必拒）。MutationObserver 观察新增节点，iframe 的 src 经
+  // toProxy 改写后逃逸形态归位到代理路径（幂等：已是代理路径的不动）。
+  try {
+    var fixFrameSrc = function (f) {
+      if (f.__osPxSeen) return;
+      f.__osPxSeen = 1;
+      var raw = f.getAttribute('src');
+      if (!raw) return;
+      try {
+        var mapped = toProxy(raw);
+        if (mapped !== raw) f.src = mapped; // 属性 setter 已包装且 toProxy 对代理路径幂等
+      } catch (e) { /* 保持原值 */ }
+    };
+    var mo = new MutationObserver(function (muts) {
+      for (var i = 0; i < muts.length; i++) {
+        var nodes = muts[i].addedNodes;
+        for (var k = 0; k < nodes.length; k++) {
+          var n = nodes[k];
+          if (n.nodeType !== 1) continue;
+          if (n.tagName === 'IFRAME') { fixFrameSrc(n); continue; }
+          try {
+            var fs = n.querySelectorAll('iframe');
+            for (var q = 0; q < fs.length; q++) fixFrameSrc(fs[q]);
+          } catch (e) { /* 非元素子树忽略 */ }
+        }
+      }
+    });
+    mo.observe(document.documentElement || document, { childList: true, subtree: true });
+  } catch (e) { /* Observer 不可用时维持现状 */ }
 })();
