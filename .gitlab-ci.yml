@@ -5,7 +5,9 @@
 # 流程：    编译打包为 Docker 镜像 -> 推送到私有仓库 -> SSH 部署到 DEPLOY_HOSTS 各主机
 #           （tag 附带 dist 产物发布：多平台 openos-server 二进制 + goder 三件套 +
 #            manifest.json sha256 清单 → download.gorun.fun/openos/dist/<tag>/，
-#            宿主 CI 经 hostsdk/预编译消费，免每次源码编译 modernc sqlite——P7）
+#            宿主 CI 经 hostsdk/预编译消费，免每次源码编译 modernc sqlite——P7；
+#            tag 同时发布桌面客户端六平台 → download.gorun.fun/openos/cli/<平台>/
+#            <版本>/，平台/版本/运行文件布局，桌面客户端自动更新消费同一通道）
 # 镜像仓库：10.8.0.6:5000（Registry 容器仅绑定该地址；构建/推送与发布机拉取共用）
 # ============================================================================
 
@@ -182,5 +184,60 @@ publish-dist:
     # 4) 上传（货架机同源：download.gorun.fun = 10.8.0.5:/data/download）
     - ssh ${DEPLOY_USER}@10.8.0.5 "mkdir -p /data/download/openos/dist/${CI_COMMIT_TAG}"
     - scp dist-out/* ${DEPLOY_USER}@10.8.0.5:/data/download/openos/dist/${CI_COMMIT_TAG}/
+  rules:
+    - if: '$CI_COMMIT_TAG'
+
+# ---- 桌面客户端发布（tag；download.gorun.fun/openos/cli 通道） ----
+# 交叉编译全部 6 平台（darwin/linux/windows × amd64/arm64，平台目录沿用 goder
+# 约定：macos=amd64、macos-arm64、linux、linux-arm64、windows、windows-arm64；
+# Windows 构建 GUI 子系统 + rsrc 图标）→ 版本注入（tag 去 v 前缀）+ .sha256 校验
+# 文件 + notes.txt（发布说明）→ 上传 10.8.0.5:/data/download/openos/cli/<平台>/
+# <版本>/。布局 = 平台/版本/运行文件（goder 同款）；桌面客户端的自动更新
+#（desktop/update.go）消费同一通道。本地等价命令：make desktop-upload。
+publish-cli:
+  stage: dist
+  tags:
+    - docker
+  needs: ["push-image"]
+  before_script:
+    - sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
+    - apk add --no-cache openssh-client git
+    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    - cp "$DEPLOY_SSH_PRIVATE_KEY" ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - ssh-keyscan -H 10.8.0.5 >> ~/.ssh/known_hosts 2>/dev/null
+  script:
+    - VER="${CI_COMMIT_TAG#v}"
+    - mkdir -p cli-out
+    # 1) 六平台交叉编译（纯 Go，CGO_ENABLED=0；具名卷跨流水线复用编译缓存）
+    - |
+      for T in "darwin amd64 macos" "darwin arm64 macos-arm64" "linux amd64 linux" \
+               "linux arm64 linux-arm64" "windows amd64 windows" "windows arm64 windows-arm64"; do
+        set -- $T; GOOS=$1; GOARCH=$2; PLAT=$3; EXT=""; LD="-s -w -X main.version=${VER}"
+        [ "$GOOS" = windows ] && { EXT=".exe"; LD="$LD -H windowsgui"; }
+        echo "→ 构建 openos-desktop-${PLAT}${EXT} (${GOOS}/${GOARCH})"
+        mkdir -p cli-out/${PLAT}
+        docker run --rm -v "$CI_PROJECT_DIR:/work" -w /work/desktop \
+          -e GOPROXY=https://goproxy.cn,direct -e GOCACHE=/gocache -v openos-gocache:/gocache \
+          -e CGO_ENABLED=0 -e GOOS=$GOOS -e GOARCH=$GOARCH \
+          golang:1.26-alpine go build -trimpath -ldflags "$LD" \
+          -o /work/cli-out/${PLAT}/openos-desktop-${PLAT}${EXT} .
+      done
+    # 2) sha256 校验文件 + notes.txt（发布说明 = tag 提交信息）；跳过已生成的
+    #    .sha256 文件，防重复执行产出 .sha256.sha256
+    - |
+      for f in cli-out/*/openos-desktop-*; do
+        case "$f" in *.sha256) continue ;; esac
+        sha256sum "$f" > "$f.sha256"
+      done
+      git log -1 --pretty=%B > cli-out/notes.txt
+      cat cli-out/notes.txt
+    # 3) 上传（download.gorun.fun = 10.8.0.5:/data/download）
+    - |
+      for PLAT in macos macos-arm64 linux linux-arm64 windows windows-arm64; do
+        ssh ${DEPLOY_USER}@10.8.0.5 "mkdir -p /data/download/openos/cli/${PLAT}/${VER}"
+        scp cli-out/${PLAT}/* ${DEPLOY_USER}@10.8.0.5:/data/download/openos/cli/${PLAT}/${VER}/
+        scp cli-out/notes.txt ${DEPLOY_USER}@10.8.0.5:/data/download/openos/cli/${PLAT}/${VER}/notes.txt
+      done
   rules:
     - if: '$CI_COMMIT_TAG'

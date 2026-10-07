@@ -21,7 +21,10 @@
 //     （在线部署地址）；目标地址打不开时自动转入设置页兜底；
 //  4. reset 子命令（reset.go）：清空全部本地数据（登录态、站点数据、服务器配置），
 //     先停运行中的实例再删目录；
-//  5. 监听 Ctrl+C / 主窗口关闭 / Chrome 退出，随之收尾退出（按进程组清理）。
+//  5. 版本检测与自动更新（update.go）：发布通道 download.gorun.fun/openos/cli
+//     （平台/版本/运行文件布局），设置页「客户端版本」区块展示与一键更新，
+//     下载 sha256 校验后原子换文件并以相同参数重启；
+//  6. 监听 Ctrl+C / 主窗口关闭 / Chrome 退出，随之收尾退出（按进程组清理）。
 //
 // 安全边界：--disable-web-security 意味着窗口内跨源脚本可互访，且调试端口只绑
 // 127.0.0.1；专用 profile 仅用于打开 OpenOS，不要当日常浏览器使用。
@@ -67,7 +70,12 @@ func main() {
 	profileFlag := flag.String("profile", "", "专用用户数据目录（默认 ~/.openos-desktop，登录态持久化于此）")
 	portFlag := flag.Int("port", 0, "CDP 调试端口（默认自动选取空闲端口）")
 	confPortFlag := flag.Int("conf-port", 0, "服务器设置页的回环端口（默认 17700，被占自动递增；$OPENOS_DESKTOP_CONF_PORT 同效）")
+	versionFlag := flag.Bool("version", false, "打印版本号并退出")
 	flag.Parse()
+	if *versionFlag {
+		fmt.Println("openos-desktop", version)
+		return
+	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -82,6 +90,8 @@ func main() {
 	}
 	// 记录客户端 pid：reset 子命令据此停止运行中的实例（配进程身份校验防 PID 复用）
 	_ = os.WriteFile(filepath.Join(profile, "client.pid"), []byte(strconv.Itoa(os.Getpid())), 0o600)
+	// 清理上次自动更新留下的 <exe>.old（best-effort）
+	removeStaleUpdate()
 
 	// 服务器配置（OpenOS 兼容端地址）：-url 显式 > 已保存配置 > 默认本地。
 	// -url 只覆盖本次运行，不写盘——run.sh 透传的开发地址不会顶掉用户保存的在线端。
@@ -104,6 +114,12 @@ func main() {
 		fatal(fmt.Errorf("-url 无效: %w", err))
 	}
 	sw := newServerConf(confPath, cfg, target)
+	// 版本更新器：启动后延迟静默检查（有新版时设置页展示「立即更新」）
+	upd := newUpdater(version)
+	go func() {
+		time.Sleep(2 * time.Second)
+		upd.check()
+	}()
 	confPort := *confPortFlag
 	if confPort == 0 {
 		confPort = 17700
@@ -154,7 +170,7 @@ func main() {
 		}()
 	}
 	// 回环设置页（服务器设置）：主窗口右下角 ⚙ 进入；目标地址打不开时自动转入
-	selfBase := listenSettings(confPort, sw, nav)
+	selfBase := listenSettings(confPort, sw, upd, nav)
 
 	// 首开地址：默认每次启动先选服务器再进入（设置页 pick 形态，选定后落盘并导航）；
 	// -url 显式（开发/自动化一次性目标）与 -auto（直连已保存地址）跳过；设置服务
@@ -172,8 +188,8 @@ func main() {
 	if err := cmd.Start(); err != nil {
 		fatal(err)
 	}
-	fmt.Printf("OpenOS 桌面客户端已启动\n  浏览器:   %s\n  打开:     %s\n  调试端口: %d\n  用户目录: %s\n",
-		chromePath, startURL, port, profile)
+	fmt.Printf("OpenOS 桌面客户端已启动\n  版本:     %s\n  浏览器:   %s\n  打开:     %s\n  调试端口: %d\n  用户目录: %s\n",
+		version, chromePath, startURL, port, profile)
 	if selfBase != "" {
 		fmt.Printf("  设置页:   %s（窗口右下角 ⚙ 进入；连接的地址保存在 %s）\n", selfBase, confPath)
 	}
@@ -223,6 +239,16 @@ func main() {
 		case <-exited:
 		case <-time.After(2 * time.Second):
 		}
+	case <-upd.restartReady():
+		// 自动更新收尾：新二进制已就位（旧件在 <exe>.old）。先停 Chrome（释放
+		// profile 锁），再以相同参数重启——unix 原位 exec 保持 PID 与日志连续
+		fmt.Println("自动更新完成，重启客户端…")
+		killGroup(cmd)
+		select {
+		case <-exited:
+		case <-time.After(2 * time.Second):
+		}
+		restartSelf()
 	}
 }
 

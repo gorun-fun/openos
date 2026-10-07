@@ -185,6 +185,15 @@ build() {
   (cd "${SERVER_DIR}" && go build -o openos-server .)
 }
 
+# 桌面客户端版本：与服务端同源（精确 tag > 最近 tag+N+hash > dev），去 v 前缀——
+# 与发布通道 openos/cli 的版本目录命名一致（v0.0.60 → 0.0.60），供自动更新比较
+desktop_version() {
+  local v
+  v="$(git -C "${ROOT}" describe --tags --exact-match 2>/dev/null \
+    || git -C "${ROOT}" describe --tags 2>/dev/null || echo dev)"
+  printf '%s' "${v#v}"
+}
+
 # 交叉编译 Linux/Windows 发布二进制（build 子命令）：linux/windows × amd64/arm64，
 # 按平台分目录输出到 release/<goos>-<goarch>/，目录内可执行文件直接以平台无关名字
 # 命名：桌面客户端 = openos（与 make release 的 openos 命名一致），服务端 =
@@ -206,14 +215,16 @@ build_cross() {
         # Windows 用 GUI 子系统（-H windowsgui）：双击启动不弹 cmd 黑框；从终端
         # 启动时的输出/输入由二进制内 AttachConsole 挂回父终端（console_windows.go），
         # 启动失败（无终端可挂）弹系统错误框。图标经 desktop/ 下 rsrc_windows_*.syso
-        # 资源文件自动链入（go-winres 生成，重制方法见 desktop/README.md「应用图标」）
+        # 资源文件自动链入（go-winres 生成，重制方法见 desktop/README.md「应用图标」）。
+        # 版本号注入（desktop_version）供客户端自动更新比较
         if [ "${goos}" = "windows" ]; then
           (cd "${ROOT}/desktop" && CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
-            go build -trimpath -ldflags "-s -w -H windowsgui" \
+            go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=$(desktop_version)" \
             -o "${dir}/openos${ext}" .)
         else
           (cd "${ROOT}/desktop" && CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
-            go build -trimpath -o "${dir}/openos${ext}" .)
+            go build -trimpath -ldflags "-s -w -X main.version=$(desktop_version)" \
+            -o "${dir}/openos${ext}" .)
         fi
       fi
       if [ "${target}" = "server" ] || [ "${target}" = "all" ]; then
@@ -231,7 +242,8 @@ build_cross() {
 ensure_desktop_bin() {
   if command -v go >/dev/null 2>&1; then
     echo "→ 构建桌面客户端（desktop → openos-desktop）..."
-    if (cd "${ROOT}/desktop" && go build -o "${DESKTOP_BIN}" .); then
+    if (cd "${ROOT}/desktop" && go build -trimpath \
+        -ldflags "-X main.version=$(desktop_version)" -o "${DESKTOP_BIN}" .); then
       return 0
     fi
     if [ -x "${DESKTOP_BIN}" ]; then

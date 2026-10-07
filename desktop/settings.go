@@ -218,8 +218,9 @@ func (m *mainWindow) get() string {
 
 // listenSettings 起回环设置页服务（只绑 127.0.0.1）：port 起步被占则递增重试共
 // 20 个，全部失败返回空串 = 降级（无 ⚙ 入口与打不开兜底，打开 OpenOS 的主功能
-// 不受影响）。返回设置页基地址。
-func listenSettings(port int, conf *serverConf, nav func(string)) string {
+// 不受影响）。返回设置页基地址。upd 为版本更新器（/api/version、/api/update
+// 与页面版本区块）。
+func listenSettings(port int, conf *serverConf, upd *updater, nav func(string)) string {
 	for p := port; p < port+20; p++ {
 		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
 		if err != nil {
@@ -227,9 +228,11 @@ func listenSettings(port int, conf *serverConf, nav func(string)) string {
 		}
 		base := fmt.Sprintf("http://127.0.0.1:%d", p)
 		mux := http.NewServeMux()
-		h := &settingsHandler{conf: conf, nav: nav}
+		h := &settingsHandler{conf: conf, upd: upd, nav: nav}
 		mux.HandleFunc("/", h.page)
 		mux.HandleFunc("/api/connect", h.connect)
+		mux.HandleFunc("/api/version", h.version)
+		mux.HandleFunc("/api/update", h.update)
 		go func() { _ = http.Serve(ln, mux) }()
 		return base
 	}
@@ -279,6 +282,7 @@ func initialWatch(c *cdp, sessionId string, sw *serverConf, selfBase string) {
 // 威胁模型（仅本机进程可达，能打到本口的进程早就能打 CDP 口直接操控浏览器）。
 type settingsHandler struct {
 	conf *serverConf
+	upd  *updater
 	nav  func(string) // 导航主窗口
 }
 
@@ -318,6 +322,42 @@ func (h *settingsHandler) connect(w http.ResponseWriter, r *http.Request) {
 	}
 	h.nav(u)
 	b, _ := json.Marshal(map[string]any{"ok": true, "url": u})
+	_, _ = w.Write(b)
+}
+
+// version 客户端版本与更新状态（GET /api/version，?fresh=1 强制重查）。距上次
+// 检查超过刷新窗口时同步查一次（检查自带 10s 超时，最坏等一次网络超时）。
+func (h *settingsHandler) version(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = io.WriteString(w, `{"error":"仅支持 GET"}`)
+		return
+	}
+	if r.URL.Query().Get("fresh") == "1" || h.upd.stale() {
+		h.upd.check()
+	}
+	b, _ := json.Marshal(h.upd.state())
+	_, _ = w.Write(b)
+}
+
+// update 触发自动更新（POST /api/update）：后台下载替换，完成后客户端自动重启。
+// 本接口只负责「开始」，进度经 GET /api/version 轮询。
+func (h *settingsHandler) update(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = io.WriteString(w, `{"ok":false,"error":"仅支持 POST"}`)
+		return
+	}
+	if err := h.upd.start(); err != nil {
+		w.WriteHeader(http.StatusConflict)
+		b, _ := json.Marshal(map[string]any{"ok": false, "error": err.Error()})
+		_, _ = w.Write(b)
+		return
+	}
+	b, _ := json.Marshal(map[string]any{"ok": true})
 	_, _ = w.Write(b)
 }
 
@@ -410,6 +450,20 @@ if(window.self!==window.top){
   .pill:hover{background:rgba(255,255,255,.11)}
   .pill.on{border-color:rgba(10,132,255,.55);color:#7db8ff}
   .dot{width:7px;height:7px;border-radius:50%;background:#30d158;flex-shrink:0}
+  /* 客户端版本区块：当前版本/最新版本/更新按钮/下载进度 */
+  .ver{margin-top:8px;padding:9px 12px;border-radius:9px;background:rgba(0,0,0,.25);
+    border:1px solid rgba(255,255,255,.09);font-size:13px;line-height:1.7;color:#b9bac2;
+    display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .ver .vnum{font-family:ui-monospace,Menlo,monospace}
+  .ver .ok{color:#30d158}
+  .ver .verr{color:#ff6961;word-break:break-all}
+  button.mini{background:rgba(10,132,255,.16);color:#7db8ff;border:1px solid rgba(10,132,255,.4);
+    border-radius:7px;padding:3px 10px;font-size:12px;cursor:pointer}
+  button.mini:hover{background:rgba(10,132,255,.28)}
+  .ver .bar{flex-basis:100%;height:4px;border-radius:2px;background:rgba(255,255,255,.1);overflow:hidden}
+  .ver .bar i{display:block;height:100%;width:0;background:#0a84ff;transition:width .2s}
+  html.embed:not(.dark) .ver{background:rgba(0,0,0,.04);border-color:rgba(0,0,0,.08);color:#494950}
+  html.embed:not(.dark) button.mini{background:rgba(10,132,255,.1);border-color:rgba(10,132,255,.35);color:#0a84ff}
   .hint{margin-top:22px;color:#7c7d85;font-size:12px;line-height:1.7}
   code{font-family:ui-monospace,Menlo,monospace}
   /* 内嵌形态：去独立页外壳（背景/卡片/logo/标题），融入设置窗口 */
@@ -445,6 +499,8 @@ if(window.self!==window.top){
   <div class="cur" id="cur"></div>
   <div class="lbl" id="recLbl">最近使用</div>
   <div class="pills" id="rec"></div>
+  <div class="lbl">客户端版本</div>
+  <div class="ver" id="ver"></div>
   <p class="hint">__HINT__</p>
 </main>
 <script>
@@ -480,6 +536,54 @@ function go(u){
     .catch(function(e){err.textContent=''+e;reset()});
 }
 $('f').onsubmit=function(e){e.preventDefault();go($('u').value)};
+// ---- 客户端版本与自动更新（/api/version 状态轮询 + /api/update 触发） ----
+var verEl=$('ver');
+function txt(s){return document.createTextNode(String(s==null?'':s))}
+function span(cls,s){var e=document.createElement('span');if(cls)e.className=cls;e.appendChild(txt(s));return e}
+function miniBtn(label,fn){var b=document.createElement('button');b.type='button';b.className='mini';
+  b.appendChild(txt(label));b.onclick=fn;return b}
+function renderVer(v){
+  verEl.innerHTML='';
+  verEl.appendChild(span('vnum',v.current==='dev'?'dev（本地构建）':v.current));
+  if(v.restarting){
+    verEl.appendChild(span('ok','更新完成，正在重启…'));return;
+  }
+  if(v.updating){
+    verEl.appendChild(span('','正在下载 '+v.latest+' …'));
+    if(v.progress>=0){
+      var bar=document.createElement('div');bar.className='bar';
+      var i=document.createElement('i');i.style.width=Math.min(100,Math.round(v.progress*100))+'%';
+      bar.appendChild(i);verEl.appendChild(bar);
+      verEl.appendChild(span('vnum',Math.min(100,Math.round(v.progress*100))+'%'));
+    }
+    setTimeout(loadVer,500);return;
+  }
+  if(v.hasUpdate){
+    verEl.appendChild(span('','→ 最新 '));verEl.appendChild(span('vnum',v.latest));
+    verEl.appendChild(miniBtn('立即更新',doUpdate));
+  }else{
+    verEl.appendChild(span('ok',v.latest?'（已是最新 '+v.latest+'）':'（未获取到版本信息）'));
+    verEl.appendChild(miniBtn('检查更新',function(){loadVer(true)}));
+  }
+  if(v.error)verEl.appendChild(span('verr',v.error));
+}
+function loadVer(fresh){
+  fetch('/api/version'+(fresh?'?fresh=1':''))
+    .then(function(r){return r.json()})
+    .then(renderVer)
+    .catch(function(e){verEl.innerHTML='';verEl.appendChild(span('verr',''+e))});
+}
+function doUpdate(){
+  verEl.innerHTML='';verEl.appendChild(span('','正在开始更新…'));
+  fetch('/api/update',{method:'POST'})
+    .then(function(r){return r.json()})
+    .then(function(j){
+      if(!j.ok){loadVer(true);return}
+      setTimeout(loadVer,300);
+    })
+    .catch(function(e){verEl.innerHTML='';verEl.appendChild(span('verr',''+e))});
+}
+loadVer();
 </script>
 </body>
 </html>`

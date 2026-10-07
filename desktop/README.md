@@ -9,9 +9,37 @@
 ## 构建
 
 ```bash
-make desktop        # → 仓库根目录 ./openos-desktop（CGO_ENABLED=0，纯 Go）
+make desktop        # → 仓库根目录 ./openos-desktop（CGO_ENABLED=0，纯 Go，注入版本号）
 ./run.sh build      # 交叉编译 → release/openos-desktop-{linux,windows}-{amd64,arm64}[.exe]
+make desktop-release  # 发布产物：release/cli/<版本>/<平台>/ 六平台 + .sha256 + notes.txt
+make desktop-upload   # 构建并上传到 download.gorun.fun/openos/cli（需 root@10.8.0.5 免密）
 ```
+
+## 版本与自动更新
+
+版本号构建期经 `-ldflags "-X main.version=..."` 注入（tag 精确命中去 v 前缀，
+如 `0.0.60`；非 tag 构建为 `<版本>-N-g<hash>` 或 `dev`），`-version` 参数可打印。
+**发布通道** = `https://download.gorun.fun/openos/cli`（goder 同款「平台/版本/运行
+文件」三层布局）：
+
+```
+openos/cli/<平台>/<版本>/openos-desktop-<平台>[-arm64][.exe]   # 裸可执行文件
+                      └ openos-desktop-<平台>[-arm64][.exe].sha256  # 校验文件
+                      └ notes.txt                                   # 发布说明
+平台目录：macos（amd64）/ macos-arm64 / linux / linux-arm64 / windows / windows-arm64
+```
+
+发布：打 tag 推送后 CI `publish-cli` job 自动构建上传全平台；本地等价
+`make desktop-upload`（仅接受精确 tag，`dev` 拒绝发布）。
+
+**自动更新**（`update.go`）：启动 2s 后静默检查（拉平台目录索引页取最新版本），
+有新版时设置页「客户端版本」区块与启动选择页展示「立即更新」；点击后下载到
+同目录 `.new` → sha256 校验（防半截/错档，缺校验文件时跳过并记日志）→ 两步
+改名原子换文件（旧件备份 `.old`、失败回滚，`.old` 下次启动清理）→ 停 Chrome
+（释放 profile 锁）→ 以相同参数重启：unix `syscall.Exec` 原位替换（**PID 不变**，
+run.sh 的 pidfile 与日志连续），Windows 拉新进程后退出。`go run` 临时构建拒绝
+自更新；`OPENOS_DESKTOP_UPDATE_URL` 可覆盖通道地址（测试用）。本地 e2e：
+`desktop/e2e-update.sh`（假发布服务器走通检查→下载→换文件→重启全链路）。
 
 ### 应用图标与 Windows 构建
 
