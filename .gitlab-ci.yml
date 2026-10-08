@@ -172,15 +172,17 @@ publish-dist:
     - docker cp osdist:/app/goder/goder.js dist-out/goder.js 2>/dev/null || true
     - docker cp osdist:/app/goder/gh dist-out/gh 2>/dev/null || true
     - docker rm -f osdist >/dev/null 2>&1 || true
-    # 3) manifest.json（sha256 清单；宿主下载后必校验）
+    # 3) manifest.json（sha256 清单；宿主下载后必校验）。注意子 shell 内 cd：
+    #    GitLab CI 的 script 各行共用同一 shell，cd dist-out 泄漏会让下一步
+    #    scp dist-out/* 找不到文件（P7 起的隐藏 bug，被 runner 挂载问题掩盖）
     - |
-      cd dist-out && { echo '{'; FIRST=1
+      ( cd dist-out && { echo '{'; FIRST=1
       for f in *; do
         [ "$f" = manifest.json ] && continue
         [ $FIRST = 1 ] || echo ','
         printf '  "%s": "%s"' "$f" "$(sha256sum "$f" | cut -d" " -f1)"
         FIRST=0
-      done; echo; echo '}'; } > manifest.json && cat manifest.json
+      done; echo; echo '}'; } > manifest.json && cat manifest.json )
     # 4) 上传（货架机同源：download.gorun.fun = 10.8.0.5:/data/download）
     - ssh ${DEPLOY_USER}@10.8.0.5 "mkdir -p /data/download/openos/dist/${CI_COMMIT_TAG}"
     - scp dist-out/* ${DEPLOY_USER}@10.8.0.5:/data/download/openos/dist/${CI_COMMIT_TAG}/
