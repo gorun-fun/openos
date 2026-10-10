@@ -6,15 +6,18 @@
 // 服务不可变成 HTML 注入源）；「存入我的文档」走 SaveToDocs（配额/幂等/fs:changed
 // 广播全部继承）。到期由 scheduleRetention 清理；底稿文件被删/改名后 info 返回
 // 404，链接自然失聪并在到期时回收。
+//
+// 底稿引用 = shares 行内的 owner+path 虚拟路径（弱引用，无快照）：每次消费实时
+// 经 resolveReal 映射到统一 home 磁盘文件 stat/read。
 package vfs
 
 import (
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"strings"
 	"time"
@@ -25,8 +28,9 @@ import (
 const (
 	shareDefaultDays = 7
 	shareMaxDays     = 30
-	// SQLite datetime('now') 的文本格式（UTC）：expires_at 全链路统一用它，
-	// 与 SQL 内的字符串比较保持同一语义
+	// 时间文本格式（UTC、空格分隔）：expires_at 与 SQL datetime('now') 的字符串
+	// 比较保持同一语义；文件条目的 updatedAt 也沿用此格式（前端只做字符串展示
+	// 与字典序排序，字典序与该格式的时间序一致）
 	sqliteTime = "2006-01-02 15:04:05"
 )
 
@@ -46,22 +50,21 @@ func (f *FS) CreateShare(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 403)
 		return
 	}
-	var isDir, isBin int
-	var content string
-	if err := f.db.QueryRow(`SELECT is_dir,is_binary,content FROM files WHERE owner=? AND path=?`, user, p).Scan(&isDir, &isBin, &content); err != nil {
+	real, err := f.resolveReal(user, p)
+	if err != nil {
 		http.Error(w, "文件不存在", 404)
 		return
 	}
-	if isDir == 1 {
+	st, err := os.Stat(real)
+	if err != nil {
+		http.Error(w, "文件不存在", 404)
+		return
+	}
+	if st.IsDir() {
 		http.Error(w, "目录不能分享", 400)
 		return
 	}
-	size := int64(len(content))
-	if isBin == 1 {
-		if decoded, err := base64.StdEncoding.DecodeString(content); err == nil {
-			size = int64(len(decoded))
-		}
-	}
+	size := st.Size()
 	if req.Days <= 0 {
 		req.Days = shareDefaultDays
 	}
@@ -131,8 +134,12 @@ func (f *FS) loadShare(id string) (owner, p string, size int64, err error) {
 	if exp, e := time.Parse(sqliteTime, expires); e != nil || time.Now().After(exp) {
 		return "", "", 0, fmt.Errorf("分享已过期")
 	}
-	var isDir int
-	if e := f.db.QueryRow(`SELECT is_dir FROM files WHERE owner=? AND path=?`, owner, p).Scan(&isDir); e != nil || isDir == 1 {
+	// 底稿核对：统一 home 磁盘上按 owner+path 实时 stat（被删/改名即失聪）
+	real, err := f.resolveReal(owner, p)
+	if err != nil {
+		return "", "", 0, fmt.Errorf("原文件已被删除或移动")
+	}
+	if st, e := os.Stat(real); e != nil || st.IsDir() {
 		return "", "", 0, fmt.Errorf("原文件已被删除或移动")
 	}
 	return owner, p, size, nil
@@ -189,18 +196,15 @@ func (f *FS) ShareSave(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"path": target})
 }
 
-// readShareFile 读底稿文件字节（二进制做 base64 还原）。
+// readShareFile 读底稿文件原始字节（统一 home 磁盘读取）。
 func (f *FS) readShareFile(owner, p string) ([]byte, bool) {
-	var content string
-	var isBin int
-	if err := f.db.QueryRow(`SELECT content,is_binary FROM files WHERE owner=? AND path=?`, owner, p).Scan(&content, &isBin); err != nil {
+	real, err := f.resolveReal(owner, p)
+	if err != nil {
 		return nil, false
 	}
-	data := []byte(content)
-	if isBin == 1 {
-		if decoded, err := base64.StdEncoding.DecodeString(content); err == nil {
-			data = decoded
-		}
+	data, err := os.ReadFile(real)
+	if err != nil {
+		return nil, false
 	}
 	return data, true
 }

@@ -1,4 +1,6 @@
-// Package vfs 提供基于 SQLite 的虚拟文件系统（REST）与挂载在事件总线上的虚拟终端。
+// Package vfs 提供挂在 <data>/homes/<user> 上的真实文件系统（REST，虚拟路径
+// /home/<user> 对外呈现）与受控执行的真实终端。文件管理、真实终端、goder 项目
+// 共用同一份磁盘 home（统一 home，2026-10 起替代 SQLite files 表虚拟存储）。
 package vfs
 
 import (
@@ -8,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -25,14 +28,14 @@ import (
 	"openos/server/internal/store"
 )
 
-// 单文件上传上限。
+// 单文件上限（上传与写入统一校验）。
 const maxFileSize = 8 << 20
 
-// maxFileRows 每用户文件行数上限：touch/mkdir 曾不做配额检查，可无限插行
-// 绕过 100MB 配额（SQLite 膨胀 DoS，安全审计 2026-10）。行数与配额双重设限。
+// maxFileRows 每用户文件数上限：touch/mkdir 曾不做配额检查，可无限建条目
+// 绕过 100MB 配额（inode 膨胀 DoS，安全审计 2026-10）。条数与配额双重设限。
 const maxFileRows = 20000
 
-// 按扩展名判定是否按文本存储（其余一律按二进制 base64）。
+// 按扩展名判定是否按文本处理（其余一律按二进制：Read 时 base64 编码返回）。
 var textExts = map[string]bool{
 	".txt": true, ".md": true, ".csv": true, ".tsv": true, ".json": true,
 	".html": true, ".js": true, ".ts": true, ".css": true, ".xml": true,
@@ -49,13 +52,11 @@ func isTextExt(p string) bool {
 	return false
 }
 
-func (f *FS) quotaUsed(user string) int64 {
-	var used int64
-	f.db.QueryRow(`SELECT COALESCE(SUM(LENGTH(content)),0) FROM files WHERE owner=?`, user).Scan(&used)
-	return used
-}
+// vtime 时间展示格式：沿用旧 SQLite datetime('now') 文本形态（UTC、空格分隔），
+// 前端对 updatedAt 只做字符串展示与字典序排序，字典序与该格式的时间序一致。
+func vtime(t time.Time) string { return t.UTC().Format(sqliteTime) }
 
-// FS 虚拟文件系统服务。
+// FS 文件系统服务。
 type FS struct {
 	db  *store.DB
 	hub *bus.Hub
@@ -72,7 +73,8 @@ type FS struct {
 	seedDemo bool
 }
 
-// New 创建服务。dataDir 用于真实终端的沙箱目录（<dataDir>/homes/<user>）。
+// New 创建服务。dataDir 为统一 home 根（<dataDir>/homes/<user>）：
+// 文件管理、真实终端与 goder 项目目录共用同一份磁盘文件树。
 func New(dataDir string, db *store.DB, hub *bus.Hub) *FS {
 	// 真实 shell 默认关闭（安全审计 2026-10：sh -c 以服务进程权限执行任意命令，
 	// 曾默认开启且继承全部环境变量——秘密可被读取自我提权）。on=受限沙箱执行、
@@ -88,6 +90,7 @@ func New(dataDir string, db *store.DB, hub *bus.Hub) *FS {
 	}
 	if !fs.disabled {
 		hub.Handle("term:*", fs.onTerminal)
+		fs.migrateFromDB()
 	}
 	return fs
 }
@@ -109,10 +112,228 @@ func (f *FS) Guard(h http.HandlerFunc) http.HandlerFunc {
 // RealShellEnabled 真实终端是否可用（状态展示用）。
 func (f *FS) RealShellEnabled() bool { return f.realShell && !f.disabled }
 
-// DeleteHome 删除用户的真实终端沙箱目录（删用户时级联清理）。
+// DeleteHome 删除用户的统一 home 目录（删用户时级联清理，含全部文件与 goder 项目）。
 func (f *FS) DeleteHome(user string) {
 	_ = os.RemoveAll(filepath.Join(f.homesDir, filepath.Base(user)))
 }
+
+// ---- 虚拟路径 ↔ 真实磁盘路径 ----
+
+func homeOf(user string) string { return "/home/" + user }
+
+// clean 规范化并校验路径必须位于用户 home 内。
+func clean(user, p string) (string, error) {
+	p = path.Clean("/" + strings.ReplaceAll(p, "\\", "/"))
+	if p == "/" {
+		return "/", nil
+	}
+	home := homeOf(user)
+	// 前缀比较必须带 / 边界：user=adm 时 /home/admin/x 不允许通过
+	//（SQL 时代即有此防御，磁盘化后是唯一的越权闸门）
+	if p != home && !strings.HasPrefix(p, home+"/") {
+		return "", fmt.Errorf("权限不足：只能访问 %s 下的文件", home)
+	}
+	return p, nil
+}
+
+// realHome 用户统一 home 的真实磁盘绝对路径。
+func (f *FS) realHome(user string) string {
+	return filepath.Join(f.homesDir, filepath.Base(user))
+}
+
+// realPath 虚拟路径 → 真实磁盘路径（不做存在性与符号链接校验，调用方须经 resolveReal）。
+func (f *FS) realPath(user, p string) string {
+	rel := strings.TrimPrefix(p, homeOf(user)) // "" 或 "/x/y"
+	return filepath.Join(f.realHome(user), filepath.FromSlash(rel))
+}
+
+// resolveReal 校验虚拟路径映射的真实路径并解析符号链接，拒绝越出个人 home
+//（终端可 ln -s 指向 home 外，REST 读写若直接跟随会变成任意文件读写通道）。
+// 路径不存在时解析最深存在的父链后拼回余段，返回校验通过的路径（不保证存在）。
+func (f *FS) resolveReal(user, p string) (string, error) {
+	home := f.realHome(user)
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		return "", err
+	}
+	root, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		return "", err
+	}
+	real := f.realPath(user, p)
+	resolved := real
+	if r, err := filepath.EvalSymlinks(real); err == nil {
+		resolved = r
+	} else if r, err := filepath.EvalSymlinks(filepath.Dir(real)); err == nil {
+		resolved = filepath.Join(r, filepath.Base(real))
+	} else {
+		return "", err
+	}
+	if resolved != root && !strings.HasPrefix(resolved, root+string(filepath.Separator)) {
+		return "", fmt.Errorf("非法路径（符号链接越界）")
+	}
+	return resolved, nil
+}
+
+// dirEmptyExcept 目录不存在或除排除名外无任何条目（种子判定用，.Trash 每次登录补齐不算内容）。
+func dirEmptyExcept(dir, except string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return true
+	}
+	for _, e := range entries {
+		if e.Name() != except {
+			return false
+		}
+	}
+	return true
+}
+
+// duOf 遍历用户 home 统计字节总量与文件条数（配额与行数预算共用；不跟随符号链接）。
+func (f *FS) duOf(user string) (int64, int) {
+	var size int64
+	var files int
+	_ = filepath.WalkDir(f.realHome(user), func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if info, e := d.Info(); e == nil {
+			size += info.Size()
+		}
+		files++
+		return nil
+	})
+	return size, files
+}
+
+func (f *FS) quotaUsed(user string) int64 {
+	size, _ := f.duOf(user)
+	return size
+}
+
+// rowBudget 该用户文件条数是否还有余量（touch/mkdir 防条目炸弹）。
+func (f *FS) rowBudget(user string) bool {
+	_, files := f.duOf(user)
+	return files < maxFileRows
+}
+
+// DiskStats 系统统计：全部用户 home 的文件总数与字节总量（管理端 /api/stats 用）。
+func (f *FS) DiskStats() (int, int64) {
+	users, err := os.ReadDir(f.homesDir)
+	if err != nil {
+		return 0, 0
+	}
+	var files int
+	var size int64
+	for _, u := range users {
+		if !u.IsDir() {
+			continue
+		}
+		du(func(p string, d fs.DirEntry) {
+			if d.IsDir() {
+				return
+			}
+			files++
+			if info, e := d.Info(); e == nil {
+				size += info.Size()
+			}
+		}, filepath.Join(f.homesDir, u.Name()))
+	}
+	return files, size
+}
+
+func du(fn func(string, fs.DirEntry), root string) {
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err == nil {
+			fn(p, d)
+		}
+		return nil
+	})
+}
+
+// ---- 存量迁移（SQLite files 表 → 磁盘 home，一次性） ----
+
+// migrateFromDB 旧虚拟文件系统存储（SQLite files 表）迁移到统一 home 目录。
+// 幂等可重放（照 migrateSystemKV「写成功才删行」先例）：逐用户判断，磁盘 home
+// 除 .Trash 外已有内容则跳过（磁盘为权威）；全部写出成功后才删除该用户的表行。
+// files 表 schema 保留但此后不再读写。OPENOS_VFS=off 跳过（宿主模式无此数据）。
+func (f *FS) migrateFromDB() {
+	rows, err := f.db.Query(`SELECT DISTINCT owner FROM files`)
+	if err != nil {
+		return
+	}
+	var owners []string
+	for rows.Next() {
+		var o string
+		if rows.Scan(&o) == nil && o != "" {
+			owners = append(owners, o)
+		}
+	}
+	rows.Close()
+	for _, owner := range owners {
+		if !dirEmptyExcept(f.realHome(owner), ".Trash") {
+			continue // 磁盘已有内容：保持现状，该用户表行留置（不再消费）
+		}
+		if f.migrateUser(owner) {
+			f.db.Exec(`DELETE FROM files WHERE owner=?`, owner)
+			f.db.Audit("system", "fs.migrate", "owner="+owner, "")
+		}
+	}
+}
+
+func (f *FS) migrateUser(owner string) bool {
+	rows, err := f.db.Query(`SELECT path,is_dir,is_binary,content FROM files WHERE owner=? ORDER BY path`, owner)
+	if err != nil {
+		return false
+	}
+	type entry struct {
+		p           string
+		dir         bool
+		content     string
+	}
+	var list []entry
+	for rows.Next() {
+		var e entry
+		var d, b int
+		if rows.Scan(&e.p, &d, &b, &e.content) != nil {
+			continue
+		}
+		e.dir = d == 1
+		list = append(list, e)
+	}
+	rows.Close()
+	for _, e := range list {
+		// 防御：历史脏行（路径越出该用户 home）跳过，不落盘
+		cp, err := clean(owner, e.p)
+		if err != nil || cp == "/" {
+			continue
+		}
+		real := f.realPath(owner, cp)
+		if e.dir {
+			if err := os.MkdirAll(real, 0o755); err != nil {
+				return false
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(real), 0o755); err != nil {
+			return false
+		}
+		data := []byte(e.content)
+		if b := isTextExt(cp); !b && e.content != "" {
+			if decoded, err := base64.StdEncoding.DecodeString(e.content); err == nil {
+				data = decoded
+			}
+		}
+		if err := os.WriteFile(real, data, 0o644); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// ---- 系统侧写入 ----
 
 // SaveToDocs 把字节以 name 存进用户「文档」目录（聊天附件归档等系统侧写入用）：
 // 内容级幂等——目标路径已存在且内容相同直接返回现路径（重复保存同一附件不堆积）；
@@ -136,93 +357,96 @@ func (f *FS) SaveToDocs(user, name string, data []byte) (string, error) {
 		return "", err
 	}
 
-	text := isTextExt(name)
-	content := string(data)
-	isBin := 0
-	if !text {
-		isBin = 1
-		content = base64.StdEncoding.EncodeToString(data)
-	}
-
 	// 幂等：同路径同内容视为已保存
 	target := path.Join(dir, name)
-	var existing string
-	if err := f.db.QueryRow(`SELECT content FROM files WHERE owner=? AND path=? AND is_dir=0`, user, target).Scan(&existing); err == nil {
-		if existing == content {
+	if real, err := f.resolveReal(user, target); err == nil {
+		if exist, _ := os.ReadFile(real); string(exist) == string(data) {
 			return target, nil
 		}
 	}
 	// 同名不同内容：名 (2).ext 递增
 	for i := 2; ; i++ {
-		var n int
-		f.db.QueryRow(`SELECT COUNT(*) FROM files WHERE owner=? AND path=?`, user, target).Scan(&n)
-		if n == 0 {
-			break
+		if real, err := f.resolveReal(user, target); err == nil {
+			if _, err := os.Lstat(real); os.IsNotExist(err) {
+				break
+			}
 		}
 		ext := path.Ext(name)
 		target = path.Join(dir, strings.TrimSuffix(name, ext)+" ("+strconv.Itoa(i)+")"+ext)
 	}
 
-	if f.quotaUsed(user)+int64(len(content)) > store.StorageQuota {
+	if f.quotaUsed(user)+int64(len(data)) > store.StorageQuota {
 		return "", fmt.Errorf("个人空间已满（配额 %dMB），请清理后重试", store.StorageQuota>>20)
 	}
-	f.ensureDirs(user, target)
-	if _, err := f.db.Exec(`INSERT INTO files(owner,path,is_dir,is_binary,content,updated_at) VALUES(?,?,0,?,?,datetime('now'))`,
-		user, target, isBin, content); err != nil {
+	real, err := f.resolveReal(user, target)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(real), 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(real, data, 0o644); err != nil {
 		return "", err
 	}
 	f.hub.PublishTo(user, "fs:changed", map[string]any{"path": target, "kind": "save"})
 	return target, nil
 }
 
-// ---- 路径 ----
-
-func homeOf(user string) string { return "/home/" + user }
-
-// clean 规范化并校验路径必须位于用户 home 内。
-func clean(user, p string) (string, error) {
-	p = path.Clean("/" + strings.ReplaceAll(p, "\\", "/"))
-	if p == "/" {
-		return "/", nil
-	}
-	home := homeOf(user)
-	// 前缀比较必须带 / 边界：user=adm 时 /home/admin/x 不允许通过
-	//（现有 SQL 均带 owner=? 过滤兜底，此处收紧防未来误用）
-	if p != home && !strings.HasPrefix(p, home+"/") {
-		return "", fmt.Errorf("权限不足：只能访问 %s 下的文件", home)
-	}
-	return p, nil
-}
-
-// ---- REST Handlers ----
-
-// EnsureHome 为用户初始化 home 目录与示例文件（文件系统整体关闭时跳过；
+// EnsureHome 为用户初始化统一 home 目录与示例文件（文件系统整体关闭时跳过；
 // OPENOS_SEED_DEMO=0 时只建目录结构，不种欢迎文档与示例表格）。
 func (f *FS) EnsureHome(user string) {
 	if f.disabled {
 		return
 	}
-	home := homeOf(user)
+	home := f.realHome(user)
 	// 废纸篓目录（点前缀：列表/搜索默认隐藏，仅侧栏与 Dock 以专用入口呈现）；
-	// 幂等建在存量检查之前，保证老用户每次登录也补齐（计数需排除自身，否则首次插入会误判已有文件）
-	f.db.Exec(`INSERT OR IGNORE INTO files(owner,path,is_dir) VALUES(?,?,1)`, user, home+"/.Trash")
-	var n int
-	f.db.QueryRow(`SELECT COUNT(*) FROM files WHERE owner=? AND path<>?`, user, home+"/.Trash").Scan(&n)
-	if n > 0 {
+	// 幂等建在种子判定之前，保证老用户每次登录也补齐
+	_ = os.MkdirAll(home, 0o755)
+	_ = os.MkdirAll(filepath.Join(home, ".Trash"), 0o755)
+	if !dirEmptyExcept(home, ".Trash") {
 		return
 	}
-	f.db.Exec(`INSERT OR IGNORE INTO files(owner,path,is_dir) VALUES(?,?,1)`, user, "/home")
-	f.db.Exec(`INSERT OR IGNORE INTO files(owner,path,is_dir) VALUES(?,?,1)`, user, home)
-	f.db.Exec(`INSERT OR IGNORE INTO files(owner,path,is_dir) VALUES(?,?,1)`, user, home+"/文档")
-	f.db.Exec(`INSERT OR IGNORE INTO files(owner,path,is_dir) VALUES(?,?,1)`, user, home+"/表格")
+	_ = os.MkdirAll(filepath.Join(home, "文档"), 0o755)
+	_ = os.MkdirAll(filepath.Join(home, "表格"), 0o755)
 	if !f.seedDemo {
 		return
 	}
-	f.db.Exec(`INSERT OR IGNORE INTO files(owner,path,is_dir,content) VALUES(?,?,0,?)`, user, home+"/欢迎.md",
-		"# 欢迎使用 OpenOS\n\n这是一份示例文档，可由「文档」应用打开编辑。\n\n- 前后端分离：Go + Vite\n- 事件总线通信\n- 多用户多角色\n")
-	f.db.Exec(`INSERT OR IGNORE INTO files(owner,path,is_dir,content) VALUES(?,?,0,?)`, user, home+"/表格/收支.csv",
-		"项目,收入,支出\n工资,12000,0\n房租,0,3500\n餐饮,0,1800\n结余,=SUM(B2:B3)-SUM(C2:C4),\n")
+	_ = os.WriteFile(filepath.Join(home, "欢迎.md"),
+		[]byte("# 欢迎使用 OpenOS\n\n这是一份示例文档，可由「文档」应用打开编辑。\n\n- 前后端分离：Go + Vite\n- 事件总线通信\n- 多用户多角色\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(home, "表格", "收支.csv"),
+		[]byte("项目,收入,支出\n工资,12000,0\n房租,0,3500\n餐饮,0,1800\n结余,=SUM(B2:B3)-SUM(C2:C4),\n"), 0o644)
 }
+
+// CreateGoderProject 为 goder 创建项目目录（home 下 goder/<name>）并返回真实
+// 绝对路径——该目录即 AI 会话的项目上下文（workspace），文件管理与真实终端
+// 同目录可见。项目名限单段安全名（拒绝子路径与穿越），已存在返回 os.ErrExist。
+func (f *FS) CreateGoderProject(user, name string) (string, error) {
+	if f.disabled {
+		return "", fmt.Errorf("文件系统未启用")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" || name == "." || name == ".." || len(name) > 100 ||
+		path.Base(strings.ReplaceAll(name, "\\", "/")) != name || strings.ContainsRune(name, 0) {
+		return "", fmt.Errorf("无效项目名")
+	}
+	dir := filepath.Join(f.realHome(user), "goder", name)
+	if _, err := os.Lstat(dir); err == nil {
+		return "", os.ErrExist
+	}
+	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+		return "", err
+	}
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		return "", err
+	}
+	f.hub.PublishTo(user, "fs:changed", map[string]any{"path": homeOf(user) + "/goder/" + name, "kind": "mkdir"})
+	return dir, nil
+}
+
+// HomePath 用户统一 home 的真实绝对路径（goder 裸会话 workspace 兜底等场景）。
+func (f *FS) HomePath(user string) string { return f.realHome(user) }
+
+// ---- REST Handlers ----
 
 // List GET /api/fs/list?path=
 func (f *FS) List(w http.ResponseWriter, r *http.Request) {
@@ -232,32 +456,40 @@ func (f *FS) List(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 403)
 		return
 	}
-	rows, err := f.db.Query(`SELECT path,is_dir,is_binary,content,updated_at FROM files WHERE owner=?`, user)
-	if err != nil {
-		http.Error(w, err.Error(), 500)
+	if p == "/" {
+		// 虚拟根只含 /home 占位（旧 SQLite 行为保持；/home 本身不可进入）
+		writeJSON(w, []store.File{{Path: "/home", IsDir: true, Size: 0, UpdatedAt: ""}})
 		return
 	}
-	defer rows.Close()
-	prefix := strings.TrimSuffix(p, "/") + "/"
-	var out []store.File
-	for rows.Next() {
-		var e store.File
-		var isDir, isBin int
-		if err := rows.Scan(&e.Path, &isDir, &isBin, &e.Content, &e.UpdatedAt); err != nil {
-			continue
+	real, err := f.resolveReal(user, p)
+	if err != nil {
+		http.Error(w, "路径不存在", 404)
+		return
+	}
+	entries, err := os.ReadDir(real)
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.Error(w, "文件不存在", 404)
+		} else {
+			http.Error(w, "这不是一个目录", 400)
 		}
-		e.IsDir = isDir == 1
-		e.IsBinary = isBin == 1
-		rest := strings.TrimPrefix(e.Path, prefix)
-		if rest == "" || e.Path == p || strings.Contains(rest, "/") {
-			continue // 非直接子项
+		return
+	}
+	out := []store.File{}
+	for _, e := range entries {
+		var size int
+		updated := ""
+		if info, ie := e.Info(); ie == nil {
+			size = int(info.Size())
+			updated = vtime(info.ModTime())
 		}
-		e.Size = len(e.Content)
-		if e.IsBinary && e.Size > 0 {
-			e.Size = e.Size * 3 / 4 // base64 还原后近似大小
-		}
-		e.Content = ""
-		out = append(out, e)
+		out = append(out, store.File{
+			Path:      path.Join(p, e.Name()),
+			IsDir:     e.IsDir(),
+			IsBinary:  !e.IsDir() && !isTextExt(e.Name()),
+			Size:      size,
+			UpdatedAt: updated,
+		})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].IsDir != out[j].IsDir {
@@ -265,9 +497,6 @@ func (f *FS) List(w http.ResponseWriter, r *http.Request) {
 		}
 		return out[i].Path < out[j].Path
 	})
-	if out == nil {
-		out = []store.File{}
-	}
 	writeJSON(w, out)
 }
 
@@ -279,17 +508,25 @@ func (f *FS) Read(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 403)
 		return
 	}
-	var content string
-	var isDir, isBin int
-	if err := f.db.QueryRow(`SELECT content,is_dir,is_binary FROM files WHERE owner=? AND path=?`, user, p).Scan(&content, &isDir, &isBin); err != nil {
+	real, err := f.resolveReal(user, p)
+	if err != nil {
 		http.Error(w, "文件不存在", 404)
 		return
 	}
-	if isDir == 1 {
+	data, err := os.ReadFile(real)
+	if err != nil {
+		http.Error(w, "文件不存在", 404)
+		return
+	}
+	if st, err := os.Stat(real); err == nil && st.IsDir() {
 		http.Error(w, "这是一个目录", 400)
 		return
 	}
-	writeJSON(w, map[string]any{"path": p, "content": content, "isBinary": isBin == 1})
+	content := string(data)
+	if !isTextExt(p) {
+		content = base64.StdEncoding.EncodeToString(data)
+	}
+	writeJSON(w, map[string]any{"path": p, "content": content, "isBinary": !isTextExt(p)})
 }
 
 // Raw GET /api/fs/raw?path= 返回文件原始字节（下载 / 图片 / PDF 预览）。
@@ -300,17 +537,15 @@ func (f *FS) Raw(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 403)
 		return
 	}
-	var content string
-	var isBin int
-	if err := f.db.QueryRow(`SELECT content,is_binary FROM files WHERE owner=? AND path=?`, user, p).Scan(&content, &isBin); err != nil {
+	real, err := f.resolveReal(user, p)
+	if err != nil {
 		http.Error(w, "文件不存在", 404)
 		return
 	}
-	data := []byte(content)
-	if isBin == 1 {
-		if decoded, err := base64.StdEncoding.DecodeString(content); err == nil {
-			data = decoded
-		}
+	data, err := os.ReadFile(real)
+	if err != nil {
+		http.Error(w, "文件不存在", 404)
+		return
 	}
 	name := path.Base(p)
 	w.Header().Set("Content-Type", "application/octet-stream")
@@ -363,22 +598,19 @@ func (f *FS) Upload(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue
 		}
-		text := isTextExt(name)
-		content := string(data)
-		isBin := 0
-		if !text {
-			isBin = 1
-			content = base64.StdEncoding.EncodeToString(data)
-		}
-		if used+int64(len(content)) > store.StorageQuota {
+		if used+int64(len(data)) > store.StorageQuota {
 			http.Error(w, "个人空间已满（配额 100MB），请清理后重试", 400)
 			return
 		}
-		used += int64(len(content))
-		f.ensureDirs(user, cp)
-		if _, err := f.db.Exec(`INSERT INTO files(owner,path,is_dir,is_binary,content,updated_at) VALUES(?,?,0,?,?,datetime('now'))
-			ON CONFLICT(owner,path) DO UPDATE SET is_binary=excluded.is_binary, content=excluded.content, updated_at=datetime('now')`,
-			user, cp, isBin, content); err != nil {
+		used += int64(len(data))
+		real, err := f.resolveReal(user, cp)
+		if err != nil {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(real), 0o755); err != nil {
+			continue
+		}
+		if err := os.WriteFile(real, data, 0o644); err != nil {
 			continue
 		}
 		saved = append(saved, cp)
@@ -401,15 +633,30 @@ func (f *FS) Write(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 403)
 		return
 	}
+	if len(req.Content) > maxFileSize {
+		http.Error(w, "文件不能超过 8MB", 400)
+		return
+	}
 	var oldLen int64
-	f.db.QueryRow(`SELECT LENGTH(content) FROM files WHERE owner=? AND path=?`, user, p).Scan(&oldLen)
+	if real, err := f.resolveReal(user, p); err == nil {
+		if st, err := os.Stat(real); err == nil && !st.IsDir() {
+			oldLen = st.Size()
+		}
+	}
 	if f.quotaUsed(user)-oldLen+int64(len(req.Content)) > store.StorageQuota {
 		http.Error(w, "个人空间已满（配额 100MB）", 400)
 		return
 	}
-	f.ensureDirs(user, p)
-	if _, err := f.db.Exec(`INSERT INTO files(owner,path,is_dir,content,updated_at) VALUES(?,?,0,?,datetime('now'))
-		ON CONFLICT(owner,path) DO UPDATE SET content=excluded.content, updated_at=datetime('now')`, user, p, req.Content); err != nil {
+	real, err := f.resolveReal(user, p)
+	if err != nil {
+		http.Error(w, err.Error(), 403)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(real), 0o755); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	if err := os.WriteFile(real, []byte(req.Content), 0o644); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
@@ -432,8 +679,23 @@ func (f *FS) Mkdir(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "文件数量已达上限（2 万条），请清理后再试", 400)
 		return
 	}
-	f.ensureDirs(user, p+"/x")
-	f.db.Exec(`INSERT OR IGNORE INTO files(owner,path,is_dir) VALUES(?,?,1)`, user, p)
+	real, err := f.resolveReal(user, p)
+	if err != nil {
+		http.Error(w, err.Error(), 403)
+		return
+	}
+	if st, err := os.Lstat(real); err == nil {
+		if st.IsDir() {
+			writeJSON(w, ok()) // 幂等：已存在目录视为成功
+			return
+		}
+		http.Error(w, "同名文件已存在", 400)
+		return
+	}
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
 	f.db.Audit(user, "fs.mkdir", p, "")
 	f.hub.PublishTo(user, "fs:changed", map[string]any{"path": p, "kind": "mkdir"})
 	writeJSON(w, ok())
@@ -453,15 +715,30 @@ func (f *FS) Touch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "文件数量已达上限（2 万条），请清理后再试", 400)
 		return
 	}
-	// INSERT OR IGNORE：已存在时不改内容，配额按净增量校验（扣除现内容长度）
-	var oldLen int64
-	f.db.QueryRow(`SELECT LENGTH(content) FROM files WHERE owner=? AND path=?`, user, p).Scan(&oldLen)
-	if f.quotaUsed(user)-oldLen+int64(len(req.Content)) > store.StorageQuota {
+	// 已存在不改内容（INSERT OR IGNORE 旧语义保持），配额按净增量校验
+	real, err := f.resolveReal(user, p)
+	if err != nil {
+		http.Error(w, err.Error(), 403)
+		return
+	}
+	if _, err := os.Lstat(real); err == nil {
+		f.db.Audit(user, "fs.touch", p, "")
+		f.hub.PublishTo(user, "fs:changed", map[string]any{"path": p, "kind": "create"})
+		writeJSON(w, ok())
+		return
+	}
+	if f.quotaUsed(user)+int64(len(req.Content)) > store.StorageQuota {
 		http.Error(w, "个人空间已满（配额 100MB）", 400)
 		return
 	}
-	f.ensureDirs(user, p)
-	f.db.Exec(`INSERT OR IGNORE INTO files(owner,path,is_dir,content) VALUES(?,?,0,?)`, user, p, req.Content)
+	if err := os.MkdirAll(filepath.Dir(real), 0o755); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	if err := os.WriteFile(real, []byte(req.Content), 0o644); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
 	f.db.Audit(user, "fs.touch", p, "")
 	f.hub.PublishTo(user, "fs:changed", map[string]any{"path": p, "kind": "create"})
 	writeJSON(w, ok())
@@ -475,20 +752,18 @@ func (f *FS) Remove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "非法路径", 403)
 		return
 	}
-	f.db.Exec(`DELETE FROM files WHERE owner=? AND (path=? OR path LIKE ?)`, user, p, p+"/%")
+	real, err := f.resolveReal(user, p)
+	if err != nil {
+		http.Error(w, err.Error(), 403)
+		return
+	}
+	if err := os.RemoveAll(real); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
 	f.db.Audit(user, "fs.remove", p, "")
 	f.hub.PublishTo(user, "fs:changed", map[string]any{"path": p, "kind": "remove"})
 	writeJSON(w, ok())
-}
-
-// rowBudget 该用户文件行数是否还有余量（touch/mkdir 防行数炸弹，
-// 绕过字节数配额的旧漏洞——安全审计 2026-10）。
-func (f *FS) rowBudget(user string) bool {
-	var n int
-	if err := f.db.QueryRow(`SELECT COUNT(*) FROM files WHERE owner=?`, user).Scan(&n); err != nil {
-		return true // 统计失败不阻断正常路径
-	}
-	return n < maxFileRows
 }
 
 // Rename POST /api/fs/rename {from,to}
@@ -502,24 +777,27 @@ func (f *FS) Rename(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "非法路径", 403)
 		return
 	}
-	rows, _ := f.db.Query(`SELECT path,is_dir,content FROM files WHERE owner=? AND (path=? OR path LIKE ?)`, user, from, from+"/%")
-	type entry struct {
-		p    string
-		dir  bool
-		body string
+	src, err := f.resolveReal(user, from)
+	if err != nil {
+		http.Error(w, "非法路径", 403)
+		return
 	}
-	var entries []entry
-	for rows.Next() {
-		var e entry
-		var d int
-		rows.Scan(&e.p, &d, &e.body)
-		e.dir = d == 1
-		entries = append(entries, e)
+	dst, err := f.resolveReal(user, to)
+	if err != nil {
+		http.Error(w, "非法路径", 403)
+		return
 	}
-	rows.Close()
-	for _, e := range entries {
-		np := to + strings.TrimPrefix(e.p, from)
-		f.db.Exec(`UPDATE files SET path=?, updated_at=datetime('now') WHERE owner=? AND path=?`, np, user, e.p)
+	if _, err := os.Lstat(src); err != nil {
+		http.Error(w, "源文件不存在", 404)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	if err := os.Rename(src, dst); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
 	}
 	f.db.Audit(user, "fs.rename", from+" → "+to, "")
 	f.hub.PublishTo(user, "fs:changed", map[string]any{"path": to, "kind": "rename"})
@@ -542,47 +820,49 @@ func (f *FS) Search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lq := strings.ToLower(q)
-	rows, err := f.db.Query(`SELECT path,is_dir,is_binary,content,updated_at FROM files WHERE owner=? AND path LIKE ?`,
-		user, "%"+strings.ReplaceAll(lq, "%", "")+"%")
-	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
-	defer rows.Close()
 	type hit struct {
 		f    store.File
 		rank int
 	}
 	hits := []hit{}
-	for rows.Next() {
-		var e store.File
-		var isDir, isBin int
-		if err := rows.Scan(&e.Path, &isDir, &isBin, &e.Content, &e.UpdatedAt); err != nil {
-			continue
+	_ = filepath.WalkDir(f.realHome(user), func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
 		}
-		e.IsDir = isDir == 1
-		e.IsBinary = isBin == 1
-		name := strings.ToLower(path.Base(e.Path))
-		if name != lq && !strings.Contains(name, lq) {
-			continue // LIKE 命中的是路径中段而非文件名
+		name := d.Name()
+		if strings.HasPrefix(name, ".") {
+			if d.IsDir() {
+				return filepath.SkipDir // 隐藏目录（含 .Trash）整棵不参与
+			}
+			return nil
 		}
-		if strings.HasPrefix(path.Base(e.Path), ".") {
-			continue // 隐藏文件（含 .Trash）不参与搜索
+		lower := strings.ToLower(name)
+		if lower != lq && !strings.Contains(lower, lq) {
+			return nil
 		}
-		e.Size = len(e.Content)
-		if e.IsBinary && e.Size > 0 {
-			e.Size = e.Size * 3 / 4
+		var size int
+		updated := ""
+		if info, ie := d.Info(); ie == nil {
+			size = int(info.Size())
+			updated = vtime(info.ModTime())
 		}
-		e.Content = ""
+		e := store.File{
+			Path:      homeOf(user) + filepath.ToSlash(strings.TrimPrefix(p, f.realHome(user))),
+			IsDir:     d.IsDir(),
+			IsBinary:  !d.IsDir() && !isTextExt(name),
+			Size:      size,
+			UpdatedAt: updated,
+		}
 		rank := 2
-		if strings.HasPrefix(name, lq) {
+		if strings.HasPrefix(lower, lq) {
 			rank = 1
 		}
-		if name == lq {
+		if lower == lq {
 			rank = 0
 		}
 		hits = append(hits, hit{e, rank})
-	}
+		return nil
+	})
 	sort.SliceStable(hits, func(i, j int) bool {
 		if hits[i].rank != hits[j].rank {
 			return hits[i].rank < hits[j].rank
@@ -616,63 +896,79 @@ func (f *FS) Copy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "非法路径", 403)
 		return
 	}
-	// 源不存在
-	var srcCount int
-	f.db.QueryRow(`SELECT COUNT(*) FROM files WHERE owner=? AND (path=? OR path LIKE ?)`, user, from, from+"/%").Scan(&srcCount)
-	if srcCount == 0 {
+	src, err := f.resolveReal(user, from)
+	if err != nil {
+		http.Error(w, "非法路径", 403)
+		return
+	}
+	if _, err := os.Lstat(src); err != nil {
 		http.Error(w, "源文件不存在", 404)
 		return
 	}
-	// 目标已存在
-	var dstCount int
-	f.db.QueryRow(`SELECT COUNT(*) FROM files WHERE owner=? AND path=?`, user, to).Scan(&dstCount)
-	if dstCount > 0 {
+	dst, err := f.resolveReal(user, to)
+	if err != nil {
+		http.Error(w, "非法路径", 403)
+		return
+	}
+	if _, err := os.Lstat(dst); err == nil {
 		http.Error(w, "目标已存在", 409)
 		return
 	}
 	// 配额：复制会增加全量子树内容
 	var total int64
-	f.db.QueryRow(`SELECT COALESCE(SUM(LENGTH(content)),0) FROM files WHERE owner=? AND (path=? OR path LIKE ?)`,
-		user, from, from+"/%").Scan(&total)
+	_ = filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			if info, e := d.Info(); e == nil {
+				total += info.Size()
+			}
+		}
+		return nil
+	})
 	if f.quotaUsed(user)+total > store.StorageQuota {
 		http.Error(w, "个人空间不足（配额 100MB）", 400)
 		return
 	}
-	rows, _ := f.db.Query(`SELECT path,is_dir,is_binary,content FROM files WHERE owner=? AND (path=? OR path LIKE ?)`, user, from, from+"/%")
-	type entry struct {
-		p, body string
-		dir     bool
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
 	}
-	var entries []entry
-	for rows.Next() {
-		var e entry
-		var d, b int
-		rows.Scan(&e.p, &d, &b, &e.body)
-		e.dir = d == 1
-		_ = b
-		entries = append(entries, e)
-	}
-	rows.Close()
-	for _, e := range entries {
-		np := to + strings.TrimPrefix(e.p, from)
-		if e.dir {
-			f.db.Exec(`INSERT OR IGNORE INTO files(owner,path,is_dir) VALUES(?,?,1)`, user, np)
-		} else {
-			f.db.Exec(`INSERT OR IGNORE INTO files(owner,path,content,updated_at) VALUES(?,?,?,datetime('now'))`, user, np, e.body)
-		}
+	if err := copyTree(src, dst); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
 	}
 	f.hub.PublishTo(user, "fs:changed", map[string]any{"path": to, "kind": "copy"})
 	writeJSON(w, ok())
 }
 
-func (f *FS) ensureDirs(user, file string) {
-	dir := path.Dir(file)
-	segs := strings.Split(strings.Trim(dir, "/"), "/")
-	cur := ""
-	for _, s := range segs {
-		cur += "/" + s
-		f.db.Exec(`INSERT OR IGNORE INTO files(owner,path,is_dir) VALUES(?,?,1)`, user, cur)
+// copyTree 递归复制文件/目录（符号链接条目直接跳过——复制链接目标有越界风险）。
+func copyTree(src, dst string) error {
+	st, err := os.Lstat(src)
+	if err != nil {
+		return err
 	}
+	if st.Mode()&os.ModeSymlink != 0 {
+		return nil
+	}
+	if !st.IsDir() {
+		data, err := os.ReadFile(src)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(dst, data, 0o644)
+	}
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := copyTree(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ---- 终端（事件总线 topic: term:<user>）----
@@ -693,10 +989,6 @@ func (f *FS) onTerminal(env bus.Envelope, reply func(string, any)) {
 }
 
 // ---- 真实终端（受控执行） ----
-
-func (f *FS) realHome(user string) string {
-	return filepath.Join(f.homesDir, filepath.Base(user))
-}
 
 func (f *FS) ensureRealHome(user string) string {
 	home := f.realHome(user)

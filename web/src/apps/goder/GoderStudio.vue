@@ -13,7 +13,7 @@ import type { WinState } from '../../stores/windows'
 import { useWindows } from '../../stores/windows'
 import { useSession } from '../../stores/session'
 import { api } from '../../api/client'
-import { OsButton, MobileNavToggle } from '../../ui'
+import { OsButton, MobileNavToggle, toast } from '../../ui'
 import { injectShadowNavCss } from '../../ui/shadowNav'
 
 const props = defineProps<{ win: WinState }>()
@@ -99,6 +99,13 @@ async function init() {
     })
   }
   try {
+    // 项目上下文统一进 OpenOS home：裸会话 workspace 兜底为用户 home 真实路径
+    // （未取到时不下发，保持 goder 默认）。以下两项配合服务端 POST /api/goder/project。
+    let homePath = ''
+    try {
+      const h = await api.get<{ path: string }>('/api/goder/home')
+      homePath = h.path || ''
+    } catch { /* 不阻塞，仅缺兜底 */ }
     ui.configure(scope, {
       baseUrl: '/goder-api',
       auth: {
@@ -112,6 +119,20 @@ async function init() {
         chevron: false,
         hit: 'content',
       },
+      // 新建项目钩子（goder 嵌入约定）：项目目录由 OpenOS 在统一 home 的
+      // ~/goder/<项目名> 下创建并返回真实绝对路径——该目录即会话 workspace
+      //（AI 的项目上下文），与文件管理、真实终端共用同一份文件树。
+      // 失败（重名/文件系统关闭）toast 提示并返回 null 交回 goder 默认行为。
+      newProject: async (name: string) => {
+        try {
+          const r = await api.post<{ path: string }>('/api/goder/project', { name })
+          return r.path
+        } catch (e: any) {
+          toast(String(e?.message || e) || '项目目录创建失败', { type: 'error' })
+          return null
+        }
+      },
+      ...(homePath ? { sessionDefaults: { workspace: homePath } } : {}),
       // 融合窗体红绿灯留位：左栏顶行行首注入 72px 透明占位（84px 悬浮区 -
       // side-top 自身 12px 左内边距），避免折叠侧栏按钮被红绿灯盖住；
       // 渲染进 shadow DOM，样式只能内联

@@ -225,7 +225,9 @@ func (m *Manager) DeleteUserData(username string) {
 	if username == "" {
 		return
 	}
-	_ = os.RemoveAll(filepath.Join(m.dataDir, "goder", "serve-data", filepath.Base(username)))
+	// serve-data 实际布局为 users/<清洗后 uid>（PerUserHome），历史实现少了 users
+	// 段且未做 uid 清洗，删号级联从未真正清掉 goder 数据
+	_ = os.RemoveAll(filepath.Join(m.dataDir, "goder", "serve-data", "users", SanUID(username)))
 }
 
 // ---- HTTP ----
