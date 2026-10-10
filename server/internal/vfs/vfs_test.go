@@ -35,9 +35,9 @@ func TestCleanBlocksEscape(t *testing.T) {
 		{"/home/alice/../bob/secret", true},   // 越权到他人 home
 		{"/etc/passwd", true},                 // 系统
 		{"../../etc/passwd", true},            // 相对路径越权
-		{"/home/alice/a/../../..", false},      // 归一后为 /（仅根列表，无越权）
+		{"/home/alice/a/../../..", false},     // 归一后为 /（仅根列表，无越权）
 		{"/home/alice/文档/../表格/x.csv", false}, // 归一后仍在 home 内
-		{"/", false},                          // 根（列出 home 时由上层处理）
+		{"/", false}, // 根（列出 home 时由上层处理）
 	}
 	for _, c := range cases {
 		_, err := clean("alice", c.in)

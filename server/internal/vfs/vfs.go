@@ -83,7 +83,7 @@ func New(dataDir string, db *store.DB, hub *bus.Hub) *FS {
 	realShell := v == "on" || v == "full"
 	fs := &FS{
 		db: db, hub: hub,
-		realCwd: map[string]string{},
+		realCwd:   map[string]string{},
 		realShell: realShell, homesDir: filepath.Join(dataDir, "homes"),
 		disabled: os.Getenv("OPENOS_VFS") == "off",
 		seedDemo: os.Getenv("OPENOS_SEED_DEMO") != "0",
@@ -148,7 +148,7 @@ func (f *FS) realPath(user, p string) string {
 }
 
 // resolveReal 校验虚拟路径映射的真实路径并解析符号链接，拒绝越出个人 home
-//（终端可 ln -s 指向 home 外，REST 读写若直接跟随会变成任意文件读写通道）。
+// （终端可 ln -s 指向 home 外，REST 读写若直接跟随会变成任意文件读写通道）。
 // 路径不存在时解析最深存在的父链后拼回余段，返回校验通过的路径（不保证存在）。
 func (f *FS) resolveReal(user, p string) (string, error) {
 	home := f.realHome(user)
@@ -163,10 +163,22 @@ func (f *FS) resolveReal(user, p string) (string, error) {
 	resolved := real
 	if r, err := filepath.EvalSymlinks(real); err == nil {
 		resolved = r
-	} else if r, err := filepath.EvalSymlinks(filepath.Dir(real)); err == nil {
-		resolved = filepath.Join(r, filepath.Base(real))
 	} else {
-		return "", err
+		// 路径（或中间目录）尚不存在：逐级上溯解析最深存在的祖先——home 本身
+		// 已确保存在必然命中——再拼回余段；存在段含越界符号链接会在解析处暴露
+		dir, rest := filepath.Dir(real), filepath.Base(real)
+		for {
+			if r, err := filepath.EvalSymlinks(dir); err == nil {
+				resolved = filepath.Join(r, rest)
+				break
+			}
+			rest = filepath.Join(filepath.Base(dir), rest)
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				return "", err // 理论不可达（home 已建）
+			}
+			dir = parent
+		}
 	}
 	if resolved != root && !strings.HasPrefix(resolved, root+string(filepath.Separator)) {
 		return "", fmt.Errorf("非法路径（符号链接越界）")
@@ -289,9 +301,9 @@ func (f *FS) migrateUser(owner string) bool {
 		return false
 	}
 	type entry struct {
-		p           string
-		dir         bool
-		content     string
+		p       string
+		dir     bool
+		content string
 	}
 	var list []entry
 	for rows.Next() {
@@ -440,11 +452,19 @@ func (f *FS) CreateGoderProject(user, name string) (string, error) {
 		return "", err
 	}
 	f.hub.PublishTo(user, "fs:changed", map[string]any{"path": homeOf(user) + "/goder/" + name, "kind": "mkdir"})
+	// 跨进程交付（gh server 的会话 workspace）必须绝对路径：OPENOS_DATA 可为
+	// 相对值，相对路径依赖各进程 cwd 一致，脆弱（旧 goder 默认路径即踩此坑）
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
 	return dir, nil
 }
 
 // HomePath 用户统一 home 的真实绝对路径（goder 裸会话 workspace 兜底等场景）。
-func (f *FS) HomePath(user string) string { return f.realHome(user) }
+func (f *FS) HomePath(user string) string {
+	abs, _ := filepath.Abs(f.realHome(user))
+	return abs
+}
 
 // ---- REST Handlers ----
 
@@ -990,9 +1010,14 @@ func (f *FS) onTerminal(env bus.Envelope, reply func(string, any)) {
 
 // ---- 真实终端（受控执行） ----
 
+// ensureRealHome 确保用户 home 存在并返回绝对路径（HOME 环境变量交付给 shell
+// 子进程，`~` 展开按其拼接——相对值在 run.sh 形态（OPENOS_DATA=data）下会错位）。
 func (f *FS) ensureRealHome(user string) string {
 	home := f.realHome(user)
 	os.MkdirAll(home, 0o755)
+	if abs, err := filepath.Abs(home); err == nil {
+		return abs
+	}
 	return home
 }
 

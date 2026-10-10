@@ -68,7 +68,7 @@ export OPENOS_AI_MODEL=glm-4-flash
 
 未配置时相关 AI 能力（终端 `ai` 指令、`/api/ai/chat` 开放接口）运行于本地演示模式。
 
-其他环境变量：`OPENOS_ADDR`（默认 127.0.0.1:8081，容器内为 0.0.0.0:8081）、`OPENOS_DATA`（数据目录）、`OPENOS_DIST`（前端目录）、`OPENOS_JWT_SECRET`（默认自动生成并持久化到 system_kv 表）、`OPENOS_ROOM_URL`（实时房间服务 openroom 地址——商店「游戏」专题应用经 `GET /api/rooms/config` 发现后持 openos 令牌直连，需与 openroom 的 `OPENOS_EXCHANGE_SECRET` 一致；配套的 openroom-games agent 见其仓库）。
+其他环境变量：`OPENOS_ADDR`（默认 127.0.0.1:8081，容器内为 0.0.0.0:8081）、`OPENOS_DATA`（数据目录）、`OPENOS_DIST`（前端目录）、`OPENOS_JWT_SECRET`（默认自动生成并持久化到 system_kv 表）、`OPENOS_ROOM_URL`（实时房间服务 openroom 地址——商店「游戏」专题应用经 `GET /api/rooms/config` 发现后持 openos 令牌直连，需与 openroom 的 `OPENOS_EXCHANGE_SECRET` 一致；配套的 openos-room-ruler agent 见其仓库）。
 
 **功能裁剪与数据治理**（宿主集成 / 数据边界，详见「方式三」）：
 
@@ -95,9 +95,9 @@ export OPENOS_AI_MODEL=glm-4-flash
          ▼                            ▼
 ┌─────────────────── Go 服务端 ─────────────────────────────┐
 │ 恢复/日志/安全头/限流 → 路由 → auth(JWT+防爆破+热吊销)      │
-│ apps(注册表+角色授权)  vfs(虚拟FS+终端+配额+二进制)         │
+│ apps(注册表+角色授权)  vfs(统一home磁盘FS+终端+配额+分享)   │
 │ bus(Hub)  ai(在线配置热更/流式/历史)  audit(审计日志)       │
-│                     SQLite（WAL，modernc 纯 Go）           │
+│     SQLite（WAL，modernc 纯 Go）   homes/<user>（磁盘 home）│
 └───────────────────────────────────────────────────────────┘
 ```
 
@@ -211,12 +211,23 @@ cp <goder 源码>/frontend/dist-embed/goder.js <openos>/server/data/goder/
 
 相关环境变量：`OPENOS_GODER_BIN` / `OPENOS_GODER_JS` / `OPENOS_GODER_ADDR`（默认 127.0.0.1:7711）/ `OPENOS_GH_BIN`；`OPENOS_GODER=off` 可整体停用（不启动子进程、下架应用，纯业务宿主建议开启此开关）。
 
+**项目目录落统一 home（2026-10）**：goder「新建项目」时由 OpenOS 在用户 home 的
+`~/goder/<项目名>` 下创建真实目录并作为该项目会话的 workspace（AI 的项目上下文），
+文件管理与真实终端同目录可见；无项目的裸会话 workspace 兜底为用户 home。实现走
+goder 嵌入约定的 `newProject` 钩子（`POST /api/goder/project` 建目录返回绝对路径，
+`GET /api/goder/home` 取 home 路径）。存量项目（`serve-data/conversations/` 深处的
+旧默认 workspace）保持原位继续可用，不迁移。
+
 ### 终端
 
 终端应用为服务端 `sh -c` 受控执行（真实 shell，2026-10 起虚拟终端已移除）：
-个人沙箱目录（`<data>/homes/<user>`）、10s 超时、64KB 输出截断、`cd` 服务端跟踪
-（受限沙箱内）、ANSI 彩色渲染。命令经总线 `term:<user>` 发送、结果订阅
-`term:<user>:out`；能力探测 `GET /api/term/capability`。
+10s 超时、64KB 输出截断、`cd` 服务端跟踪（受限沙箱内）、ANSI 彩色渲染。命令经总线
+`term:<user>` 发送、结果订阅 `term:<user>:out`；能力探测 `GET /api/term/capability`。
+
+**统一 home（2026-10）**：`HOME` 即 `<data>/homes/<user>`——文件管理（虚拟路径
+`/home/<user>` REST 映射磁盘）、真实终端、goder 项目目录共用同一份真实文件树，
+`ls ~` 与文件应用所见完全一致，终端 `echo x > ~/a.md` 即刻在文件管理可见；REST
+读写经符号链接解析校验拒绝越出 home（终端 `ln -s` 指向外部不构成越权通道）。
 
 `OPENOS_REAL_SHELL` 默认 `off`（应用提示未启用并禁用输入）；`=on` 受限沙箱执行、
 `=full` 解除沙箱限制（自担风险）。
@@ -600,7 +611,7 @@ OPENOS_EXCHANGE_SECRET=<密钥> OPENOS_EXCHANGE_ROLES=front,boss,manager \
 - 用户禁用（`PUT /api/users/{name}` `{"disabled":true}`）即时生效：REST 立即 401、
   在线总线连接 30s 内踢下线（不吊销令牌，重新启用后会话恢复）；
 - 删除用户级联清理：设置/文件/聊天（私聊+聊天室）/分享链接/反馈/AI 每用户供应商/
-  附件（行+磁盘文件）与磁盘数据（真实终端沙箱目录、goder 会话目录）；
+  附件（行+磁盘文件）与磁盘数据（统一 home 目录、goder 会话目录）；
 - 审计与对话历史按保留期自动清理，jwt_secret 存于独立的 `system_kv` 表
   （用户设置数据可安全导出/清理，不波及系统密钥）。
 
@@ -906,7 +917,7 @@ openos/
 │   │   ├── store/           # SQLite 迁移/种子、审计、AI 配置、统计
 │   │   ├── auth/            # JWT+热吊销、防爆破、密码策略（含旧 hash 升级）
 │   │   ├── bus/             # WebSocket 事件总线 Hub
-│   │   ├── vfs/             # 虚拟 FS（文本+二进制+配额+分享）+ 真实终端
+│   │   ├── vfs/             # 统一 home 磁盘 FS（REST/配额/分享）+ 真实终端
 │   │   ├── ai/              # 在线配置热更、SSE 流式、历史、连通测试
 │   │   ├── goder/            # goder-serve 子进程托管 + /goder-api 身份反代
 │   │   ├── osmcp/            # goder 桌面控制 MCP 插件（openos，31 个 os_* 工具 + 宿主扩展点）
@@ -949,9 +960,11 @@ git tag v0.0.1 && git push origin v0.0.1   # 推送 tag 即触发发布
 - [ ] **修改默认密码**：admin/user/guest 三个默认账号，或删除不需要的账号
 - [ ] **配置 AI 服务**：系统设置 → AI 服务（或环境变量回填）
 - [ ] **HTTPS**：置于 Nginx/Caddy 反向代理之后（WebSocket 需配置 Upgrade 头）
-- [ ] **备份**：定期备份宿主机 `/app/docker/openos`（即 `OPENOS_DATA`，SQLite WAL，停机拷贝或 `sqlite3 .backup`）
+- [ ] **备份**：定期备份宿主机 `/app/docker/openos`（即 `OPENOS_DATA`，SQLite WAL + 用户
+  home 磁盘目录 `homes/`，停机拷贝或 `sqlite3 .backup` + rsync）
 - [ ] **可选**：设置 `OPENOS_JWT_SECRET` 固定密钥（多实例共享时必需）
-- 数据保留在单文件 SQLite（WAL），单机场景即开即用；事件总线与终端均为虚拟实现，不暴露宿主 shell
+- 系统数据在单文件 SQLite（WAL），用户文件在 `homes/<user>` 磁盘目录；终端为受控
+  真实 shell（默认关闭，`OPENOS_REAL_SHELL` 显式开启才暴露）
 
 ## 安全说明
 
@@ -989,13 +1002,14 @@ git tag v0.0.1 && git push origin v0.0.1   # 推送 tag 即触发发布
 - jwt_secret 等系统级键存于独立的 `system_kv` 表，与用户界面设置（user_settings）分离
 - 登录防爆破：每 用户名+IP 10 分钟 8 次失败锁定 15 分钟；全局限流 600 次/分钟/IP
   （覆盖 `/api`、`/ws`、`/goder-api`、`/app/*`）
-- 虚拟文件系统严格限制在 `/home/<用户>` 内，单文件 ≤8MB，单用户配额 100MB（字节配额
-  之外另有 2 万行文件数上限，堵 touch/mkdir 行数炸弹），用户间完全隔离；文件写删/重命名/
-  上传/分享全部入审计
+- 文件系统严格限制在 `/home/<用户>` 内（统一 home 磁盘目录 `<data>/homes/<user>`，
+  虚拟路径 REST 映射；REST 读写经符号链接解析校验拒绝越界），单文件 ≤8MB、单用户
+  配额 100MB（另有 2 万文件数上限），用户间完全隔离；文件写删/重命名/上传/分享
+  全部入审计；REST 写入受配额约束，终端 shell 写入不强制（沿用沙箱语义）
 - 终端为服务端 `sh -c` 受控执行（沙箱目录 + 超时 + 截断 + 命令入审计；2026-10 起
-  虚拟终端已移除），**默认关闭**（`OPENOS_REAL_SHELL=on` 开启受限沙箱、`=full` 解除
-  目录限制；独立演示部署的 compose/run.sh 已显式开启）；终端与 goder 子进程环境一律
-  白名单化（`safeenv` 包），绝不继承 `OPENOS_*` 秘密
+  虚拟终端已移除，沙箱即统一 home），**默认关闭**（`OPENOS_REAL_SHELL=on` 开启受限
+  沙箱、`=full` 解除目录限制；独立演示部署的 compose/run.sh 已显式开启）；终端与
+  goder 子进程环境一律白名单化（`safeenv` 包），绝不继承 `OPENOS_*` 秘密
 - goder-serve 仅允许绑定回环地址（`OPENOS_GODER_ADDR` 非回环拒绝启动）；
   osmcp 桌面控制插件的 MCP 令牌**按用户分发**（令牌↔用户成对校验）
 - 审计日志记录登录/用户/授权/AI 配置/文件操作/真实终端/设置写入等敏感操作（系统设置 → 系统信息可查）
