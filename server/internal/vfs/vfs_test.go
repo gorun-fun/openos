@@ -21,7 +21,7 @@ func newFS(t *testing.T) *FS {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(t.TempDir(), db, bus.New(), nil)
+	return New(t.TempDir(), db, bus.New())
 }
 
 func TestCleanBlocksEscape(t *testing.T) {
@@ -41,19 +41,6 @@ func TestCleanBlocksEscape(t *testing.T) {
 		_, err := clean("alice", c.in)
 		if (err != nil) != c.wantErr {
 			t.Errorf("clean(alice, %q) err=%v, wantErr=%v", c.in, err, c.wantErr)
-		}
-	}
-}
-
-func TestSplitQuoted(t *testing.T) {
-	got := splitQuoted(`echo "hello world" > a.txt`)
-	want := []string{"echo", "hello world", ">", "a.txt"}
-	if len(got) != len(want) {
-		t.Fatalf("got %v want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("got %v want %v", got, want)
 		}
 	}
 }

@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import type { WinState } from '../../stores/windows'
 import { useSession } from '../../stores/session'
-import { useApps } from '../../stores/apps'
 import { api } from '../../api/client'
 import { bus } from '../../bus/bus'
 import { icons } from '../../ui'
@@ -10,27 +9,21 @@ import { ansiToHtml } from './ansi'
 
 const props = defineProps<{ win: WinState }>()
 const session = useSession()
-const apps = useApps()
 const user = session.user!.username
 
 type Line = { html: string; cls?: string }
 const lines = ref<Line[]>([])
 const input = ref('')
 const cwd = ref('')
-const home = ref('')          // 真实沙箱 home（real 模式 ~ 展开）
-const mode = ref<'virtual' | 'real'>('virtual')
-const realAvailable = ref(true)
+const home = ref('')          // 真实沙箱 home（~ 展开基准）
+const enabled = ref(true)     // OPENOS_REAL_SHELL 能力（探测前乐观，失败按未启用处理）
 const history = ref<string[]>([])
 const histIdx = ref(-1)
 const bodyEl = ref<HTMLElement>()
 const inputEl = ref<HTMLInputElement>()
 
-// 双模式输出主题：term:<user>（虚拟）/ term:<user>:real（真实）
-const outTopic = computed(() => (mode.value === 'real' ? `term:${user}:real:out` : `term:${user}:out`))
-const inTopic = computed(() => (mode.value === 'real' ? `term:${user}:real` : `term:${user}`))
-
-const offVirtual = bus.on(`term:${user}:out`, (p: any) => onOut(p))
-const offReal = bus.on(`term:${user}:real:out`, (p: any) => onOut(p))
+// 终端命令通道：发 term:<user>，收 term:<user>:out
+const off = bus.on(`term:${user}:out`, (p: any) => onOut(p))
 function onOut(p: any) {
   if (!p) return
   if (p.cwd !== undefined) cwd.value = p.cwd
@@ -48,46 +41,30 @@ onMounted(async () => {
   banner()
   try {
     const h = await api.get<{ realShell: boolean }>('/api/term/capability')
-    realAvailable.value = h.realShell
-    if (!h.realShell && mode.value === 'real') mode.value = 'virtual'
-  } catch { /* 默认允许 */ }
+    enabled.value = h.realShell
+    if (!h.realShell) {
+      lines.value.push({ html: ansiToHtml('\x1b[1m终端未启用\x1b[0m：管理员可通过 OPENOS_REAL_SHELL=on（受限沙箱）/ =full（解除目录限制）开启。'), cls: 'dim' })
+      return
+    }
+  } catch { /* 探测失败按可用处理，由服务端兜底提示 */ }
+  // 挂载即拉取提示符（空命令回 cwd/home）
+  bus.remote(`term:${user}`, '')
 })
-onBeforeUnmount(() => { offVirtual(); offReal() })
+onBeforeUnmount(() => { off() })
 
 function banner() {
-  if (mode.value === 'real') {
-    lines.value = [
-      { html: 'OpenOS <b>真实终端</b>（受控执行：个人沙箱 · 10s 超时 · 64KB 截断）', cls: 'dim' },
-      { html: '已连接事件总线 <span style="color:#7ecbff">term:' + user + ':real</span> · 输入 help 查看 shell 提示', cls: 'dim' },
-    ]
-  } else {
-    lines.value = [
-      { html: `OpenOS 虚拟终端 — 已通过事件总线连接 (term:${user})`, cls: 'dim' },
-      { html: '输入 <b>help</b> 查看可用命令；右上角可切换<b>真实终端</b>。', cls: 'dim' },
-    ]
-  }
-  cwd.value = mode.value === 'real' ? '' : `/home/${user}`
-}
-
-function switchMode(m: 'virtual' | 'real') {
-  if (m === mode.value) return
-  if (m === 'real' && !realAvailable.value) return
-  mode.value = m
-  banner()
-  if (m === 'real') {
-    // 切到真实模式立即拉取提示符（空命令回 cwd/home）
-    bus.remote(inTopic.value, '')
-  }
+  lines.value = [
+    { html: 'OpenOS <b>终端</b>（受控执行：个人沙箱 · 10s 超时 · 64KB 截断）', cls: 'dim' },
+    { html: '已连接事件总线 <span style="color:#7ecbff">term:' + user + '</span> · 输入 help 查看 shell 提示', cls: 'dim' },
+  ]
+  cwd.value = ''
 }
 
 function promptText(): string {
-  if (mode.value === 'real') {
-    const short = home.value && cwd.value.startsWith(home.value)
-      ? '~' + cwd.value.slice(home.value.length)
-      : cwd.value || '~'
-    return short
-  }
-  return cwd.value.replace('/home/' + user, '~') || '~'
+  const short = home.value && cwd.value.startsWith(home.value)
+    ? '~' + cwd.value.slice(home.value.length)
+    : cwd.value || '~'
+  return short
 }
 
 function scroll() { nextTick(() => { if (bodyEl.value) bodyEl.value.scrollTop = bodyEl.value.scrollHeight }) }
@@ -99,45 +76,19 @@ function run() {
   histIdx.value = -1
   lines.value.push({ html: `<span style="color:#7ecbff">${esc(promptText())} $ ${esc(cmd)}</span>`, cls: 'echo' })
   if (cmd.trim() === 'clear') { lines.value = []; return }
-  if (mode.value === 'real' && cmd.trim() === 'help') {
-    lines.value.push({ html: ansiToHtml('\x1b[1m真实终端\x1b[0m：服务端 sh -c 受控执行。cd 由服务端跟踪（受限沙箱内），其余命令真实运行。'), cls: 'dim' })
+  if (cmd.trim() === 'help') {
+    lines.value.push({ html: ansiToHtml('\x1b[1m终端\x1b[0m：服务端 sh -c 受控执行。cd 由服务端跟踪（受限沙箱内），其余命令真实运行。'), cls: 'dim' })
     return
   }
-  bus.remote(inTopic.value, cmd)
+  bus.remote(`term:${user}`, cmd)
   scroll()
 }
 
 function esc(s: string) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') }
 
-const COMMANDS = ['help', 'pwd', 'ls', 'cd', 'cat', 'echo', 'touch', 'mkdir', 'rm', 'open', 'apps', 'goder', 'whoami', 'uname', 'date', 'clear']
-
-/** Tab 补全：首词补命令，open 的第二个词补应用 id。 */
-function complete() {
-  const parts = input.value.split(' ')
-  if (parts.length <= 1) {
-    const matches = COMMANDS.filter((c) => c.startsWith(parts[0]))
-    if (matches.length === 1) input.value = matches[0] + ' '
-    else if (matches.length > 1) {
-      lines.value.push({ html: esc(matches.join('  ')), cls: 'dim' })
-      scroll()
-    }
-    return
-  }
-  if (parts[0] === 'open' && mode.value === 'virtual') {
-    const ids = apps.apps.map((a) => a.id).filter((id) => id.startsWith(parts[parts.length - 1]))
-    if (ids.length === 1) {
-      parts[parts.length - 1] = ids[0]
-      input.value = parts.join(' ')
-    } else if (ids.length > 1) {
-      lines.value.push({ html: esc(ids.join('  ')), cls: 'dim' })
-      scroll()
-    }
-  }
-}
-
 function onKey(e: KeyboardEvent) {
   if (e.key === 'Enter') { run(); e.preventDefault() }
-  else if (e.key === 'Tab') { complete(); e.preventDefault() }
+  else if (e.key === 'Tab') { e.preventDefault() } // 真实 shell 无前端补全，吞掉防焦点跳走
   else if (e.key === 'ArrowUp') {
     if (!history.value.length) return
     histIdx.value = histIdx.value < 0 ? history.value.length - 1 : Math.max(0, histIdx.value - 1)
@@ -158,22 +109,11 @@ function onKey(e: KeyboardEvent) {
 
 <template>
   <div class="term" @pointerup="inputEl?.focus()">
-    <!-- 融合窗体工具栏：虚拟/真实切换 + 标题（用户 — 模式）+ 清屏；整条可拖动窗口（控件自身不参与） -->
+    <!-- 融合窗体工具栏：标题（用户 — 终端）+ 状态提示 + 清屏；整条可拖动窗口（控件自身不参与） -->
     <div class="os-tb term-tb" data-os-drag>
-      <div class="os-seg dark-seg">
-        <button :class="{ on: mode === 'virtual' }" title="虚拟终端（沙箱 VFS）" v-html="icons.virtual" @click="switchMode('virtual')" />
-        <button
-          :class="{ on: mode === 'real' }"
-          :disabled="!realAvailable"
-          :title="realAvailable ? '真实终端（服务端受控执行 · 个人沙箱）' : '管理员已关闭真实终端'"
-          v-html="icons.shell"
-          @click="switchMode('real')"
-        />
-      </div>
-      <span class="os-tb-sep dark-sep" />
-      <div class="tb-title">{{ user }} — {{ mode === 'real' ? '真实终端' : '虚拟终端' }}</div>
+      <div class="tb-title">{{ user }} — 终端</div>
       <span class="grow" />
-      <span class="mode-hint">{{ mode === 'real' ? 'sh 受控执行 · 沙箱内' : '虚拟文件系统' }}</span>
+      <span class="mode-hint">{{ enabled ? 'sh 受控执行 · 沙箱内' : '未启用' }}</span>
       <button class="os-tb-btn dark-btn" title="清屏（Ctrl+L）" v-html="icons.eraser" @click="lines = []" />
     </div>
     <div ref="bodyEl" class="body">
@@ -186,6 +126,7 @@ function onKey(e: KeyboardEvent) {
           class="cmd os-flat"
           spellcheck="false"
           autofocus
+          :disabled="!enabled"
           @keydown="onKey"
         />
       </div>
@@ -204,16 +145,6 @@ html.dark .term { background: rgba(12, 12, 15, .98); }
 .term-tb {
   background: rgba(32, 32, 38, .92); border-bottom: 1px solid rgba(255, 255, 255, .08);
 }
-.dark-seg { background: rgba(255, 255, 255, .1); }
-.dark-seg button {
-  border: none; background: transparent; color: #9a9aa2; font-size: 12px; padding: 2px 9px;
-  border-radius: 5px; cursor: pointer; font-family: inherit; height: 22px;
-  display: inline-flex; align-items: center; justify-content: center;
-}
-.dark-seg button svg { width: 13px; height: 13px; }
-.dark-seg button.on { background: #5a5a64; color: #fff; }
-.dark-seg button:disabled { opacity: .35; cursor: not-allowed; }
-.dark-sep { background: rgba(255, 255, 255, .12); }
 .term-tb .tb-title { color: #c8c8ce; font-size: 13px; font-weight: 600; }
 .dark-btn {
   background: rgba(255, 255, 255, .1); border-color: rgba(255, 255, 255, .16); color: #d4d4da; font-size: 12px;
@@ -232,4 +163,5 @@ html.dark .term { background: rgba(12, 12, 15, .98); }
   flex: 1; background: transparent; border: none; color: #fff;
   font-family: var(--os-mono); font-size: 13px; caret-color: #63e6a2;
 }
+.cmd:disabled { opacity: .5; }
 </style>

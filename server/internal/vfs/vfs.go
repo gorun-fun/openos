@@ -55,17 +55,10 @@ func (f *FS) quotaUsed(user string) int64 {
 	return used
 }
 
-// AIChat goder 非流式问答接口（由 ai 包注入，避免循环依赖）。
-type AIChat func(ctx string, prompt string) string
-
 // FS 虚拟文件系统服务。
 type FS struct {
 	db  *store.DB
 	hub *bus.Hub
-	ai  AIChat
-
-	mu  sync.Mutex
-	cwd map[string]string // username → 当前工作目录（虚拟终端会话）
 
 	// 真实终端（受控执行：sh -c，10s 超时，输出截断，工作目录限定个人沙箱）
 	realShell bool
@@ -80,15 +73,15 @@ type FS struct {
 }
 
 // New 创建服务。dataDir 用于真实终端的沙箱目录（<dataDir>/homes/<user>）。
-func New(dataDir string, db *store.DB, hub *bus.Hub, ai AIChat) *FS {
+func New(dataDir string, db *store.DB, hub *bus.Hub) *FS {
 	// 真实 shell 默认关闭（安全审计 2026-10：sh -c 以服务进程权限执行任意命令，
 	// 曾默认开启且继承全部环境变量——秘密可被读取自我提权）。on=受限沙箱执行、
 	// full=解除目录限制；独立演示部署在 compose/run.sh 显式开 on。
 	v := os.Getenv("OPENOS_REAL_SHELL")
 	realShell := v == "on" || v == "full"
 	fs := &FS{
-		db: db, hub: hub, ai: ai,
-		cwd: map[string]string{}, realCwd: map[string]string{},
+		db: db, hub: hub,
+		realCwd: map[string]string{},
 		realShell: realShell, homesDir: filepath.Join(dataDir, "homes"),
 		disabled: os.Getenv("OPENOS_VFS") == "off",
 		seedDemo: os.Getenv("OPENOS_SEED_DEMO") != "0",
@@ -688,12 +681,7 @@ func (f *FS) onTerminal(env bus.Envelope, reply func(string, any)) {
 	if f.disabled {
 		return // 防御：正常情况下 New 不会注册该处理器
 	}
-	topic := env.Topic
-	user := strings.TrimPrefix(topic, "term:")
-	isReal := strings.HasSuffix(topic, ":real")
-	if isReal {
-		user = strings.TrimSuffix(user, ":real")
-	}
+	user := strings.TrimPrefix(env.Topic, "term:")
 	if user == "" || env.From != user {
 		return
 	}
@@ -701,26 +689,7 @@ func (f *FS) onTerminal(env bus.Envelope, reply func(string, any)) {
 	if err := json.Unmarshal(env.Payload, &cmd); err != nil {
 		return
 	}
-	if isReal {
-		f.execReal(user, cmd, reply)
-		return
-	}
-	f.mu.Lock()
-	cwd := f.cwd[user]
-	f.mu.Unlock()
-	if cwd == "" {
-		cwd = homeOf(user)
-	}
-	out, next := f.exec(user, cwd, cmd)
-	if next != "" {
-		cwd = next
-	}
-	f.mu.Lock()
-	f.cwd[user] = cwd
-	f.mu.Unlock()
-	if out != "" {
-		reply("term:"+user+":out", map[string]any{"cwd": cwd, "text": out})
-	}
+	f.execReal(user, cmd, reply)
 }
 
 // ---- 真实终端（受控执行） ----
@@ -737,7 +706,7 @@ func (f *FS) ensureRealHome(user string) string {
 
 func (f *FS) execReal(user, line string, reply func(string, any)) {
 	if !f.realShell {
-		reply("term:"+user+":real:out", map[string]any{"cwd": "", "text": "真实终端未启用（OPENOS_REAL_SHELL=on 受限沙箱 / =full 解除目录限制）"})
+		reply("term:"+user+":out", map[string]any{"cwd": "", "text": "真实终端未启用（OPENOS_REAL_SHELL=on 受限沙箱 / =full 解除目录限制）"})
 		return
 	}
 	home := f.ensureRealHome(user)
@@ -751,11 +720,11 @@ func (f *FS) execReal(user, line string, reply func(string, any)) {
 
 	line = strings.TrimSpace(line)
 	if line == "" {
-		reply("term:"+user+":real:out", map[string]any{"cwd": cwd, "home": home, "text": ""})
+		reply("term:"+user+":out", map[string]any{"cwd": cwd, "home": home, "text": ""})
 		return
 	}
 	if line == "clear" {
-		reply("term:"+user+":real:out", map[string]any{"cwd": cwd, "home": home, "text": "\x00CLEAR"})
+		reply("term:"+user+":out", map[string]any{"cwd": cwd, "home": home, "text": "\x00CLEAR"})
 		return
 	}
 	// cd 单命令：服务端跟踪工作目录（受限在个人沙箱内）
@@ -777,17 +746,17 @@ func (f *FS) execReal(user, line string, reply func(string, any)) {
 			target = resolved
 		}
 		if !strings.HasPrefix(target, home) {
-			reply("term:"+user+":real:out", map[string]any{"cwd": cwd, "home": home, "text": "cd: 受限模式仅允许在个人沙箱内移动：" + homeName + "（OPENOS_REAL_SHELL=full 可解除）"})
+			reply("term:"+user+":out", map[string]any{"cwd": cwd, "home": home, "text": "cd: 受限模式仅允许在个人沙箱内移动：" + homeName + "（OPENOS_REAL_SHELL=full 可解除）"})
 			return
 		}
 		if st, err := os.Stat(target); err != nil || !st.IsDir() {
-			reply("term:"+user+":real:out", map[string]any{"cwd": cwd, "home": home, "text": "cd: 目录不存在: " + target})
+			reply("term:"+user+":out", map[string]any{"cwd": cwd, "home": home, "text": "cd: 目录不存在: " + target})
 			return
 		}
 		f.realMu.Lock()
 		f.realCwd[user] = target
 		f.realMu.Unlock()
-		reply("term:"+user+":real:out", map[string]any{"cwd": target, "home": home, "text": ""})
+		reply("term:"+user+":out", map[string]any{"cwd": target, "home": home, "text": ""})
 		return
 	}
 
@@ -829,7 +798,7 @@ func (f *FS) execReal(user, line string, reply func(string, any)) {
 	f.realMu.Lock()
 	f.realCwd[user] = cwd
 	f.realMu.Unlock()
-	reply("term:"+user+":real:out", map[string]any{"cwd": cwd, "home": home, "text": out, "truncated": buf.truncated})
+	reply("term:"+user+":out", map[string]any{"cwd": cwd, "home": home, "text": out, "truncated": buf.truncated})
 }
 
 // limitedBuf 输出上限 64KB 的缓冲。
@@ -857,254 +826,6 @@ func (l *limitedBuf) String() string {
 		return l.b.String() + "\n…（输出超过 64KB 已截断）"
 	}
 	return l.b.String()
-}
-
-func (f *FS) exec(user, cwd, line string) (string, string) {
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return "", cwd
-	}
-	fields := splitQuoted(line)
-	cmd, args := fields[0], fields[1:]
-	switch cmd {
-	case "help":
-		return `OpenOS 虚拟终端 —— 可用命令：
-  pwd / ls [路径] / cd <路径> / cat <文件>
-  echo <文本> [> 文件]        追加请用 >>
-  touch <文件> / mkdir <目录> / rm <路径>
-  open <app id>               在桌面打开一个应用
-  apps                        列出可用应用
-  goder <问题>                向 goder AI 提问
-  whoami / date / uname / clear / help`, cwd
-	case "pwd":
-		return cwd, cwd
-	case "whoami":
-		return user, cwd
-	case "uname":
-		return "OpenOS 1.0 (web) go/virtual-shell", cwd
-	case "date":
-		return time.Now().Format("2006-01-02 15:04:05 Mon"), cwd
-	case "ls":
-		target := cwd
-		if len(args) > 0 {
-			p := args[0]
-			if !strings.HasPrefix(p, "/") {
-				p = cwd + "/" + p
-			}
-			cp, err := clean(user, p)
-			if err != nil {
-				return err.Error(), cwd
-			}
-			target = cp
-		}
-		return f.lsOutput(user, target), cwd
-	case "cd":
-		target := homeOf(user)
-		if len(args) > 0 {
-			p := args[0]
-			if !strings.HasPrefix(p, "/") {
-				p = cwd + "/" + p
-			}
-			cp, err := clean(user, p)
-			if err != nil {
-				return err.Error(), cwd
-			}
-			target = cp
-		}
-		var isDir int
-		if err := f.db.QueryRow(`SELECT is_dir FROM files WHERE owner=? AND path=?`, user, target).Scan(&isDir); err != nil || isDir != 1 {
-			return "cd: 目录不存在: " + target, cwd
-		}
-		return "", target
-	case "cat":
-		if len(args) == 0 {
-			return "用法: cat <文件>", cwd
-		}
-		p := resolve(cwd, args[0])
-		cp, err := clean(user, p)
-		if err != nil {
-			return err.Error(), cwd
-		}
-		var content string
-		var isDir, isBin int
-		if err := f.db.QueryRow(`SELECT content,is_dir,is_binary FROM files WHERE owner=? AND path=?`, user, cp).Scan(&content, &isDir, &isBin); err != nil {
-			return "cat: 文件不存在", cwd
-		}
-		if isDir == 1 {
-			return "cat: 这是一个目录", cwd
-		}
-		if isBin == 1 {
-			return fmt.Sprintf("cat: %s（二进制文件 %d 字节，请在文件应用中预览/下载）", path.Base(cp), len(content)*3/4), cwd
-		}
-		if content == "" {
-			return "(空文件)", cwd
-		}
-		return content, cwd
-	case "echo":
-		if len(args) == 0 {
-			return "", cwd
-		}
-		if idx := indexOf(args, ">"); idx >= 0 && idx+1 < len(args) {
-			return f.writeShell(user, cwd, args[idx+1], strings.Join(args[:idx], " ")+"\n", false), cwd
-		}
-		if idx := indexOf(args, ">>"); idx >= 0 && idx+1 < len(args) {
-			return f.writeShell(user, cwd, args[idx+1], strings.Join(args[:idx], " ")+"\n", true), cwd
-		}
-		return strings.Join(args, " "), cwd
-	case "touch":
-		if len(args) == 0 {
-			return "用法: touch <文件>", cwd
-		}
-		p := resolve(cwd, args[0])
-		cp, err := clean(user, p)
-		if err != nil {
-			return err.Error(), cwd
-		}
-		f.ensureDirs(user, cp)
-		f.db.Exec(`INSERT OR IGNORE INTO files(owner,path,is_dir) VALUES(?,?,0)`, user, cp)
-		return "", cwd
-	case "mkdir":
-		if len(args) == 0 {
-			return "用法: mkdir <目录>", cwd
-		}
-		p := resolve(cwd, args[0])
-		cp, err := clean(user, p)
-		if err != nil {
-			return err.Error(), cwd
-		}
-		f.ensureDirs(user, cp+"/x")
-		f.db.Exec(`INSERT OR IGNORE INTO files(owner,path,is_dir) VALUES(?,?,1)`, user, cp)
-		return "", cwd
-	case "rm":
-		if len(args) == 0 {
-			return "用法: rm <路径>", cwd
-		}
-		p := resolve(cwd, args[0])
-		cp, err := clean(user, p)
-		if err != nil {
-			return err.Error(), cwd
-		}
-		f.db.Exec(`DELETE FROM files WHERE owner=? AND (path=? OR path LIKE ?)`, user, cp, cp+"/%")
-		return "", cwd
-	case "apps":
-		apps, _ := f.db.ListAppsForRole(roleOf(f.db, user))
-		var sb strings.Builder
-		for _, a := range apps {
-			fmt.Fprintf(&sb, "%-12s %s\n", a.ID, a.Name)
-		}
-		return sb.String(), cwd
-	case "open":
-		if len(args) == 0 {
-			return "用法: open <app id>", cwd
-		}
-		f.hub.PublishTo(user, "sys:open", map[string]any{"app": args[0]})
-		return "正在打开 " + args[0], cwd
-	case "goder":
-		if f.ai == nil {
-			return "goder 未配置 AI 服务", cwd
-		}
-		q := strings.Join(args, " ")
-		if q == "" {
-			return "用法: goder <问题>", cwd
-		}
-		return f.ai("terminal", q), cwd
-	case "clear":
-		return "\x00CLEAR", cwd
-	}
-	return cmd + ": 命令未找到（输入 help 查看可用命令）", cwd
-}
-
-func (f *FS) writeShell(user, cwd, file, text string, appendMode bool) string {
-	p := resolve(cwd, file)
-	cp, err := clean(user, p)
-	if err != nil {
-		return err.Error()
-	}
-	f.ensureDirs(user, cp)
-	if appendMode {
-		var old string
-		f.db.QueryRow(`SELECT content FROM files WHERE owner=? AND path=?`, user, cp).Scan(&old)
-		text = old + text
-	}
-	f.db.Exec(`INSERT INTO files(owner,path,is_dir,content,updated_at) VALUES(?,?,0,?,datetime('now'))
-		ON CONFLICT(owner,path) DO UPDATE SET content=excluded.content, updated_at=datetime('now')`, user, cp, text)
-	f.hub.PublishTo(user, "fs:changed", map[string]any{"path": cp, "kind": "write"})
-	return ""
-}
-
-func (f *FS) lsOutput(user, dir string) string {
-	rows, err := f.db.Query(`SELECT path,is_dir FROM files WHERE owner=?`, user)
-	if err != nil {
-		return err.Error()
-	}
-	defer rows.Close()
-	prefix := strings.TrimSuffix(dir, "/") + "/"
-	var dirs, files []string
-	for rows.Next() {
-		var p string
-		var d int
-		rows.Scan(&p, &d)
-		rest := strings.TrimPrefix(p, prefix)
-		if rest == "" || p == dir || strings.Contains(rest, "/") {
-			continue
-		}
-		if d == 1 {
-			dirs = append(dirs, rest+"/")
-		} else {
-			files = append(files, rest)
-		}
-	}
-	if len(dirs)+len(files) == 0 {
-		return "(空目录)"
-	}
-	sort.Strings(dirs)
-	sort.Strings(files)
-	return strings.Join(append(dirs, files...), "  ")
-}
-
-func resolve(cwd, p string) string {
-	if !strings.HasPrefix(p, "/") {
-		p = cwd + "/" + p
-	}
-	return path.Clean(p)
-}
-
-func roleOf(db *store.DB, user string) string {
-	var role string
-	db.QueryRow(`SELECT role FROM users WHERE username=?`, user).Scan(&role)
-	return role
-}
-
-func splitQuoted(s string) []string {
-	var out []string
-	var cur strings.Builder
-	inQuote := false
-	for _, r := range s {
-		switch {
-		case r == '"':
-			inQuote = !inQuote
-		case r == ' ' && !inQuote:
-			if cur.Len() > 0 {
-				out = append(out, cur.String())
-				cur.Reset()
-			}
-		default:
-			cur.WriteRune(r)
-		}
-	}
-	if cur.Len() > 0 {
-		out = append(out, cur.String())
-	}
-	return out
-}
-
-func indexOf(ss []string, s string) int {
-	for i, v := range ss {
-		if v == s {
-			return i
-		}
-	}
-	return -1
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

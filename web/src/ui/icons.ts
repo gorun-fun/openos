@@ -38,7 +38,6 @@ export const icons: Record<string, string> = {
   close: s('<path d="M4 4l8 8M12 4l-8 8"/>'),
   // 终端
   eraser: s('<path d="M6.6 12.8l-3.3-3.3a1.3 1.3 0 0 1 0-1.8l4.5-4.5a1.3 1.3 0 0 1 1.8 0l3 3a1.3 1.3 0 0 1 0 1.8l-5.1 5.1"/><path d="M5.6 6l4.4 4.4"/><path d="M2.6 13.4h10.8"/>'),
-  virtual: s('<rect x="2.2" y="2.2" width="7.2" height="7.2" rx="1.4"/><path d="M6.6 13.8h6a1.2 1.2 0 0 0 1.2-1.2v-6"/><path d="M2.2 11.2v2.6h2.6"/>'),
   shell: s('<rect x="2" y="3" width="12" height="10" rx="1.6"/><path d="M4.6 6.1l2.4 1.9-2.4 1.9M8.6 10.2h3"/>'),
   // 文件应用工具栏
   sort: s('<path d="M5 2.8v10M2.6 10.4 5 12.8l2.4-2.4"/><path d="M11 13.2v-10M8.6 5.6 11 3.2l2.4 2.4"/>'),

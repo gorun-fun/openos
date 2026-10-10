@@ -32,7 +32,7 @@ func newTestDeps(t *testing.T) (Deps, *store.DB, *bus.Hub) {
 		t.Fatal(err)
 	}
 	hub := bus.New()
-	fs := vfs.New(t.TempDir(), db, hub, nil)
+	fs := vfs.New(t.TempDir(), db, hub)
 	fs.EnsureHome("alice")
 	return Deps{
 		DB: db, Hub: hub, FS: fs, DataDir: t.TempDir(),

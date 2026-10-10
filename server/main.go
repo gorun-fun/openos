@@ -104,7 +104,7 @@ func main() {
 		return err == nil && id.Username == user
 	})
 	aiSvc := ai.New(db)
-	fs := vfs.New(dataDir, db, hub, aiSvc.Ask)
+	fs := vfs.New(dataDir, db, hub)
 	goderMgr := goder.New(dataDir)
 	goderMgr.Start() // OPENOS_GODER=off 或二进制缺失时自动降级（available=false）
 	// AI ↔ goder 联动（代理形态，安全审计 2026-10）：系统设置的模型配置以托管供应商
