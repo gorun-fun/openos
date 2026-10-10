@@ -1,14 +1,20 @@
 # OpenOS 生产镜像：前端构建 → Go 静态编译 → 最小运行镜像
 # goder 组件（goder-serve 网关 + goder.js 嵌入库 + gh）随镜像分发，部署即可用
 
+# ---- 基础镜像源（2026-10-11）：Runner 网络已无法直连 docker.io（registry-1.docker.io
+# 被 DNS 污染解析为 IPv6 ULA 地址、连接超时），基础镜像统一改走内网私有仓库的
+# base/* 前缀（已预置 alpine:3.24 / node:24-alpine3.24 / golang:1.25-alpine）；
+# 后续升级基础镜像版本须同步预置到私有仓库再改这里。CI 以 --build-arg 注入地址 ----
+ARG BASE_REGISTRY=10.8.0.6:5000
+
 # ---- goder 源码（构建方随上下文提供 .run/goder-src，CI 构建前 clone 最新版；
 # 不能在镜像层内 clone——RUN 层缓存键只认命令字符串，上游 goder 前进而缓存
 # 不失效，镜像会锁死旧快照，见 grf-hotel 同款教训）----
-FROM alpine:3.20 AS goder-src
+FROM ${BASE_REGISTRY}/base/alpine:3.24 AS goder-src
 COPY .run/goder-src /goder
 
 # ---- goder 嵌入库 goder.js（与上游 ./build.sh embed 同款两步构建）----
-FROM node:22-alpine AS goder-web
+FROM ${BASE_REGISTRY}/base/node:24-alpine3.24 AS goder-web
 # 国内 npm 镜像源（Runner 网络无法直连 npmjs）
 ENV npm_config_registry=https://registry.npmmirror.com
 COPY --from=goder-src /goder /goder
@@ -26,9 +32,12 @@ RUN --mount=type=cache,id=goder-vite,target=/goder/frontend/node_modules/.vite \
     npm run build && npm run build:embed
 
 # ---- goder-serve 网关（纯 Go 无 CGO，静态编译）----
-FROM golang:1.26-alpine AS goder-serve
+FROM ${BASE_REGISTRY}/base/golang:1.25-alpine AS goder-serve
 # 国内 Go 模块代理（Runner 网络无法直连 proxy.golang.org，go mod 报错的根因）
 ENV GOPROXY=https://goproxy.cn,direct
+# go.mod 要求 go 1.26 而基础镜像只有 1.25：GOTOOLCHAIN=auto 经 GOPROXY 自动下载
+# 1.26 工具链（落 GOMODCACHE，随下方缓存挂载跨构建复用），并覆盖官方镜像的 local 设定
+ENV GOTOOLCHAIN=auto
 COPY --from=goder-src /goder /goder
 WORKDIR /goder
 # 缓存挂载：模块缓存 + 编译缓存（id 与 grf-play/grf-hotel 的 goder 阶段共享），
@@ -39,11 +48,11 @@ RUN --mount=type=cache,id=goder-gomod,target=/go/pkg/mod \
 
 # ---- gh（grf-harness 发行版，构建方随上下文提供 .run/gh，CI 构建前取最新版；
 # 同样不能在镜像层内下载，层缓存会锁死旧版 gh）----
-FROM alpine:3.20 AS gh
+FROM ${BASE_REGISTRY}/base/alpine:3.24 AS gh
 COPY --chmod=755 .run/gh /gh
 
 # ---- OpenOS 前端 ----
-FROM node:22-alpine AS web
+FROM ${BASE_REGISTRY}/base/node:24-alpine3.24 AS web
 # 国内 npm 镜像源（Runner 网络无法直连 npmjs）
 ENV npm_config_registry=https://registry.npmmirror.com
 WORKDIR /build/web
@@ -56,11 +65,13 @@ COPY web/ ./
 RUN --mount=type=cache,id=openos-vite,target=/build/web/node_modules/.vite npm run build
 
 # ---- OpenOS 服务端 ----
-FROM golang:1.26-alpine AS server
+FROM ${BASE_REGISTRY}/base/golang:1.25-alpine AS server
 # 版本号（CI 传入 git tag，如 v0.0.7；缺省 dev），系统信息/健康检查展示用
 ARG APP_VERSION=dev
 # 国内 Go 模块代理（Runner 网络无法直连 proxy.golang.org，go mod 报错的根因）
 ENV GOPROXY=https://goproxy.cn,direct
+# 同 goder-serve 阶段：go.mod 要求 1.26，镜像 1.25 经工具链自动下载补齐
+ENV GOTOOLCHAIN=auto
 WORKDIR /build/server
 COPY server/go.mod server/go.sum ./
 RUN --mount=type=cache,id=openos-gomod,target=/go/pkg/mod go mod download
@@ -72,7 +83,7 @@ RUN --mount=type=cache,id=openos-gomod,target=/go/pkg/mod \
     -ldflags="-s -w -X openos/server/internal/store.Version=${APP_VERSION}" -o /openos .
 
 # ---- 运行镜像 ----
-FROM alpine:3.20
+FROM ${BASE_REGISTRY}/base/alpine:3.24
 # 国内 Alpine 源（与 .gitlab-ci.yml 部署阶段同款）；su-exec 用于入口降权；git 供 gh 使用
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories \
     && apk add --no-cache ca-certificates tzdata su-exec git && adduser -D -u 1000 openos

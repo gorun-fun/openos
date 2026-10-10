@@ -20,6 +20,8 @@ workflow:
 
 # 使用 Docker 执行器（或已挂载 /var/run/docker.sock 的执行器）
 # 基础镜像：docker CLI；通过挂载的主机 Docker socket 直连守护进程
+# （job 容器镜像仍出自 docker.io，Runner 本地已有缓存可正常拉起；构建用
+#   基础镜像已全部改走 ${REGISTRY}/base/*，不再依赖 docker.io——见 Dockerfile 头注释）
 image: docker:29.7.2-cli-alpine3.24
 
 variables:
@@ -56,9 +58,9 @@ test:
   script:
     # Go 单元测试（auth/bus/vfs/store/osmcp/webproxy/market）：具名卷 openos-gocache
     # 挂在 Runner 宿主上跨流水线复用（modernc sqlite 冷编译是大头）
-    - docker run --rm -v "$CI_PROJECT_DIR/server:/src" -w /src -e GOPROXY=https://goproxy.cn,direct -e GOCACHE=/gocache -v openos-gocache:/gocache golang:1.26-alpine go test ./...
+    - docker run --rm -v "$CI_PROJECT_DIR/server:/src" -w /src -e GOPROXY=https://goproxy.cn,direct -e GOTOOLCHAIN=auto -e GOCACHE=/gocache -v openos-gocache:/gocache ${REGISTRY}/base/golang:1.25-alpine go test ./...
     # 前端类型检查（vue-tsc --noEmit 是仓库唯一前端静态校验）
-    - docker run --rm -v "$CI_PROJECT_DIR/web:/web" -w /web -v openos-npmcache:/npmcache -e npm_config_cache=/npmcache node:22-alpine sh -c "npm install --no-audit --no-fund && npm run typecheck"
+    - docker run --rm -v "$CI_PROJECT_DIR/web:/web" -w /web -v openos-npmcache:/npmcache -e npm_config_cache=/npmcache ${REGISTRY}/base/node:24-alpine3.24 sh -c "npm install --no-audit --no-fund && npm run typecheck"
   rules:
     - if: '$CI_COMMIT_TAG'
       when: never
@@ -89,8 +91,9 @@ build-image:
       chmod +x .run/gh && .run/gh --version
   script:
     - docker info
-    # APP_VERSION 注入服务端版本号（系统信息/健康检查显示 git tag）
-    - docker build --build-arg APP_VERSION=${CI_COMMIT_TAG} -t ${IMAGE_BASE}:${CI_COMMIT_TAG} .
+    # APP_VERSION 注入服务端版本号（系统信息/健康检查显示 git tag）；
+    # BASE_REGISTRY 注入基础镜像源（私有仓库 base/*，防 docker.io 不可达）
+    - docker build --build-arg BASE_REGISTRY=${REGISTRY} --build-arg APP_VERSION=${CI_COMMIT_TAG} -t ${IMAGE_BASE}:${CI_COMMIT_TAG} .
     - docker history ${IMAGE_BASE}:${CI_COMMIT_TAG}
   rules:
     - if: '$CI_COMMIT_TAG'      # 仅打 tag 触发
@@ -163,7 +166,7 @@ publish-dist:
     - |
       for GOOS in darwin linux; do
         for GOARCH in amd64 arm64; do
-          docker run --rm -v "$CI_PROJECT_DIR:/work" -w /work/server -e GOPROXY=https://goproxy.cn,direct -e GOCACHE=/gocache -v openos-gocache:/gocache -e GOOS=$GOOS -e GOARCH=$GOARCH -e CGO_ENABLED=0 golang:1.26-alpine go build -trimpath -ldflags "-s -w -X openos/server/internal/store.Version=${CI_COMMIT_TAG}" -o /work/dist-out/openos-server-${GOOS}-${GOARCH} .
+          docker run --rm -v "$CI_PROJECT_DIR:/work" -w /work/server -e GOPROXY=https://goproxy.cn,direct -e GOTOOLCHAIN=auto -e GOCACHE=/gocache -v openos-gocache:/gocache -e GOOS=$GOOS -e GOARCH=$GOARCH -e CGO_ENABLED=0 ${REGISTRY}/base/golang:1.25-alpine go build -trimpath -ldflags "-s -w -X openos/server/internal/store.Version=${CI_COMMIT_TAG}" -o /work/dist-out/openos-server-${GOOS}-${GOARCH} .
         done
       done
     # 2) goder 三件套：从当次构建镜像提取（与部署产物同源，不再单独构建）
@@ -220,9 +223,9 @@ publish-cli:
         echo "→ 构建 openos-desktop-${PLAT}${EXT} (${GOOS}/${GOARCH})"
         mkdir -p cli-out/${PLAT}
         docker run --rm -v "$CI_PROJECT_DIR:/work" -w /work/desktop \
-          -e GOPROXY=https://goproxy.cn,direct -e GOCACHE=/gocache -v openos-gocache:/gocache \
+          -e GOPROXY=https://goproxy.cn,direct -e GOTOOLCHAIN=auto -e GOCACHE=/gocache -v openos-gocache:/gocache \
           -e CGO_ENABLED=0 -e GOOS=$GOOS -e GOARCH=$GOARCH \
-          golang:1.26-alpine go build -trimpath -ldflags "$LD" \
+          ${REGISTRY}/base/golang:1.25-alpine go build -trimpath -ldflags "$LD" \
           -o /work/cli-out/${PLAT}/openos-desktop-${PLAT}${EXT} .
       done
     # 2) sha256 校验文件 + notes.txt（发布说明 = tag 提交信息）；跳过已生成的
