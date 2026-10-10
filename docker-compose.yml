@@ -24,4 +24,11 @@ services:
       # 演示部署显式开启真实终端（默认 off——安全审计 2026-10 起受限执行+环境清洗；
       # 生产/宿主形态勿开：sh -c 仍以容器内进程权限执行）
       OPENOS_REAL_SHELL: "on"
+      # 房间服务对接（值在服务器侧 .env，勿提交密钥进仓库）：
+      # 令牌交换/内省共用密钥，与 openroom 侧 OPENROOM_EXCHANGE_SECRET 一致；
+      # 空时 exchange/introspect 返回 503 保持独立部署安全面
+      OPENOS_EXCHANGE_SECRET: "${OPENOS_EXCHANGE_SECRET:-}"
+      # 游戏房间服务（openroom）公网基址，GET /api/rooms/config 下发给
+      # gomoku/doudizhu 等游戏 bundle（空 = 应用提示「管理员未配置房间服务」）
+      OPENOS_ROOM_URL: "${OPENOS_ROOM_URL:-}"
     restart: unless-stopped
