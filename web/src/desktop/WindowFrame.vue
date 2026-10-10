@@ -80,7 +80,9 @@ const apps = useApps()
 async function resolveComp() {
   const appId = props.win.appId
   if (builtinComponents[appId]) {
-    comp.value = defineAsyncComponent(builtinComponents[appId])
+    // errorComponent：加载器 reject（如 remote-only App 货架不可达）时呈现统一
+    // 错误面板而非空白窗口；有本地兜底的 loader 正常路径不会走到
+    comp.value = defineAsyncComponent({ loader: builtinComponents[appId], errorComponent: ErrorPanel })
   } else if (runtimeComponents[appId]) {
     comp.value = runtimeComponents[appId]
   } else {

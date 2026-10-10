@@ -2,9 +2,11 @@
 //
 // 形态：宿主在 createOpenOS({ apps, remoteApps }) 里声明货架地址后，每个 App 的
 // 组件优先从货架远程加载（版本化 ESM 产物，随构建工具 web/tooling/app.ts 产出），
-// 任何环节失败（货架不可达 / 无条目 / 版本不兼容 / import 抛错）都回落到 apps
-// 传入的本地 loader（打进宿主 dist 的兜底 chunk）——货架故障不影响可用性，只是
-// 降级为宿主发版时冻结的版本。
+// 失败环节（货架不可达 / 无条目 / 版本不兼容 / import 抛错）回落到 apps 传入的
+// 本地 loader（打进宿主 dist 的兜底 chunk）——货架故障不影响可用性，只是降级为
+// 宿主发版时冻结的版本。apps 条目值为 null 的 remote-only App 无本地兜底：组件
+// 唯一来源是货架（宿主把 App 源码拆到独立仓的形态），失败即 reject，由窗口的
+// 错误面板呈现。
 //
 // 单实例保证：远程 App 产物内的裸模块导入（vue、@openos/ui…）由宿主页面
 // index.html 的 importmap 解析回宿主 deps 库集（web/tooling/deps.ts 产出），
@@ -64,7 +66,7 @@ function catalogOf(market: string): Promise<MarketCatalog | null> {
       .then(r => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then((doc: MarketCatalog) => (doc && doc.apps ? doc : null))
       .catch(err => {
-        console.warn(`[OpenOS] App 货架不可达，全部应用回落本地构建: ${err}`)
+        console.warn(`[OpenOS] App 货架不可达（有本地兜底的应用回落本地构建）: ${err}`)
         return null
       })
     catalogCache.set(market, p)
@@ -95,29 +97,35 @@ function joinURL(market: string, entry: string): string {
 }
 
 /**
- * 加载单个 App：货架条目兼容则动态 import 远程产物，否则回落本地 loader。
- * 返回 Promise<ESM 模块>（default 导出为组件定义），与 vite 本地 import() 形态
- * 一致，可直接作为 defineAsyncComponent 的 loader 使用。
+ * 加载单个 App：货架条目兼容则动态 import 远程产物，否则回落本地 loader
+ * （fallback 可选——remote-only App 无本地兜底，各失败分支直接 reject，由
+ * 窗口错误面板呈现）。返回 Promise<ESM 模块>（default 导出为组件定义），
+ * 与 vite 本地 import() 形态一致，可直接作为 defineAsyncComponent 的 loader 使用。
  */
 export async function loadApp(
   id: string,
   opts: RemoteAppsOptions,
-  fallback: () => Promise<any>,
+  fallback?: () => Promise<any>,
 ): Promise<any> {
+  const fail = (reason: string): Promise<any> => {
+    if (fallback) return fallback()
+    return Promise.reject(new Error(`[OpenOS] 货架应用 ${id} ${reason}（且无本地兜底）`))
+  }
   // 开发态（vite serve，宿主源码直引）没有 importmap：远程产物的裸导入
-  // （vue/@openos/*）无法解析，直接走本地 loader
-  if (import.meta.env?.DEV) return fallback()
+  // （vue/@openos/*）无法解析，有本地 loader 时直接走本地；remote-only
+  // （无 loader）仍走货架——仅适合宿主页面已提供 importmap 的开发形态
+  if (import.meta.env?.DEV && fallback) return fallback()
   const cat = await catalogOf(opts.market)
   const e = cat?.apps?.[id]
-  if (!e || !e.entry) return fallback()
+  if (!e || !e.entry) return fail('货架无此条目')
   if (e.minHostVersion && opts.hostVersion && compareVersions(opts.hostVersion, e.minHostVersion) < 0) {
-    console.info(`[OpenOS] 货架应用 ${id}@${e.version} 要求宿主 ≥ ${e.minHostVersion}（当前 ${opts.hostVersion}），使用本地构建`)
-    return fallback()
+    console.info(`[OpenOS] 货架应用 ${id}@${e.version} 要求宿主 ≥ ${e.minHostVersion}（当前 ${opts.hostVersion}），${fallback ? '使用本地构建' : '不加载'}`)
+    return fail(`要求宿主 ≥ ${e.minHostVersion}（当前 ${opts.hostVersion}）`)
   }
   try {
     return await import(/* @vite-ignore */ joinURL(opts.market, e.entry))
   } catch (err) {
-    console.warn(`[OpenOS] 货架应用 ${id}@${e.version} 加载失败，回落本地构建:`, err)
-    return fallback()
+    console.warn(`[OpenOS] 货架应用 ${id}@${e.version} 加载失败${fallback ? '，回落本地构建' : ''}:`, err)
+    return fail('产物加载失败')
   }
 }

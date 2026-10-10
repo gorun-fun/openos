@@ -44,12 +44,17 @@ import { registerDialog, type DialogDef } from './ui/dialogService'
 import { initLocale, setLocale, extendMessages, type Locale } from './i18n'
 
 export interface CreateOpenOSOptions {
-  /** 编译期注册的宿主应用组件（key = appId，值为懒加载 loader），与内置应用合并 */
-  apps?: Record<string, () => Promise<any>>
+  /**
+   * 编译期注册的宿主应用组件（key = appId），与内置应用合并。值两种形态：
+   * 懒加载 loader（本地源码组件），或 null（remote-only：组件唯一来源=货架，
+   * 须配 remoteApps；无本地兜底，货架不可达即加载失败——宿主把 App 源码拆到
+   * 独立仓时用，本地 dev 可按需只对部分 App 提供 loader 联调）。
+   */
+  apps?: Record<string, (() => Promise<any>) | null>
   /**
    * App 独立发布货架（可选，协议见 remote.ts）：声明后 apps 里每个 App 的组件
-   * 优先从货架加载最新版本（不经宿主发版即可更新），任何失败自动回落 apps 本地
-   * loader——apps 始终是完整兜底，remoteApps 只影响「组件从哪来」。货架条目仅对
+   * 优先从货架加载最新版本（不经宿主发版即可更新），失败自动回落 apps 本地
+   * loader；loader 为 null 的 remote-only 条目无兜底，失败即报错。货架条目仅对
    * apps 已注册的 appId 生效（应用的存在与授权仍由服务端 apps 表决定）。
    * 配套构建工具 web/tooling/（deps 库集 / host external+importmap / app 单文件
    * 产物 / catalog 生成），保证远程 App 与宿主共享同一份 Vue/pinia 单实例。
@@ -169,12 +174,18 @@ export function createOpenOS(opts: CreateOpenOSOptions = {}): VueApp | null {
   installAppNotifiers()
 
   // 1. 宿主应用组件与图标注册（remoteApps 存在时每个 loader 包一层货架优先逻辑，
-  //    失败/无条目/版本不兼容均回落本地 loader，见 remote.ts；无 remoteApps 行为不变）
+  //    失败/无条目/版本不兼容均回落本地 loader，见 remote.ts；无 remoteApps 行为
+  //    不变。loader 为 null 的 remote-only 条目：有 remoteApps 时注册纯货架加载器
+  //    （无兜底），否则视为注册错误跳过并告警）
   const localApps = opts.apps || {}
   for (const [id, loader] of Object.entries(localApps)) {
+    if (!loader && !opts.remoteApps) {
+      console.warn(`[OpenOS] apps.${id} 为 null（remote-only）但未声明 remoteApps，已忽略该注册`)
+      continue
+    }
     builtinComponents[id] = opts.remoteApps
-      ? () => loadApp(id, opts.remoteApps!, loader)
-      : loader
+      ? () => loadApp(id, opts.remoteApps!, loader || undefined)
+      : loader!
   }
   if (opts.chrome) Object.assign(appChrome, opts.chrome)
   if (opts.dialogs) {
