@@ -66,10 +66,36 @@ async function init() {
   //     标题（会话本体在服务端不丢）。注入服务端镜像——load 服务端优先（user_settings
   //     的 goder.index 键），无数据回落本地并经 save 迁移上云；save 双写（本地缓存
   //     + 400ms 防抖回写）。旧版 goder.js 未导出 setPersistence 时保持默认行为。
+  //     回写前先读服务端副本合并「外部代建条目」（服务端 host goder 任务 API 归组
+  //     写入的会话/项目）：防陈旧浏览器副本把代建会话冲回「未分组」——本地索引
+  //     没有该会话时 refreshConversations 会以未分组默认值补录并触发保存。
   if (typeof ui.setPersistence === 'function') {
     let saveTimer = 0
     let lastSynced = ''
     const SERVER_KEY = 'goder.index'
+    // 合并服务端代建条目：项目按 id 补缺；会话本地缺失 = 补回，本地是未分组
+    // 而服务端有明确分组 = 以服务端为准（其余字段保留本地较新值）。
+    const mergeServerIndex = (server: any, local: any) => {
+      if (!server || typeof server !== 'object' || !local || typeof local !== 'object') return local
+      const UNG = '__ungrouped'
+      const projects = Array.isArray(local.projects) ? [...local.projects] : []
+      const ids = new Set(projects.map((p: any) => p?.id))
+      for (const p of server.projects || []) {
+        if (p?.id && !ids.has(p.id)) projects.push(p)
+      }
+      const sessions: Record<string, any> = { ...(local.sessions || {}) }
+      for (const [sid, sv] of Object.entries(server.sessions || {}) as [string, any][]) {
+        const lv = sessions[sid]
+        if (!lv) { sessions[sid] = sv; continue }
+        if (lv.projectId === UNG && sv?.projectId && sv.projectId !== UNG) {
+          sessions[sid] = { ...sv,
+            lastResponseId: lv.lastResponseId ?? sv.lastResponseId,
+            updatedAt: lv.updatedAt ?? sv.updatedAt,
+            lastSeenResponseId: lv.lastSeenResponseId ?? sv.lastSeenResponseId }
+        }
+      }
+      return { ...local, projects, sessions }
+    }
     ui.setPersistence({
       async load(sc: string) {
         let local: string | null = null
@@ -91,9 +117,16 @@ async function init() {
         try { localStorage.setItem(`goder:${_sc}:index`, v) } catch { /* ignore */ }
         if (v === lastSynced) return
         clearTimeout(saveTimer)
-        saveTimer = window.setTimeout(() => {
-          lastSynced = v
-          api.put('/api/settings', { key: SERVER_KEY, value: v }).catch(() => { lastSynced = '' })
+        saveTimer = window.setTimeout(async () => {
+          let out: any = idx
+          try {
+            const s = await api.get<Record<string, string>>('/api/settings')
+            if (s[SERVER_KEY] !== undefined) out = mergeServerIndex(JSON.parse(s[SERVER_KEY]), out)
+          } catch { /* 离线：仅本地 */ }
+          const outV = JSON.stringify(out)
+          if (outV === lastSynced) return
+          lastSynced = outV
+          api.put('/api/settings', { key: SERVER_KEY, value: outV }).catch(() => { lastSynced = '' })
         }, 400)
       },
     })
@@ -159,6 +192,23 @@ async function init() {
   shell.setAttribute('panels', 'sessions,chat,sidebar,console')
   shell.style.cssText = 'width:100%;height:100%'
   hostEl.value!.append(shell)
+
+  // 4.5 会话深链：宿主 windows.open('goder', { session: <sid> })（如自动修复 App 的
+  //     「在 Goder 中查看会话」）。会话列表随 scope 启动刷新，服务端刚代建的会话可能
+  //     要等一轮 5s tick——轮询最长 30s 后选中。
+  const wantSid = String(props.win?.props?.session || '')
+  if (wantSid && typeof ui.getScope === 'function') {
+    void (async () => {
+      for (let i = 0; i < 60; i++) {
+        const sc: any = ui.getScope(scope)
+        if (sc?.conversations?.has?.(wantSid)) {
+          sc.selectSession(wantSid)
+          return
+        }
+        await new Promise((rs) => setTimeout(rs, 500))
+      }
+    })()
+  }
 
   // 5. 移动形态抽屉化：goder 左栏（shadow 内 <div class="left">，inline width 248px）
   //    收为汉堡唤出的抽屉。注入的 CSS 带媒体查询（桌面零生效）；类一次加好，

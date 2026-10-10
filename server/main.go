@@ -457,6 +457,12 @@ func main() {
 	// AI 每用户供应商（handler 与 REST 版共用，见 ai 包）
 	mux.HandleFunc("GET /api/host/ai/user-providers", hostOnly(aiSvc.GetUserProviders))
 	mux.HandleFunc("PUT /api/host/ai/user-providers", hostOnly(aiSvc.SaveUserProviders))
+	// goder 无头任务（宿主业务系统代用户创建会话并后台执行，见 internal/goder/hosttasks.go；
+	// grf-os 的自动修复引擎经此把修复会话落到操作者 goder 的「自动修复」分组下）
+	goderHostTasks := goder.NewHostTasks(goderMgr, db)
+	mux.HandleFunc("POST /api/host/goder/tasks", hostOnly(goderHostTasks.Create))
+	mux.HandleFunc("GET /api/host/goder/tasks/{uid}/{id}", hostOnly(goderHostTasks.Get))
+	mux.HandleFunc("POST /api/host/goder/tasks/{uid}/{id}/cancel", hostOnly(goderHostTasks.Cancel))
 
 	// ---- WebSocket 事件总线（query 鉴权：优先 30s 一次性短票 ?ticket=，兼容 ?token=；
 	// 升级时全量校验用户态，与 REST 同一套判定） ----
