@@ -173,14 +173,12 @@ export const APP_ICONS: Record<string, IconDef> = {
     })(),
   },
   goder: { src: '/icons/goder.svg', label: 'goder' },
-  // 应用商店：蓝色底 + 白色圆角面板 + 下载箭头（App Store 语义）
+  // 应用商店：蓝色渐变底 + 白色字母 A（圆角笔画）
   store: {
     label: '应用商店',
     svg: shell('mk', '#4fa8ff', '#1e6fe8', `
-      <rect x="17" y="17" width="30" height="30" rx="8" fill="#fff"/>
-      <path d="M32 23.5 V33.5" stroke="#2f7ce8" stroke-width="4.2" stroke-linecap="round"/>
-      <path d="M26.5 28.5 L32 34 L37.5 28.5" fill="none" stroke="#2f7ce8" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"/>
-      <path d="M22.5 41.5 H41.5" stroke="#2f7ce8" stroke-width="4.2" stroke-linecap="round"/>`),
+      <path d="M22 45 L32 19 L42 45" fill="none" stroke="#fff" stroke-width="5.6" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M25.8 36.5 H38.2" stroke="#fff" stroke-width="5.6" stroke-linecap="round"/>`),
   },
   // 反馈：蓝紫渐变底 + 白色对话气泡（气泡内三点 + 右上星形，iMessage 语义）
   feedback: {
