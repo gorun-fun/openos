@@ -251,3 +251,17 @@ button { font-family: inherit; }
     scroll-behavior: auto !important;
   }
 }
+
+/* ---- 能力锚点高亮（goder 能力暴露层 CAP）----
+   os_app_ui 可视化操作：应用模板用 data-os-cap="<name>" 标记可定位元素，
+   AI 引导时该元素滚动入视野 + 描边脉冲 2.6s（capabilities.ts tryHighlight） */
+.os-cap-hl {
+  outline: 3px solid var(--os-accent);
+  outline-offset: 3px;
+  border-radius: 6px;
+  animation: os-cap-pulse 1.3s ease-in-out 2;
+}
+@keyframes os-cap-pulse {
+  0%, 100% { outline-color: var(--os-accent); }
+  50%      { outline-color: transparent; }
+}

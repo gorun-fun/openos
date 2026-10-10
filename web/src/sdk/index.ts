@@ -30,6 +30,10 @@ import { notify } from '../stores/notifications'
 import { useCalendar, todayStr, REMIND_OPTIONS, type CalMark, type RemindOffset } from '../stores/calendar'
 import { registerDialog, unregisterDialog, openDialog, dialogRegistry, type DialogDef } from '../ui/dialogService'
 import { registerAgentTool, unregisterAgentTool, agentTools, type AgentToolDef } from '../desktop/agentTools'
+import {
+  registerCapabilities, unregisterCapabilities, listCapabilities,
+  type AppCapabilities, type CapDef, type CapViewDef,
+} from '../desktop/capabilities'
 import { launch, resolveLaunch, launchOf } from '../ui/launch'
 import { can } from '../ui/perms'
 import { openPath } from '../apps/openWith'
@@ -51,6 +55,13 @@ export interface RegisterOptions {
    * 无需打开本应用主窗口（弹窗组件认 params/close/cancel 三个 props）。
    */
   dialogs?: Record<string, DialogDef>
+  /**
+   * 能力清单（能力暴露层 CAP）：声明本应用暴露给 goder AI 的能力——
+   * queries（只读数据查询，无窗口执行）/ actions（业务操作）/ views（可视化
+   * 入口 + data-os-cap 锚点高亮）。每个能力实现三选一：run 回调 / http 声明 /
+   * window 开窗。AI 经 os_caps 发现、os_app_query / os_app_call / os_app_ui 执行。
+   */
+  capabilities?: Omit<AppCapabilities, 'appId'>
   component: any // Vue 组件（defineComponent 产物或含 render 的对象）
 }
 
@@ -63,6 +74,7 @@ export const OpenOS = {
     if (opts.dialogs) {
       for (const [name, def] of Object.entries(opts.dialogs)) registerDialog(`${id}:${name}`, def)
     }
+    if (opts.capabilities) registerCapabilities({ appId: id, ...opts.capabilities }, 'runtime')
     const apps = useApps()
     if (!apps.byId(id)) {
       apps.apps.push({
@@ -76,6 +88,7 @@ export const OpenOS = {
   unregisterApp(id: string) {
     delete runtimeComponents[id]
     delete appChrome[id]
+    unregisterCapabilities(id)
     for (const key of [...dialogRegistry.keys()]) {
       if (key.startsWith(id + ':')) unregisterDialog(key)
     }
@@ -168,6 +181,19 @@ export const OpenOS = {
   unregisterAgentTool,
   /** 当前在线的自定义 AI 工具表（诊断用）。 */
   agentTools,
+  /**
+   * 注册应用能力清单（能力暴露层 CAP）：goder AI 经 os_caps 发现、os_app_query/
+   * os_app_call/os_app_ui 执行。商店 bundle 应用在 setup 里注册：
+   *   OpenOS.registerCapabilities({ appId:'chat', queries:[{ name:'unread',
+   *     title:'未读消息', run: () => … }], views:[{ name:'room', props:{…} }] })
+   * 能力实现三选一：run（fn 回调，桌面壳执行无窗口）/ http（声明式 REST）/
+   * window（开窗到视图）；可视化锚点 = 模板里的 data-os-cap="<name>" 标记。
+   */
+  registerCapabilities,
+  /** 注销应用能力清单（应用卸载/反注册）。 */
+  unregisterCapabilities,
+  /** 当前全量能力清单（诊断用；与 os_caps 同源）。 */
+  capabilities: listCapabilities,
   /** 基础 UI 组件库。 */
   ui,
   /** API 客户端（自动携带登录态）。 */

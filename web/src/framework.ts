@@ -38,6 +38,7 @@ import { installMenuGuard } from './ui/menu'
 import { installKeys } from './ui/keys'
 import { installPermDirective } from './ui/perms'
 import { installAgentTools, type AgentToolDef } from './desktop/agentTools'
+import { installCapabilities, type AppCapabilities } from './desktop/capabilities'
 import { installTooltip } from './ui/tooltip'
 import { installAppNotifiers } from './desktop/appNotifier'
 import { registerDialog, type DialogDef } from './ui/dialogService'
@@ -123,6 +124,23 @@ export interface CreateOpenOSOptions {
    * OpenOS.registerAgentTool 动态注册。
    */
   agentTools?: AgentToolDef[]
+  /**
+   * 向 goder AI 声明应用能力清单（能力暴露层 CAP，键 = appId）：queries（只读
+   * 数据查询，无需打开应用即可被 AI 执行）/ actions（业务操作）/ views（可视化
+   * 操作入口 + data-os-cap 锚点高亮）。每个能力三选一提供实现：
+   *   run    fn 回调，桌面壳执行（可调宿主自身 API，如 serviceCall）
+   *   http   声明式 REST——相对 /api/… 走 OpenOS 登录态、宿主同源后端配
+   *          auth:true（数据层零代码暴露，grf-hotel「查空房」类查询首选）
+   *   window 打开应用窗口到对应视图（需要 UI 语境的操作）
+   *   createOpenOS({
+   *     capabilities: { rooms: { queries: [{ name:'vacant', title:'查询今日空房',
+   *       http: { url:'/api/rooms/vacant' } }], views: [{ name:'grid',
+   *       title:'房态盘', props:{view:'grid'}, anchor:'room-grid' }] } },
+   *   })
+   * AI 经 os_caps 发现、os_app_query / os_app_call / os_app_ui 执行；未知字段
+   * 忽略（旧版 OpenOS 声明不生效但无副作用，双向兼容）。
+   */
+  capabilities?: Record<string, Omit<AppCapabilities, 'appId'>>
 }
 
 /** 应用主题：accent 强调色（派生令牌 color-mix 现算）+ CSS 变量级 tokens 覆盖。 */
@@ -203,6 +221,8 @@ export function createOpenOS(opts: CreateOpenOSOptions = {}): VueApp | null {
   shell.overlay = opts.overlay || null
   // 宿主静态声明的 AI 桌面工具（goder 扩展点，P6）
   installAgentTools(opts.agentTools)
+  // 宿主能力清单声明（能力暴露层 CAP：AI 经 os_caps 发现、os_app_* 执行）
+  installCapabilities(opts.capabilities)
   if (opts.widgets) {
     for (const [type, def] of Object.entries(opts.widgets)) {
       registerWidget({ type, ...def })
@@ -273,6 +293,9 @@ export { shell } from './shell'
 export type { ShellBrand, ShellLogin, AppMenuItem } from './shell'
 export { registerWidget, widgetDefs, widgetDef } from './desktop/widgetRegistry'
 export type { WidgetDef } from './desktop/widgetRegistry'
+// 能力暴露层（CAP）：宿主/应用向 goder AI 声明能力清单（os_caps / os_app_*）
+export { registerCapabilities, unregisterCapabilities, listCapabilities } from './desktop/capabilities'
+export type { AppCapabilities, CapDef, CapViewDef, CapHTTPSpec, CapWindowSpec, CapOrigin, CapListing } from './desktop/capabilities'
 export { registerIcons } from './desktop/icons'
 export type { IconDef } from './desktop/icons'
 // i18n：宿主从 '@openos/framework' 直接导入（词条注入/切换/取词）

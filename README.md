@@ -232,12 +232,13 @@ gh server（每用户一个，goder-serve 子进程）
   └─ 自动发现 grf-home/plugins/openos（wrapper 脚本，OpenOS 落盘）
        └─ exec openos-server mcp-shim <endpoint> <token> <user>   ← stdio MCP 插件
             ↕ HTTP JSON-RPC（127.0.0.1:7712/mcp，Bearer 令牌 + X-OS-User）
-openos-server 进程内 osmcp 包（31 个 os_* 工具，gh 侧全名 mcp__openos__os_*）
+openos-server 进程内 osmcp 包（35 个 os_* 工具，gh 侧全名 mcp__openos__os_*）
   ├─ 服务端直答：应用列表 / 用户设置 / VFS 文件（复用 vfs 权限与配额）/ 总线发布
   │              / 文件分享 / 商店安装（权限点门控）/ 用户目录（权限点门控）
   └─ 前端桥：PublishTo(user,"sys:agent") ↓ 浏览器 agentBridge 执行
               bus.remote("agent:resp") ↑ 回传结果（15s 超时兜底）
-              桌面/便签/日历/Dock + 宿主自定义工具（见「扩展点」）
+              桌面/便签/日历/Dock + 能力暴露层（os_caps/os_app_*，见「能力暴露层」）
+              + 宿主自定义工具（见「扩展点」）
 ```
 
 **工具清单**（gh 把描述拼进系统提示词，AI 自主选用）：
@@ -249,13 +250,41 @@ openos-server 进程内 osmcp 包（31 个 os_* 工具，gh 侧全名 mcp__openo
 | 数据 | `os_notes_do`（便签增删改查）、`os_calendar_do`（日程 list/add/remove）、`os_dock_do`（Dock 固定/移除/重排）、`os_settings_get/put`、`os_fs_list/read/write/mkdir/delete/search/usage`（VFS，限定 `/home/<用户>`、≤8MB、配额 100MB，写入广播 `fs:changed` 自动刷新文件应用） |
 | 分享 | `os_share_list/create/revoke`（跨用户文件分享链接：默认 7 天上限 30 天，owner 校验/撤销/审计与 REST 完全一致） |
 | 商店 | `os_market_list/install/uninstall`（目录/安装/卸载，需 `market.manage` 权限——首个非本人维度的工具，按功能权限点门控） |
-| 通用通道 | `os_bus_publish`（向自己桌面发布任意总线主题，可驱动声明式应用的 `dataSource.topic`）、`os_app_tools`/`os_app_tool`（宿主自定义工具的发现与执行，见下） |
+| 通用通道 | `os_bus_publish`（向自己桌面发布任意总线主题，可驱动声明式应用的 `dataSource.topic`）、`os_app_tools`/`os_app_tool`（宿主自定义工具的发现与执行，已并入能力暴露层 `origin:legacy`，保留兼容） |
+| 能力暴露层 | `os_caps`（全量能力清单：queries/actions/views + 参数 Schema + 各应用打开窗口数）、`os_app_query`（只读数据查询，**不打开应用直接取数**）、`os_app_call`（执行应用的具体功能，window 模式自动开窗）、`os_app_ui`（可视化操作：打开到视图 + 锚点高亮 + 分步引导，见下「能力暴露层」） |
 
 **宿主自定义工具扩展点（P6 2026-10）**：宿主与业务应用可把自己的功能暴露给 AI——
 
 - 静态声明：`createOpenOS({ agentTools: [{ appId: 'rooms', name: 'vacant', description: '查今日空房', params: <JSON Schema>, run: (args) => … }] })`；
 - 运行期注册：`OpenOS.registerAgentTool(def)` / `unregisterAgentTool`（应用挂载注册、卸载反注册）；
 - 命名空间 `app_<appId>_<name>` 防跨应用冲突；`tools/list` 会把在线工具表动态合并进清单（2s 短超时尽力而为），`os_app_tools` 随时可查；执行走 `os_app_tool({tool, args})`——run 在桌面壳执行（需要窗口的操作由工具自行 `OpenOS.open`），返回值回传给 AI。
+
+**能力暴露层（CAP，2026-10）**：P6 自定义工具的演进——把「应用暴露给 AI 的能力」收敛为**一份标准清单协议**，任何应用（内置 / 宿主 / 商店 bundle / 声明式 schema / 网页应用）按同一协议声明，AI 经 4 个通用工具发现与执行，服务端不再为新应用加工具。实现见 `web/src/desktop/capabilities.ts`。
+
+- **能力三分类**：`queries`（只读数据查询，**无需打开应用即可执行**——fn 直读 store 或 http 声明式取数）、`actions`（业务操作）、`views`（可视化操作入口：打开到指定视图 + `data-os-cap` 锚点高亮 + `steps` 分步引导文案，AI 可转述给用户）。
+- **执行三模式**（每个能力三选一，优先级 run > http > window）：`run` fn 回调在桌面壳执行（应用窗口无需在场）；`http` 声明式 REST——GET/DELETE 时 args 映射 query 参数、POST/PUT 作 JSON body，相对 `/api/…` 走 OpenOS 登录态、绝对地址裸 fetch（`auth:true` 强制携带，宿主同源后端用）；`window` 打开/聚焦窗口并携带 props（应用按 props 路由视图）。
+- **四层来源同一协议**：L1 内置应用随代码注册（calendar/notes 为首批示范）；L2 宿主声明 `createOpenOS({ capabilities: { rooms: {…} } })`——**grf-hotel/grf-os 零侵入接入，业务数据层用 http 模式零代码暴露**；L3 动态应用运行期注册（`OpenOS.registerCapabilities` / `registerApp({ capabilities })`，商店 bundle 应用经 `window.OpenOS`）；schema 声明式应用在 config JSON 顶层 `agentCaps` 键声明（纯 JSON，仅 http/window 模式，管理员配置即暴露）。旧 registerAgentTool 以 `origin:'legacy'` 并入同一执行管线。
+- **宿主声明示例**（grf-hotel「查空房 + 打开房态盘」）：
+
+  ```ts
+  createOpenOS({
+    capabilities: {
+      rooms: {
+        label: '客房',
+        queries: [{ name: 'vacant', title: '查询今日空房', description: '按日期查空闲房型与数量',
+          http: { url: '/api/rooms/vacant' } }],
+        actions: [{ name: 'block', title: '锁定房型', run: (args) => hotelApi.post('/rooms/block', args) }],
+        views: [{ name: 'grid', title: '房态盘', props: { view: 'grid' }, anchor: 'room-grid',
+          steps: ['左侧选择楼层', '点击房型卡片进入详情'] }],
+      },
+    },
+  })
+  ```
+
+- **可视化锚点约定**：应用模板给可定位元素打 `data-os-cap="<name>"`（如房态盘容器），`os_app_ui({appId, view:'grid'})` 打开后自动滚动入视野并描边脉冲 2.6s；AI 也可直接传 anchor（锚点名或窗口内 CSS 选择器）高亮已打开窗口的元素。iframe 网页应用无法高亮内部元素（聚焦窗口并提示）。
+- **权限与兼容**：能力可声明 `perm` 功能权限点（无权限不出清单、拒绝执行——UX 门控）；**鉴权权威恒在数据所有方**（openos REST / 宿主后端），桥只是调用通道。清单未知字段一律忽略（旧版 OpenOS 收到新声明无副作用，双向前向兼容）；前端往返受 15s 桥超时约束，长任务应在 run 内自行异步化（先回受理、结果走 `os_notify`/总线）。
+- **AI 使用范式**：`os_caps` 查清单 → 查数 `os_app_query({appId:'rooms', query:'vacant'})` → 操控 `os_app_call({appId:'rooms', capability:'block', args:{…}})` → 引导用户 `os_app_ui({appId:'rooms', view:'grid'})`。
+
 
 **安全边界**：MCP 端点仅监听回环地址 + Bearer 令牌（`<data>/goder/osmcp.json`，0600 持久化，**按用户分发、令牌↔X-OS-User 成对校验**）；wrapper 0700；工具执行前校验用户存在且未禁用；**工具只作用于发起用户本人**（`os_users_list`/`os_market_*` 为只读/管理维度，按功能权限点门控——admin 恒持，细分授权经角色权限矩阵下发）；写类工具入审计日志（`goder.tool`）。
 

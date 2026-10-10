@@ -18,6 +18,10 @@ import { useCalendar } from '../stores/calendar'
 import { useDock } from '../stores/dock'
 import { openPath } from '../apps/openWith'
 import { agentTools, runAgentTool } from './agentTools'
+import {
+  installBuiltinCapabilities, listCapabilities, runCapability,
+  openAppView, findView,
+} from './capabilities'
 import type { Note } from '../stores/notes'
 
 interface AgentReq {
@@ -222,10 +226,57 @@ const ACTIONS: Record<string, Action> = {
       default: throw new Error(`未知 Dock 动作：${action}（list/pin/unpin/reorder）`)
     }
   },
+
+  // ---- 能力暴露层（CAP，见 capabilities.ts）：通用清单 + 执行 + 可视化 ----
+
+  /** 全量能力清单（os_caps）：四层来源合并，按权限过滤。 */
+  caps_list({ appId }) {
+    const rows = listCapabilities()
+    return { apps: appId ? rows.filter((r) => r.appId === String(appId)) : rows }
+  },
+
+  /** 执行应用业务操作（os_app_call）：fn/http 无窗口执行，仅 window 模式自动开窗。 */
+  async cap_call({ appId, capability, args }) {
+    if (!appId || !capability) throw new Error('缺少 appId/capability')
+    const data = await runCapability(String(appId), 'action', String(capability), args || {})
+    return { appId: String(appId), capability: String(capability), result: data ?? null }
+  },
+
+  /** 只读数据查询（os_app_query）：不打开应用直接读数。 */
+  async cap_query({ appId, query, args }) {
+    if (!appId || !query) throw new Error('缺少 appId/query')
+    const data = await runCapability(String(appId), 'query', String(query), args || {})
+    return { appId: String(appId), query: String(query), result: data ?? null }
+  },
+
+  /** 可视化操作（os_app_ui）：打开/聚焦应用到视图并高亮锚点；view 缺省时仅开窗。 */
+  async app_ui({ appId, view, props, anchor, title }) {
+    if (!appId) throw new Error('缺少 appId')
+    const v = view ? findView(String(appId), String(view)) : null
+    if (view && !v) {
+      throw new Error(`视图不存在：${appId}.${view}（可用 views 见 os_caps；或省略 view 直接传 props/anchor）`)
+    }
+    const spec = {
+      props: props != null ? props : v?.props,
+      anchor: anchor != null ? String(anchor) : v?.anchor,
+      title: title != null ? String(title) : v?.title,
+    }
+    const r = await openAppView(String(appId), spec)
+    return {
+      windowId: r.windowId,
+      highlighted: r.highlighted,
+      anchor: spec.anchor || null,
+      steps: v?.steps || null,
+      note: r.highlighted === false && spec.anchor
+        ? '窗口已打开，但锚点未命中（iframe 网页应用无法高亮内部元素；内置/bundle 应用需在模板标记 data-os-cap）'
+        : undefined,
+    }
+  },
 }
 
 /** 挂载前端桥（Desktop onMounted 调用），返回卸载函数。 */
 export function installAgentBridge(): () => void {
+  installBuiltinCapabilities() // 内置应用示范能力（calendar/notes，幂等）
   return bus.on('sys:agent', (p: AgentReq) => {
     const req = p || {}
     if (!req.id || !req.action) return

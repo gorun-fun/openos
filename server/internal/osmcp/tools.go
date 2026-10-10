@@ -26,6 +26,127 @@ func (s *Server) registerTools() {
 	s.registerFSTools()
 	s.registerBridgeTools()
 	s.registerP6Tools()
+	s.registerCAPTools()
+}
+
+// ---- 能力暴露层（CAP）：应用能力的通用发现与执行 ----
+//
+// 前端 capabilities.ts 维护能力清单（四层来源：内置应用 / 宿主 createOpenOS
+// 声明 / 运行期注册 / schema 应用 config.agentCaps，旧 registerAgentTool 以
+// origin:legacy 并入），这里只提供四个与具体应用解耦的通用工具：
+//
+//	os_caps       查清单（queries/actions/views + 参数 Schema + 各应用打开窗口数）
+//	os_app_query  只读数据查询——不打开应用直接取数（目标：无窗口读数）
+//	os_app_call   业务操作——fn/http 模式无窗口执行；仅 window 模式自动开窗
+//	os_app_ui     可视化操作——打开应用到视图 + data-os-cap 锚点高亮 + 步骤引导
+//
+// 新应用接入不再需要服务端加工具：声明清单即可被 AI 发现与调用（宿主
+// grf-hotel/grf-os 在 createOpenOS 声明 capabilities 即无缝接入，含数据层）。
+func (s *Server) registerCAPTools() {
+	s.add(Tool{
+		Name:     "os_caps",
+		ReadOnly: true,
+		Description: "列出全部应用暴露给 AI 的能力清单（通用能力协议，四层来源合并）：每个应用的 queries（只读数据查询，无需打开应用）/ actions（业务操作，含参数 Schema）/ views（可视化操作入口，可带分步引导）。操作任何应用（尤其第三方/宿主业务应用）前先查本清单；执行分别用 os_app_query / os_app_call / os_app_ui。",
+		Schema: obj(map[string]any{
+			"appId": pstr("只看指定应用（可选，缺省全部）"),
+		}),
+		Handler: func(c *ToolCall) ([]Content, bool) {
+			var a struct {
+				AppID string `json:"appId"`
+			}
+			_ = decodeArgs(c, &a)
+			args := map[string]any{}
+			if a.AppID != "" {
+				args["appId"] = a.AppID
+			}
+			return s.bridgeCall(c, "caps_list", args)
+		},
+	})
+
+	s.add(Tool{
+		Name:     "os_app_query",
+		ReadOnly: true,
+		Description: "执行一个应用的只读数据查询（os_caps 清单里的 queries）：不打开应用窗口、直接读数据（如日历日程、便签、宿主业务数据——酒店空房/订单等）。args 按清单 params 提供。",
+		Schema: obj(map[string]any{
+			"appId": pstr("应用 id（os_caps 的 apps[].appId）"),
+			"query": pstr("查询名（os_caps 的 queries[].name）"),
+			"args":  map[string]any{"type": "object", "description": "查询参数（可选，按清单 params）"},
+		}, "appId", "query"),
+		Handler: func(c *ToolCall) ([]Content, bool) {
+			var a struct {
+				AppID string         `json:"appId"`
+				Query string         `json:"query"`
+				Args  map[string]any `json:"args"`
+			}
+			if err := decodeArgs(c, &a); err != nil || a.AppID == "" || a.Query == "" {
+				return textErr("参数错误：需要 appId 与 query")
+			}
+			return s.bridgeCall(c, "cap_query", map[string]any{
+				"appId": a.AppID, "query": a.Query, "args": a.Args,
+			})
+		},
+	})
+
+	s.add(Tool{
+		Name:     "os_app_call",
+		Description: "执行一个应用的一个具体业务功能（os_caps 清单里的 actions）：fn/http 模式在桌面壳无窗口执行（用户不打开应用也能完成）；仅 window 模式（需应用 UI 语境）会自动打开应用窗口到对应视图。",
+		Schema: obj(map[string]any{
+			"appId":      pstr("应用 id"),
+			"capability": pstr("操作名（os_caps 的 actions[].name；legacy registerAgentTool 工具也可经此调用）"),
+			"args":       map[string]any{"type": "object", "description": "操作参数（按清单 params 提供）"},
+		}, "appId", "capability"),
+		Handler: func(c *ToolCall) ([]Content, bool) {
+			var a struct {
+				AppID string         `json:"appId"`
+				Cap   string         `json:"capability"`
+				Args  map[string]any `json:"args"`
+			}
+			if err := decodeArgs(c, &a); err != nil || a.AppID == "" || a.Cap == "" {
+				return textErr("参数错误：需要 appId 与 capability")
+			}
+			return s.bridgeCall(c, "cap_call", map[string]any{
+				"appId": a.AppID, "capability": a.Cap, "args": a.Args,
+			})
+		},
+	})
+
+	s.add(Tool{
+		Name:     "os_app_ui",
+		Description: "以可视化形式操作应用：打开（或聚焦）应用到指定视图并高亮目标元素，把操作入口直接呈现给用户。view 取 os_caps 的 views[].name（steps 字段为分步引导文案，可转述给用户）；也可省略 view 直接传 anchor（data-os-cap 锚点名或窗口内 CSS 选择器）高亮已打开窗口中的元素。iframe 网页应用无法高亮内部元素（会聚焦窗口并提示）。",
+		Schema: obj(map[string]any{
+			"appId":  pstr("应用 id"),
+			"view":   pstr("视图名（os_caps 的 views[].name，可选）"),
+			"props":  map[string]any{"type": "object", "description": "打开参数（可选，view 未声明 props 时直传；应用按 props 路由视图，如 {\"path\":\"/home/<用户>/文档\"}）"},
+			"anchor": pstr("高亮锚点（可选：data-os-cap 名或 CSS 选择器；缺省用 view 声明的 anchor）"),
+			"title":  pstr("窗口标题（可选）"),
+		}, "appId"),
+		Handler: func(c *ToolCall) ([]Content, bool) {
+			var a struct {
+				AppID  string          `json:"appId"`
+				View   string          `json:"view"`
+				Props  json.RawMessage `json:"props"`
+				Anchor string          `json:"anchor"`
+				Title  string          `json:"title"`
+			}
+			if err := decodeArgs(c, &a); err != nil || a.AppID == "" {
+				return textErr("参数错误：需要 appId")
+			}
+			args := map[string]any{"appId": a.AppID}
+			if a.View != "" {
+				args["view"] = a.View
+			}
+			if len(a.Props) > 0 {
+				args["props"] = a.Props
+			}
+			if a.Anchor != "" {
+				args["anchor"] = a.Anchor
+			}
+			if a.Title != "" {
+				args["title"] = a.Title
+			}
+			return s.bridgeCall(c, "app_ui", args)
+		},
+	})
 }
 
 // ---- P6 扩展（2026-10）：文件分享 / 商店 / 用户目录 / 宿主自定义工具 ----
@@ -174,7 +295,7 @@ func (s *Server) registerP6Tools() {
 	s.add(Tool{
 		Name:        "os_app_tools",
 		ReadOnly:    true,
-		Description: "列出当前桌面上注册的宿主/应用自定义 AI 工具（app_<appId>_<name> 命名空间，含各工具的参数 Schema）。宿主业务功能（如查空房、查订单）经此暴露；无则返回空表。",
+		Description: "列出当前桌面上注册的宿主/应用自定义 AI 工具（app_<appId>_<name> 命名空间，含各工具的参数 Schema）。宿主业务功能（如查空房、查订单）经此暴露；无则返回空表。已由通用能力协议收录（os_caps 的 origin:legacy 条目，os_app_call 亦可执行），本工具保留兼容。",
 		Schema:      obj(nil),
 		Handler: func(c *ToolCall) ([]Content, bool) {
 			return s.bridgeCall(c, "tools_list", nil)
@@ -293,7 +414,7 @@ func (s *Server) registerInfoTools() {
 	s.add(Tool{
 		Name:        "os_apps_list",
 		ReadOnly:    true,
-		Description: "列出当前用户可打开的全部应用（id/名称/分类）。打开窗口用 os_window_open，appId 取本列表的 id；内置应用如 calculator（计算器）、terminal（终端）、files（文件）、docs（文档）、sheets（表格）、slides（幻灯片）、pdf、notes（便签）、settings（设置）、goder（AI 工作台）。",
+		Description: "列出当前用户可打开的全部应用（id/名称/分类）。打开窗口用 os_window_open，appId 取本列表的 id；内置应用如 calculator（计算器）、terminal（终端）、files（文件）、docs（文档）、sheets（表格）、slides（幻灯片）、pdf、notes（便签）、settings（设置）、goder（AI 工作台）。各应用暴露给 AI 的细粒度能力（查询/操作/可视化入口）见 os_caps。",
 		Schema:      obj(nil),
 		Handler: func(c *ToolCall) ([]Content, bool) {
 			apps, err := s.deps.DB.ListAppsForRole(c.Role)

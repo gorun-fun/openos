@@ -15,6 +15,8 @@ import (
 
 	"openos/server/internal/bus"
 	"openos/server/internal/goder"
+
+	"github.com/gorilla/websocket"
 	"openos/server/internal/store"
 	"openos/server/internal/vfs"
 )
@@ -106,8 +108,8 @@ func TestToolsList(t *testing.T) {
 	if err := json.Unmarshal(out.Result, &res); err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Tools) != 31 { // 20 内置 + P6 11（share×3/market×3/users/app_tools/app_tool/calendar/dock）
-		t.Fatalf("应有 20 个工具，got %d", len(res.Tools))
+	if len(res.Tools) != 35 { // 20 内置 + P6 11（share×3/market×3/users/app_tools/app_tool/calendar/dock）+ CAP 4（caps/app_call/app_query/app_ui）
+		t.Fatalf("应有 35 个工具，got %d", len(res.Tools))
 	}
 	want := map[string]bool{"os_info": false, "os_apps_list": false, "os_fs_write": false,
 		"os_window_open": false, "os_desktop_state": false, "os_notes_do": false, "os_bus_publish": false}
@@ -256,6 +258,84 @@ func TestBridgeRoundTrip(t *testing.T) {
 	if r.err != nil || r.data != `{"x":1}` {
 		t.Fatalf("应答数据不符: %+v", r)
 	}
+}
+
+// TestCAPToolsBridge — 能力暴露层四工具的端到端桥往返：真实 WebSocket 模拟前端
+// （订阅 sys:agent、按动作应答 agent:resp），验证工具参数到桥动作/args 的接线。
+func TestCAPToolsBridge(t *testing.T) {
+	deps, _, hub := newTestDeps(t)
+	b := newBridge(deps.Hub)
+	s := newServer(deps, tokenAuth(testToken), b)
+	// 生产由 Manager 挂 hub.Handle("agent:resp") → b.onResp，测试同款接线
+	hub.Handle("agent:resp", func(env bus.Envelope, _ func(string, any)) { b.onResp(env) })
+	defer hub.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hub.ServeWS(w, r, "alice", "user", "tok")
+	}))
+	defer srv.Close()
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"action":"sub","topics":["sys:agent"]}`)); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var env struct {
+				Topic   string
+				Payload json.RawMessage
+			}
+			if json.Unmarshal(data, &env) != nil || env.Topic != "sys:agent" {
+				continue
+			}
+			var req struct {
+				ID     string
+				Action string
+				Args   json.RawMessage
+			}
+			if json.Unmarshal(env.Payload, &req) != nil {
+				continue
+			}
+			var out any
+			switch req.Action {
+			case "caps_list":
+				out = map[string]any{"apps": []any{map[string]any{"appId": "rooms", "queries": []any{"vacant"}}}}
+			case "cap_query":
+				out = map[string]any{"result": []any{map[string]any{"room": "301"}}}
+			case "cap_call":
+				out = map[string]any{"result": "blocked"}
+			case "app_ui":
+				out = map[string]any{"windowId": "w1", "highlighted": true}
+			default:
+				out = map[string]any{"echo": req.Action}
+			}
+			resp, _ := json.Marshal(map[string]any{"action": "pub", "topic": "agent:resp",
+				"payload": map[string]any{"id": req.ID, "ok": true, "data": out}})
+			_ = conn.WriteMessage(websocket.TextMessage, resp)
+		}
+	}()
+
+	assert := func(tool, args, want string) {
+		t.Helper()
+		out, _ := rpc(t, s, "alice", "tools/call", `{"name":"`+tool+`","arguments":`+args+`}`)
+		if out.Error != nil {
+			t.Fatalf("%s 失败: %+v", tool, out.Error)
+		}
+		if !strings.Contains(string(out.Result), want) {
+			t.Fatalf("%s 应答应含 %q: %s", tool, want, out.Result)
+		}
+	}
+	assert("os_caps", `{}`, `rooms`)
+	assert("os_app_query", `{"appId":"rooms","query":"vacant","args":{"date":"2026-10-11"}}`, `301`)
+	assert("os_app_call", `{"appId":"rooms","capability":"block","args":{"room":"301"}}`, `blocked`)
+	assert("os_app_ui", `{"appId":"rooms","view":"grid","anchor":"room-grid"}`, `highlighted`)
 }
 
 func TestBridgeErrorAndTimeout(t *testing.T) {
