@@ -485,6 +485,11 @@ func main() {
 	authed.HandleFunc("GET /api/presence", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"online": hub.OnlineUsers()})
 	})
+	// 房间服务地址发现（gomoku/doudizhu 等游戏 bundle 启动时取 openroom 基址；
+	// OPENOS_ROOM_URL 未配置时返回空 url，应用自会提示「管理员未配置房间服务」）
+	authed.HandleFunc("GET /api/rooms/config", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"url": os.Getenv("OPENOS_ROOM_URL")})
+	})
 	// 聊天室历史消息分页（登录即可读——总线 chat:room 广播本就全员可订阅，同边界）：
 	// ?before=<id> 取更早一页（0=最新一页），?limit= 默认 50 上限 100。
 	authed.HandleFunc("GET /api/chat/history", func(w http.ResponseWriter, r *http.Request) {
@@ -1094,7 +1099,12 @@ func main() {
 		writeJSON(w, entries)
 	})).ServeHTTP)
 	authed.HandleFunc("GET /api/stats", auth.RequirePerm("system.manage")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, db.Stats(startedAt))
+		s := db.Stats(startedAt)
+		if !fs.Disabled() {
+			// 文件统计以统一 home 磁盘为准（files 表已随 VFS 磁盘化弃用）
+			s.FileCount, s.StorageUsed = fs.DiskStats()
+		}
+		writeJSON(w, s)
 	})).ServeHTTP)
 
 	// 虚拟文件系统（OPENOS_VFS=off 时统一 503）
@@ -1173,6 +1183,30 @@ func main() {
 	authed.HandleFunc("GET /api/goder/status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, goderMgr.Status())
 	})
+
+	// goder 项目目录：统一 home 下 goder/<项目名>（新建项目即项目上下文，
+	// 文件管理与真实终端同目录可见）。GoderStudio 经嵌入约定 newProject 钩子调用。
+	authed.HandleFunc("POST /api/goder/project", fs.Guard(func(w http.ResponseWriter, r *http.Request) {
+		var req struct{ Name string `json:"name"` }
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "参数错误", 400)
+			return
+		}
+		dir, err := fs.CreateGoderProject(auth.FromContext(r).Username, req.Name)
+		if errors.Is(err, os.ErrExist) {
+			http.Error(w, "同名项目目录已存在", 409)
+			return
+		}
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		writeJSON(w, map[string]any{"path": dir})
+	}))
+	// 用户统一 home 真实路径（goder 裸会话 workspace 兜底等场景）
+	authed.HandleFunc("GET /api/goder/home", fs.Guard(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"path": fs.HomePath(auth.FromContext(r).Username)})
+	}))
 
 	// 日历：中国法定节假日（含调休安排）查询，内置已发布年份 + 在线同步 + 缓存
 	authed.HandleFunc("GET /api/calendar/holidays", calendar.HolidaysHandler)
