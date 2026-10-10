@@ -290,11 +290,13 @@ const icoGear = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fil
       <button class="os-tb-btn" :class="{ spin: refreshing }" :disabled="refreshing" title="刷新" v-html="icons.refresh" @click="refresh" />
     </div>
 
+    <!-- 类目标签（固定区，不随列表滚动） -->
+    <div v-if="!detail && !settingsOpen" class="cats">
+      <button v-for="c in categories" :key="c" class="cat" :class="{ on: c === category }" @click="category = c">{{ c }}</button>
+    </div>
+
     <!-- 目录列表 -->
     <div v-if="!detail && !settingsOpen" class="body">
-      <div class="cats">
-        <button v-for="c in categories" :key="c" class="cat" :class="{ on: c === category }" @click="category = c">{{ c }}</button>
-      </div>
       <div v-if="loading && !states.length" class="hint">正在加载目录…</div>
       <div v-else-if="!filtered.length" class="hint-empty"><OsEmpty text="没有匹配的应用" /></div>
       <div v-else class="grid">
@@ -432,8 +434,8 @@ const icoGear = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fil
 .s-ico :deep(svg) { width: 13px; height: 13px; }
 .search input { border: none; background: none; outline: none; width: 130px; font-size: 12px; color: var(--os-text, #222); }
 
-.body { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 18px 20px; }
-.cats { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
+.cats { display: flex; gap: 6px; flex-wrap: wrap; padding: 12px 18px 0; flex: none; }
+.body { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 18px 20px; }
 .cat {
   border: none; cursor: pointer; padding: 5px 13px; border-radius: 13px; font-size: 12px;
   background: rgba(125, 125, 125, .13); color: var(--os-text-secondary);
