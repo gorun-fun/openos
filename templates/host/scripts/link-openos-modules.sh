@@ -2,7 +2,7 @@
 # 将 openos 快照的 node_modules 链接到 app/web/node_modules：
 # openos 源码位于 app/web 目录树之外，TS/Vite 从文件位置向上解析不到依赖，
 # 链接后快照源码与宿主共用同一份依赖（快照重克隆后需重跑，run.sh 已自动调用）。
-# 注意保持 POSIX sh 兼容：CI 的 node:24-alpine3.24 容器无 bash（postinstall 以 sh 调用）。
+# 注意保持 POSIX sh 兼容：CI 的 node:22-alpine 容器无 bash（postinstall 以 sh 调用）。
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LINK="$ROOT/.run/openos/web/node_modules"
