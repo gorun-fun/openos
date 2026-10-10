@@ -15,12 +15,11 @@ import (
 )
 
 // TestCatalogValid 内置目录随二进制发布：全部条目须通过静态校验（坏条目在启动时
-// 只会被跳过，测试兜底防手改 catalog.json 引入无效条目而不自知）。
+// 只会被跳过，测试兜底防手改 catalog.json 引入无效条目而不自知）。2026-10 货架
+// 拆分到独立仓库 openos-apps 后内置兜底已清空——空目录合法，解析不报错即可；
+// 若日后重新播种仍受同套校验保护。
 func TestCatalogValid(t *testing.T) {
 	entries := Catalog()
-	if len(entries) == 0 {
-		t.Fatal("内置目录为空")
-	}
 	seen := map[string]bool{}
 	for _, e := range entries {
 		if seen[e.ID] {
@@ -150,8 +149,16 @@ func TestInstallProtected(t *testing.T) {
 	defer db.Close()
 
 	// 造一个与内置应用同 id 的目录条目场景：直接验证 Install 对 builtin 的守卫
-	// （内置目录正常不会收录 "settings"，这里用 UpsertApp 把目标 id 锁成 builtin）
-	target := Catalog()[0].ID
+	// （用注入的目录条目驱动——2026-10 内置兜底已清空，不依赖 Catalog 内容；
+	//   UpsertApp 把目标 id 锁成 builtin 模拟撞内置应用）
+	guard := Entry{ID: "guard-app", Name: "守卫演示", Type: "web", Version: "1.0.0",
+		Config: []byte(`{"kind":"web","url":"https://example.com/"}`)}
+	mu.Lock()
+	prev := active
+	active = []Entry{guard}
+	mu.Unlock()
+	t.Cleanup(func() { mu.Lock(); active = prev; mu.Unlock() })
+	target := guard.ID
 	db.UpsertApp(store.AppDef{ID: target, Name: "占位", Builtin: true})
 	if _, err := Install(db, target, nil); err == nil {
 		t.Fatal("撞 builtin 应用应拒绝安装")
