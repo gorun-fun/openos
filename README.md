@@ -211,6 +211,11 @@ cp <goder 源码>/frontend/dist-embed/goder.js <openos>/server/data/goder/
 
 相关环境变量：`OPENOS_GODER_BIN` / `OPENOS_GODER_JS` / `OPENOS_GODER_ADDR`（默认 127.0.0.1:7711）/ `OPENOS_GH_BIN`；`OPENOS_GODER=off` 可整体停用（不启动子进程、下架应用，纯业务宿主建议开启此开关）。
 
+**goder 子进程环境透传（2026-10，随 goder host_context 重构）**：openos 对 goder-serve 及其 gh 子进程采用环境白名单（不继承 OPENOS_* 秘密），部署侧可选配置以下变量，存在即透传——
+
+- `GODER_GH_ENV_<KEY>=<value>`：剥前缀后作为 `KEY=<value>` 注入每个 gh 子进程。典型 `GODER_GH_ENV_GRF_TURN_WEBHOOK_URL` / `GODER_GH_ENV_GRF_TURN_WEBHOOK_SECRET`：回合终态事件外发（`turn.settled`，携带 session_id/response_id/status/model/usage，HMAC-SHA256 签名头 `X-GRF-Signature`），宿主无头任务（`/api/host/goder/tasks*`，如 grf-os 自动修复）由轮询转事件驱动，接收端由部署方提供（常量时间校验签名）。
+- goder-serve 网关自身：`GODER_IDLE_TTL`（gh 进程空闲回收）、`GODER_WEBHOOK_URL` / `GODER_WEBHOOK_SECRET`（用户进程生命周期事件 proc.started/stopped/crashed 回调，签名头 `X-Goder-Signature`）、`GODER_ADMIN_TOKEN`（运维面 `/goder-api/admin/statuses|start|stop|restart`）。
+
 **项目目录落统一 home（2026-10）**：goder「新建项目」时由 OpenOS 在用户 home 的
 `~/goder/<项目名>` 下创建真实目录并作为该项目会话的 workspace（AI 的项目上下文），
 文件管理与真实终端同目录可见；无项目的裸会话 workspace 兜底为用户 home。实现走

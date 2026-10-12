@@ -15,8 +15,10 @@
 //
 // 写盘规则与 osmcp 的插件 upsert 同一套路：map[string]json.RawMessage 保留
 // 未知键、内容不变不写、0600。settings.json 尚不存在（用户还没打开过 goder）
-// 时以空白配置起播并建目录——必须赶在 goder-serve 播种与 gh 首次启动之前，
-// 否则 gh 启动读走无条目配置后不再重读盘（gh 仅启动时读，空闲 30m 才回收）。
+// 时以空白配置起播并建目录——仍应赶在 goder-serve 播种与 gh 首次启动之前
+//（首启即读到正确配置，新会话直接生效）；gh 新版已在回合边界检测
+// settings.json 变更并让存量会话跟随新默认（见 grf-harness 的
+// refreshDefaultClient），错过播种窗口也不再需要重启/空闲回收兜底。
 package goder
 
 import (

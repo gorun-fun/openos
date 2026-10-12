@@ -143,7 +143,10 @@ func (m *Manager) launch() {
 	cmd := exec.Command(m.binPath)
 	// 环境白名单化：goder-serve 及其拉起的 gh 子进程不继承服务进程秘密
 	//（OPENOS_* 密钥等，安全审计 2026-10），所需变量逐个显式注入。
-	cmd.Env = safeenv.Env(
+	// GODER_GH_ENV_*（宿主透传给 gh 子进程的能力开关，典型如回合事件
+	// webhook GRF_TURN_WEBHOOK_URL/_SECRET）经 GhEnvOverrides 单独收集，
+	// 不进共享白名单（真实终端子进程不应看到）。
+	overrides := append([]string{
 		"ADDR="+m.addr,
 		"GODER_DATA="+filepath.Join(goderData, "serve-data"),
 		"GODER_STATIC_DIR="+static,
@@ -152,7 +155,19 @@ func (m *Manager) launch() {
 		"GODER_SETTINGS_SEED=1", // 新用户种子宿主 ~/.grf 模型配置，开箱即用
 		"GODER_BIN="+m.ghBin,
 		"GODER_ACCESS_LOG=0",
-	)
+	}, safeenv.GhEnvOverrides()...)
+	// goder-serve 网关自身的可调项（存在才透传）：空闲回收 TTL、进程生命
+	// 周期事件回调（GODER_WEBHOOK_URL/_SECRET，回调带 X-Goder-Signature
+	// HMAC 签名头）、运维面令牌（GODER_ADMIN_TOKEN，/goder-api/admin/*）。
+	// 值均来自部署配置（与白名单同信任级）、不含 OPENOS_* 秘密。
+	for _, name := range []string{
+		"GODER_IDLE_TTL", "GODER_WEBHOOK_URL", "GODER_WEBHOOK_SECRET", "GODER_ADMIN_TOKEN",
+	} {
+		if v := os.Getenv(name); v != "" {
+			overrides = append(overrides, name+"="+v)
+		}
+	}
+	cmd.Env = safeenv.Env(overrides...)
 	cmd.Stdout = logWriter{prefix: "[goder-serve] "}
 	cmd.Stderr = logWriter{prefix: "[goder-serve] "}
 	if err := cmd.Start(); err != nil {

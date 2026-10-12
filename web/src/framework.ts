@@ -38,6 +38,7 @@ import { installMenuGuard } from './ui/menu'
 import { installKeys } from './ui/keys'
 import { installPermDirective } from './ui/perms'
 import { installAgentTools, type AgentToolDef } from './desktop/agentTools'
+import { setGoderContext } from './desktop/goderContext'
 import { installCapabilities, type AppCapabilities } from './desktop/capabilities'
 import { installTooltip } from './ui/tooltip'
 import { installAppNotifiers } from './desktop/appNotifier'
@@ -124,6 +125,15 @@ export interface CreateOpenOSOptions {
    * OpenOS.registerAgentTool 动态注册。
    */
   agentTools?: AgentToolDef[]
+  /**
+   * goder AI 的宿主业务简报（P7 扩展点）：拼进 goder 会话系统提示词的
+   * host_context 段（gh 独立拼段、与身份提示词叠加），让 AI 知道自己
+   * 运行在哪个业务系统里——业务域一句话、可用 app_* 工具的组织方式、
+   * 组织约定（如「凭据只经服务端、回复不猜测业务数据」）。替代此前
+   * 「环境信息只能塞进工具 description」的绕法（grf-os agent-tools.ts
+   * 历史注释记录的缺口）。只写环境事实，任务指令仍走会话消息。
+   */
+  goderContext?: string
   /**
    * 向 goder AI 声明应用能力清单（能力暴露层 CAP，键 = appId）：queries（只读
    * 数据查询，无需打开应用即可被 AI 执行）/ actions（业务操作）/ views（可视化
@@ -221,6 +231,8 @@ export function createOpenOS(opts: CreateOpenOSOptions = {}): VueApp | null {
   shell.overlay = opts.overlay || null
   // 宿主静态声明的 AI 桌面工具（goder 扩展点，P6）
   installAgentTools(opts.agentTools)
+  // 宿主业务简报（goder 扩展点，P7：拼进 goder 会话 host_context）
+  setGoderContext(opts.goderContext)
   // 宿主能力清单声明（能力暴露层 CAP：AI 经 os_caps 发现、os_app_* 执行）
   installCapabilities(opts.capabilities)
   if (opts.widgets) {

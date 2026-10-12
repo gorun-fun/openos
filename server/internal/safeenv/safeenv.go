@@ -23,7 +23,9 @@ var allowlist = map[string]bool{
 }
 
 // Env 返回清洗后的子进程环境：仅保留白名单变量，再叠加 overrides
-//（overrides 里的同名变量覆盖白名单值）。
+//（overrides 里的同名变量覆盖白名单值）。前缀例外（GODER_GH_ENV_*）见
+// EnvPrefixed——按调用方需要单独启用，不进共享白名单（真实终端子进程
+// 不应看到透传密钥）。
 func Env(overrides ...string) []string {
 	var out []string
 	for _, kv := range os.Environ() {
@@ -36,4 +38,26 @@ func Env(overrides ...string) []string {
 		}
 	}
 	return append(out, overrides...)
+}
+
+// ghEnvPrefix goder-serve 的 gh 子进程环境透传前缀（goder 侧约定，见
+// cmd/goder-serve 的 ghExtraEnvFromEnv）：GODER_GH_ENV_<KEY>=<value> 剥
+// 前缀后作为 KEY=<value> 注入每个 gh 子进程，典型用途
+// GRF_TURN_WEBHOOK_URL / _SECRET（回合终态事件外发，宿主无头任务由
+// 轮询转事件驱动）。
+const ghEnvPrefix = "GODER_GH_ENV_"
+
+// GhEnvOverrides 从服务进程环境原样收集 GODER_GH_ENV_* 透传项（前缀
+// 保留——goder-serve 侧按同一前缀识别收集，见其 ghExtraEnvFromEnv）。
+// 仅供 goder 子进程链使用：值来自部署配置（与白名单同信任级）且不含
+// OPENOS_* 秘密；不得并入真实终端子进程的环境。
+func GhEnvOverrides() []string {
+	var out []string
+	for _, kv := range os.Environ() {
+		name, _, ok := strings.Cut(kv, "=")
+		if ok && strings.HasPrefix(name, ghEnvPrefix) {
+			out = append(out, kv)
+		}
+	}
+	return out
 }

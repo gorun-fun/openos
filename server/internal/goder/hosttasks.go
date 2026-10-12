@@ -79,6 +79,19 @@ type HostTaskCreateRequest struct {
 	SystemPrompt string `json:"system_prompt"`
 }
 
+// hostTaskContext 无人值守宿主任务的会话环境简报：与用户在桌面打开
+// goder 时的 host_context（GoderStudio 注入）同源语义，但无桌面工具面
+//（不装 osmcp，见文件头）。核心是交互约束——无头会话里 ask_user 类
+// 交互会挂起等待永不到来的用户。
+func hostTaskContext(uid string) string {
+	return fmt.Sprintf(
+		"本会话由 OpenOS 平台以服务端身份无人值守启动（代用户 %s），没有用户在旁边："+
+			"不要调用 ask_user 类交互工具等待回答，工具审批已自动放行；"+
+			"工作区是宿主准备好的目录，自主推进任务，完成或受阻时在最终回复中明确说明结果与遗留问题；"+
+			"用户之后会在自己的 goder 界面里看到完整过程并可能续聊。",
+		uid)
+}
+
 // Create 代用户创建并后台启动一个 goder 会话任务。
 func (h *HostTasks) Create(w http.ResponseWriter, r *http.Request) {
 	var req HostTaskCreateRequest
@@ -131,6 +144,11 @@ func (h *HostTasks) Create(w http.ResponseWriter, r *http.Request) {
 		"auto_approve": true,
 		"max_steps":    maxSteps,
 	}
+	// 宿主环境简报（gh ≥ host_context 版本独立拼段，与 system_prompt 叠加；
+	// 旧 gh 忽略未知字段不受影响）：无人值守语义是环境事实而非任务指令，
+	// 放这里而不是塞进调用方的 system_prompt——调用方（如 grf-os fixer）
+	// 的提示词保持纯业务。
+	sessCfg["host_context"] = hostTaskContext(req.UID)
 	if sp := strings.TrimSpace(req.SystemPrompt); sp != "" {
 		sessCfg["system_prompt"] = sp
 	}
@@ -343,9 +361,11 @@ func (r *ghResponse) assistantText() string {
 	return ""
 }
 
-// resolveModel 把请求模型解析成 gh 需要的全限定名（provider/model；裸名会被
-// gh 的 trySwitchModel 忽略）。空 = 用户默认。解析失败给管理员可读的错误
-// （套餐未含/未同步是最常见原因），绝不静默换模型。
+// resolveModel 把请求模型解析成全限定名（provider/model）。gh 新版已能在
+// 服务端解析裸名（默认供应商优先 → 唯一供应商命中 → 歧义忽略），但这里
+// 保留本地解析：无头任务要 fail-fast——解析失败给管理员可读的错误（套餐
+// 未含/未同步是最常见原因），绝不静默换模型，而 gh 的 best-effort 语义会
+// 静默回落默认。空 = 用户默认。
 func (h *HostTasks) resolveModel(uid, want string) (string, error) {
 	raw, err := os.ReadFile(filepath.Join(GrfHomePath(h.m.dataDir, uid), "settings.json"))
 	if err != nil {

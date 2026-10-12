@@ -15,6 +15,7 @@ import { useSession } from '../../stores/session'
 import { api } from '../../api/client'
 import { OsButton, MobileNavToggle, toast } from '../../ui'
 import { injectShadowNavCss } from '../../ui/shadowNav'
+import { goderContext } from '../../desktop/goderContext'
 
 const props = defineProps<{ win: WinState }>()
 const windows = useWindows()
@@ -139,6 +140,20 @@ async function init() {
       const h = await api.get<{ path: string }>('/api/goder/home')
       homePath = h.path || ''
     } catch { /* 不阻塞，仅缺兜底 */ }
+
+    // 宿主环境简报（goder ≥ host_context 版本；旧 goder.js/gh 忽略未知字段，
+    // 不受影响）：gh 把它作为独立段拼在身份提示词之后——让会话知道自己
+    // 运行在 OpenOS 桌面里、当前用户与角色、桌面 os_* 工具面怎么用。业务
+    // 宿主经 createOpenOS({ goderContext }) 追加业务域简报（P7 扩展点）。
+    const hostContext = [
+      '你运行在 OpenOS 网页桌面内嵌的 goder AI 工作台（gh harness）。',
+      `当前用户：${me.displayName || me.username}（账号 ${me.username}，角色 ${me.role}）。`,
+      '桌面经 openos 插件提供 os_* 系列工具：窗口/应用/文件/终端/设置等桌面操作；' +
+        'os_app_tools 列出本宿主注册的业务工具（app_* 前缀）。涉及关闭应用、删除文件等' +
+        '破坏性操作，先向用户复述确认再执行。',
+      '用户主目录是统一 home（文件管理器/终端看到的就是这棵目录树）；goder 项目目录在 ~/goder/ 下。',
+      ...(goderContext() ? [goderContext()] : []),
+    ].join('\n')
     ui.configure(scope, {
       baseUrl: '/goder-api',
       auth: {
@@ -165,7 +180,9 @@ async function init() {
           return null
         }
       },
-      ...(homePath ? { sessionDefaults: { workspace: homePath } } : {}),
+      ...(homePath || hostContext
+        ? { sessionDefaults: { ...(homePath ? { workspace: homePath } : {}), ...(hostContext ? { host_context: hostContext } : {}) } }
+        : {}),
       // 融合窗体红绿灯留位：左栏顶行行首注入 72px 透明占位（84px 悬浮区 -
       // side-top 自身 12px 左内边距），避免折叠侧栏按钮被红绿灯盖住；
       // 渲染进 shadow DOM，样式只能内联
