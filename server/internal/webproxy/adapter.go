@@ -14,7 +14,7 @@
 //   - Hook：追加注入到代理页面的 JS 片段（app 模式；紧随通用 hook.js 之后
 //     执行，片段内 __PREFIX__ 占位符同样被替换为 /app/<id>/）
 //   - RewriteJS：JS 响应体的定点改写（app 模式；gzip 自动解压重压，超限原文
-//     透传——与 HTML/CSS 重写同一套限长语义）
+//     透传——与 HTML/CSS 重写同一套限长语义；prefix 为 /app/<id>/ 代理前缀）
 package webproxy
 
 import (
@@ -35,8 +35,10 @@ type SiteAdapter struct {
 	// 执行，但不保证页面脚本已跑完，需要晚绑定行为的自行 load/setTimeout 兜底）
 	Hook string
 	// RewriteJS JS 响应体定点改写（可空；仅 app 模式对命中的 JS 资源生效）。
-	// 只做确定性的字符串替换——混淆名/结构随版本变化，勿写脆弱的语法级改写
-	RewriteJS func(body []byte) []byte
+	// prefix 为当前代理路径前缀（/app/<id>/，按应用 id 变化），需要产出代理路径
+	// 的改写用它拼接。只做确定性的字符串替换——混淆名/结构随版本变化，勿写脆弱
+	// 的语法级改写。
+	RewriteJS func(body []byte, prefix string) []byte
 }
 
 // adapters 站点适配器注册表（命中即全部按序应用）。
@@ -82,26 +84,85 @@ var adapters = []SiteAdapter{
 		Hosts: []string{"163.com", "126.net"},
 		Hook: `(function () {
   if (window.parent !== window.top || window.parent === window) return; // 仅直挂宿主的壳页执行
-  var NAMES = ['login', 'logout'];
+  // 壳页全局 → top 的转发桥（网易云整站按「top 即站点自身壳页」的假设组织：
+  // 内层内容页 g_iframe 经 top.xxx 调用壳页能力——top.player.addTo 播歌、
+  // top.GDispatcher.dispatch SPA 路由、top.login 呼登录、top.scrollTopbar 与
+  // 底栏/顶栏高度滚动同步。代理下 top 是 OpenOS 桌面页，这些引用全部落空：
+  // 播放/导航/登录整链 TypeError。代理页与宿主同源，用 getter/setter 双向
+  // 转发挂上 top——惰性求值对站点脚本的定义时序不敏感，写入也回流壳页）。
+  var NAMES = ['login', 'logout', 'player', 'GDispatcher', 'scrollTopbar',
+               'g_bottomBarHeight', 'g_bottomBarShow', 'g_topBarHeight'];
   function bridge() {
     try {
+      var T = window.top;
       for (var i = 0; i < NAMES.length; i++) {
         var k = NAMES[i];
-        if (typeof window[k] === 'function' && window.top[k] === undefined) window.top[k] = window[k];
+        if (T[k] !== undefined || Object.getOwnPropertyDescriptor(T, k)) continue; // 宿主或其他窗口已占用则不覆盖
+        (function (k) {
+          Object.defineProperty(T, k, {
+            configurable: true,
+            get: function () { return window[k]; },
+            set: function (v) { window[k] = v; },
+          });
+        })(k);
       }
     } catch (e) { }
   }
   bridge();
   window.addEventListener('load', bridge);
   setTimeout(bridge, 1500);
+  // 登录模块的跨 realm 桥：网易云登录模块（ctWebLogin）以脚本形式注入 top 文档执行
+  //（原生形态 top 即站点自身壳页、同一 realm），CtWebLogin / CtWebLoginConfig 因此注册
+  // 在 top realm——而壳页点击处理器查的是自身 window.CtWebLogin、模块就绪回调读的
+  // CtWebLoginConfig 也是 top 上的另一份，互相不可见：点击登录永远走「设 config 等
+  // 加载」分支且模块读不到 config，弹窗从未出现（还会反复向 top 注入脚本）。get/set
+  // 双向转发让两个 realm 立即可达：点击即刻命中 top 上的模块，config 写入也被
+  // top 侧脚本读到。弹窗 DOM/样式由 top realm 脚本自建（覆盖宿主页，关闭即还原）。
+  try {
+    var T = window.top;
+    if (!Object.getOwnPropertyDescriptor(window, '__osCtBridged')) {
+      Object.defineProperty(window, '__osCtBridged', { value: 1 });
+      Object.defineProperty(window, 'CtWebLogin', {
+        configurable: true,
+        get: function () { try { return T.CtWebLogin; } catch (e) { return undefined; } },
+        set: function (v) { try { T.CtWebLogin = v; } catch (e) { } },
+      });
+      Object.defineProperty(window, 'CtWebLoginConfig', {
+        configurable: true,
+        get: function () { try { return T.CtWebLoginConfig; } catch (e) { return undefined; } },
+        set: function (v) { try { T.CtWebLoginConfig = v; } catch (e) { } },
+      });
+    }
+  } catch (e) { }
 })();`,
 		// JS 定点改写：站点脚本以 window.location.host 做环境检测（非
 		// music.163.com 时接口 base 落到 QA 环境 qa.igame.163.com，代理页
 		// host 是 OpenOS 宿主必中招——登录二维码 403）。hostname 无法伪造，
 		// 把 JS 里的 QA 兜底字面量改写为生产域：检测仍判离线，但 base 落到
 		// music.163.com，绝对地址经 hook 映射回代理路径。
-		RewriteJS: func(body []byte) []byte {
+		RewriteJS: func(body []byte, prefix string) []byte {
 			return bytes.ReplaceAll(body, []byte("qa.igame.163.com"), []byte("music.163.com"))
+		},
+	},
+	// 美团 SSO 登录跳转代理化：ebooking 商家后台的登录入口（美团员工登录等）在
+	// 前端 JS 里以字面量拼出 SSO 绝对地址（https://ssosv.sankuai.com/sson/login?…
+	// redirect_uri=location.origin+…）并 location.href 直跳——绝对地址导航完全
+	// 绕开代理（服务端改写碰不到不经过自己的请求），iframe 直连目标站后：SSO 页
+	// 里 location.origin 拼出的回跳是 OpenOS 宿主地址，登录完成 302 回
+	// /api/gw/… 等宿主路径时 Referer 已是跨源目标站（逃逸回捕判定不上），最终
+	// 落在 OpenOS 自身路由上 404（登录链整体断）。把 JS 里的 SSO 域字面量改写为
+	// 代理路径：导航成为同源相对跳转进入代理，redirect_uri 还原（restorePxParam）
+	// 与回跳 Location 前缀化（rewriteLocation）链路随之全部生效。
+	{
+		Name:  "meituan-sso-rewrite",
+		Hosts: []string{"meituan.com", "meituan.net", "sankuai.com", "dianping.com", "dpfile.com", "51ping.com"},
+		RewriteJS: func(body []byte, prefix string) []byte {
+			// 先替换更长的 test/st 域，防 ssosv.sankuai.com 前缀截断后者
+			for _, h := range []string{"ssosv.it.st.sankuai.com", "ssosv.it.test.sankuai.com", "ssosv.sankuai.com"} {
+				to := prefix + "https/" + h
+				body = bytes.ReplaceAll(body, []byte("https://"+h), []byte(to))
+			}
+			return body
 		},
 	},
 }

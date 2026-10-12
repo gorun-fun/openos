@@ -194,17 +194,17 @@ desktop_version() {
   printf '%s' "${v#v}"
 }
 
-# 交叉编译 Linux/Windows 发布二进制（build 子命令）：linux/windows × amd64/arm64，
-# 按平台分目录输出到 release/<goos>-<goarch>/，目录内可执行文件直接以平台无关名字
-# 命名：桌面客户端 = openos（与 make release 的 openos 命名一致），服务端 =
-# openos-server（Windows 带 .exe 后缀）。target：desktop=桌面客户端（默认）、
+# 交叉编译 Linux/macOS/Windows 发布二进制（build 子命令）：darwin/linux/windows ×
+# amd64/arm64，按平台分目录输出到 release/<goos>-<goarch>/，目录内可执行文件直接以
+# 平台无关名字命名：桌面客户端 = openos（与 make release 的 openos 命名一致），服务
+# 端 = openos-server（Windows 带 .exe 后缀）。target：desktop=桌面客户端（默认）、
 # server=服务端（注入版本号，与 make release 同款 ldflags；纯二进制不含前端产物，
 # 运行时需 OPENOS_DIST 指向 web/dist）、all=两者全部
 build_cross() {
   local target="$1" goos goarch ext dir version
   version="$(git -C "${ROOT}" describe --tags --exact-match 2>/dev/null \
     || git -C "${ROOT}" describe --tags 2>/dev/null || echo dev)"
-  for goos in linux windows; do
+  for goos in darwin linux windows; do
     for goarch in amd64 arm64; do
       ext=""
       if [ "${goos}" = "windows" ]; then ext=".exe"; fi
@@ -417,8 +417,8 @@ usage() {
   stop     停止（默认 target = desktop）
   restart   重启（默认 target = desktop，同样包含构建）
   reset     清空桌面客户端全部本地数据（仅 target = desktop）
-  build     交叉编译 Linux/Windows 二进制（linux/windows × amd64/arm64，按平台分
-            目录 release/<os>-<arch>/，目录内可执行文件直接叫 openos /
+  build     交叉编译 Linux/macOS/Windows 二进制（darwin/linux/windows × amd64/arm64，
+            按平台分目录 release/<os>-<arch>/，目录内可执行文件直接叫 openos /
             openos-server，Windows 带 .exe；默认 target = desktop，server / all
             可选；桌面端 Windows 构建为 GUI 子系统并带应用图标，双击启动无 cmd 黑框）
 
@@ -441,7 +441,7 @@ target:
   ./run.sh stop desktop       # 仅停桌面客户端（服务端继续运行）
   ./run.sh restart            # 整套重建并重启
   ./run.sh reset              # 清空桌面客户端数据（登录态/站点数据/服务器配置）
-  ./run.sh build              # 交叉编译桌面客户端：release/{linux,windows}-{amd64,arm64}/openos[.exe]
+  ./run.sh build              # 交叉编译桌面客户端：release/{darwin,linux,windows}-{amd64,arm64}/openos[.exe]
   ./run.sh build server       # 交叉编译服务端：release/<平台>/openos-server[.exe]（注入版本号）
   ./run.sh build all          # 桌面客户端 + 服务端全部二进制
 

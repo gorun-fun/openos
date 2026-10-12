@@ -813,6 +813,54 @@ func TestSiteAdapters(t *testing.T) {
 	if cts := h.Values("Content-Type"); len(cts) != 1 || cts[0] != "text/javascript" {
 		t.Errorf("微信域重复 Content-Type 应收敛为首个，得到 %v", cts)
 	}
+
+	// meituan-sso-rewrite：美团系 JS 里的 SSO 域字面量改写为代理路径（含
+	// test/st 变体，且先替换更长域防前缀截断），未知域不受影响
+	var mtRewrite func([]byte, string) []byte
+	for _, a := range matchAdapters("awp-assets.meituan.net") {
+		if a.Name == "meituan-sso-rewrite" && a.RewriteJS != nil {
+			mtRewrite = a.RewriteJS
+		}
+	}
+	if mtRewrite == nil {
+		t.Fatalf("awp-assets.meituan.net 应命中 meituan-sso-rewrite 的 RewriteJS")
+	}
+	js := []byte(`Ps?"https://ssosv.it.test.sankuai.com/sson/login?":"https://ssosv.sankuai.com/sson/login?",t.CONFIG={SSO_CONFIG_URL:"https://ssosv.sankuai.com/configs"}`)
+	got := string(mtRewrite(js, "/app/web-me.meituan.com/"))
+	if strings.Contains(got, `"https://ssosv`) {
+		t.Errorf("ssosv 绝对地址字面量应全部改写为代理路径，得到 %s", got)
+	}
+	for _, want := range []string{
+		`"/app/web-me.meituan.com/https/ssosv.it.test.sankuai.com/sson/login?`,
+		`"/app/web-me.meituan.com/https/ssosv.sankuai.com/sson/login?`,
+		`"/app/web-me.meituan.com/https/ssosv.sankuai.com/configs"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("改写结果缺少 %s，得到 %s", want, got)
+		}
+	}
+	if r := mtRewrite([]byte("https://example.com/x"), "/app/a/"); string(r) != "https://example.com/x" {
+		t.Errorf("无关字面量不应被改写，得到 %s", r)
+	}
+	for _, a := range matchAdapters("unknown.example") {
+		if a.RewriteJS != nil {
+			t.Errorf("未知域不应命中 RewriteJS，得到 %v", a.Name)
+		}
+	}
+
+	// music163 RewriteJS：QA 兜底域改写为生产域（签名带 prefix，本用例不依赖它）
+	var m163Rewrite func([]byte, string) []byte
+	for _, a := range matchAdapters("st.music.163.com") {
+		if a.Name == "music163-top-bridge" && a.RewriteJS != nil {
+			m163Rewrite = a.RewriteJS
+		}
+	}
+	if m163Rewrite == nil {
+		t.Fatalf("st.music.163.com 应命中 music163-top-bridge 的 RewriteJS")
+	}
+	if r := string(m163Rewrite([]byte("base=//qa.igame.163.com/api"), "/app/music-163/")); r != "base=//music.163.com/api" {
+		t.Errorf("music163 QA 域应改写为生产域，得到 %s", r)
+	}
 }
 
 func names(as []*SiteAdapter) []string {
@@ -930,14 +978,14 @@ func TestRefererTargetHook(t *testing.T) {
 	r.Header.Set("Referer", "http://h.example/app/music-163/https/music.163.com/discover")
 	w := httptest.NewRecorder()
 	serveHook(w, r, "music-163")
-	if !strings.Contains(w.Body.String(), "top[k] = window[k]") {
+	if !strings.Contains(w.Body.String(), "Object.defineProperty(T, k") {
 		t.Errorf("music.163.com 的 hook 应包含 top 桥接片段")
 	}
 	r2 := httptest.NewRequest("GET", "/app/x/hook.js", nil)
 	r2.Header.Set("Referer", "http://h.example/app/x/https/unknown.example/p")
 	w2 := httptest.NewRecorder()
 	serveHook(w2, r2, "x")
-	if strings.Contains(w2.Body.String(), "top[k] = window[k]") {
+	if strings.Contains(w2.Body.String(), "Object.defineProperty(T, k") {
 		t.Errorf("未知站点的 hook 不应包含站点适配片段")
 	}
 	if !strings.Contains(w2.Body.String(), "__openosPx") {

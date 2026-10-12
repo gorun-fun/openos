@@ -92,7 +92,8 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request, tu *url.URL
 	if opts.rewrite && !isHTML {
 		for _, a := range matchAdapters(tu.Host) {
 			if a.RewriteJS != nil {
-				jsRewrite = a.RewriteJS
+				fn, prefix := a.RewriteJS, opts.prefix
+				jsRewrite = func(b []byte) []byte { return fn(b, prefix) }
 				break
 			}
 		}
