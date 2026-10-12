@@ -215,6 +215,9 @@ func main() {
 	// 数据保留期（防无限增长；0 = 永久保留）：启动清理一次，此后每天一次
 	// （含 vfs 到期分享链接清理）
 	go scheduleRetention(db, attachStore, fs)
+	// 统一 home 磁盘变更监控（3s 轮询指纹 → fs:changed）：goder/真实终端等
+	// 绕过 REST 的写盘也能让文件应用即时刷新（OPENOS_FS_WATCH=off 关闭）
+	go fs.WatchHomes()
 
 	mux := http.NewServeMux()
 

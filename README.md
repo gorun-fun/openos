@@ -234,6 +234,15 @@ goder 嵌入约定的 `newProject` 钩子（`POST /api/goder/project` 建目录�
 `ls ~` 与文件应用所见完全一致，终端 `echo x > ~/a.md` 即刻在文件管理可见；REST
 读写经符号链接解析校验拒绝越出 home（终端 `ln -s` 指向外部不构成越权通道）。
 
+**磁盘变更监控（fs:changed 的兜底来源）**：REST 写操作自身会广播 `fs:changed`，
+但 goder 子进程与真实终端直接写磁盘、绕过 REST——服务端另以 3 秒一轮的轮询指纹
+（`vfs/watcher.go`，每用户目录树 path→mtime/size 基线对比）兜底检测，变更按用户
+合并成一条事件（`kind:"watch"`、path 取变更项最深公共父目录）经 `PublishTo` 定向
+广播，文件应用/Dock 已有订阅即刻刷新；首轮只建基线不发事件，扫描失败整轮跳过
+（防部分扫描产生假删除），巨型目录按扫描耗时两倍自适应降频。与 REST 自发事件
+重复到达无害（前端刷新幂等）。`OPENOS_FS_WATCH=off` 可关闭（`OPENOS_VFS=off`
+时整体不启动）。
+
 `OPENOS_REAL_SHELL` 默认 `off`（应用提示未启用并禁用输入）；`=on` 受限沙箱执行、
 `=full` 解除沙箱限制（自担风险）。
 
