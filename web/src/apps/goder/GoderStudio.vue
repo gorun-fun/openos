@@ -16,6 +16,7 @@ import { api } from '../../api/client'
 import { OsButton, MobileNavToggle, toast } from '../../ui'
 import { injectShadowNavCss } from '../../ui/shadowNav'
 import { goderContext } from '../../desktop/goderContext'
+import { GoderTermPane } from './TermPane'
 
 const props = defineProps<{ win: WinState }>()
 const windows = useWindows()
@@ -198,6 +199,25 @@ async function init() {
     error.value = 'goder 初始化失败：' + (e?.message || e)
     loading.value = false
     return
+  }
+
+  // 3.9 底栏终端:goder 嵌入产物不含内置终端 tab(wails 桌面专属本地 PTY,
+  //     builtin-desktop 仅进桌面产物),经官方 registry.bottom 扩展点注册
+  //     OpenOS 真实终端面板——底栏展开自动创建 tab(底栏 dock 语义),dock
+  //     随项目切换把 workspace 真实路径推给面板(静默 cd 跟随,见 TermPane)。
+  //     多窗口/重试重复 add 同 id = 覆盖式幂等;旧版 goder.js 未导出
+  //     registry 时静默跳过(底栏维持原状,不影响其余功能)。
+  if (ui.registry?.bottom?.add) {
+    ui.registry.bottom.add({
+      id: 'terminal',
+      label: '终端',
+      icon: '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="2.5" width="13" height="11" rx="1.6"/><path d="M4.2 6.3l2.3 1.9-2.3 1.9"/><path d="M8.2 10.4h3.4"/></svg>',
+      create: () => {
+        const el = new GoderTermPane()
+        el.user = me.username
+        return el
+      },
+    })
   }
 
   // 4. 装配应用壳：先让容器可见（避免 display:none 下挂载导致布局尺寸为 0），
