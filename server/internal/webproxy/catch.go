@@ -62,6 +62,34 @@ func escapeTarget(db *store.DB, r *http.Request) string {
 	return loc
 }
 
+// refererTargetHost 从代理页面的 Referer 中解析目标主机（两种形态见 parsePxMark /
+// 紧凑前缀形态），不校验应用存在性（调用方按需自行核实）。
+// serveHook 用它选站点适配器的追加注入片段。
+func refererTargetHost(ref string) (string, bool) {
+	if ref == "" {
+		return "", false
+	}
+	u, err := url.Parse(ref)
+	if err != nil {
+		return "", false
+	}
+	if strings.HasPrefix(u.Path, "/app/") {
+		_, tail, _ := strings.Cut(strings.TrimPrefix(u.Path, "/app/"), "/")
+		scheme, hostPath, ok := strings.Cut(tail, "/")
+		if !ok || tail == "" {
+			return "", false
+		}
+		host, _, _ := strings.Cut(hostPath, "/")
+		scheme = strings.ToLower(scheme)
+		if (scheme != "http" && scheme != "https") || host == "" {
+			return "", false
+		}
+		return host, true
+	}
+	_, _, host, ok := parsePxMark(u.Query())
+	return host, ok
+}
+
 // refererOrigin 从代理页面的 Referer 中解析出应用 id 与目标源（两种形态见
 // parsePxMark / 紧凑前缀形态），并核实该应用存在且为代理形态。
 //

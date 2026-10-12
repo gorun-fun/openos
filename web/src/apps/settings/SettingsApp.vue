@@ -49,6 +49,7 @@ const items = computed(() => {
     base.push(
       { key: 'users', label: t('settings.tab.users'), icon: '👥' },
       { key: 'access', label: t('settings.tab.roles'), icon: '🔐' },
+      { key: 'webapps', label: t('settings.tab.webapps'), icon: '🌐' },
       { key: 'registry', label: t('settings.tab.registry'), icon: '🧩' },
       { key: 'system', label: t('settings.tab.system'), icon: 'ℹ️' },
     )
@@ -260,14 +261,23 @@ const parseCfg = (a: AppDef): any => {
   return a.config
 }
 const isWebApp = (a: AppDef) => parseCfg(a).kind === 'web' || parseCfg(a).kind === 'proxy'
-// 列表 = 全部第三方应用 + 内置网页应用（内置项只读，配置随版本发布）
-const registryApps = computed(() => allApps.value.filter((a) => !a.builtin || isWebApp(a)))
+// 应用管理列表 = 声明式第三方应用（网页应用归「网页应用」分区管理）
+const registryApps = computed(() => allApps.value.filter((a) => !a.builtin && !isWebApp(a)))
+// 网页应用列表 = 全部网页应用（含内置/商店安装的 kind=web|proxy）
+const webApps = computed(() => allApps.value.filter((a) => isWebApp(a)))
 const appType = (a: AppDef) => {
   const k = parseCfg(a).kind
   return !a.config ? t('settings.registry.tUnknown')
     : k === 'web' ? t('settings.registry.tWeb')
     : k === 'proxy' ? t('settings.registry.tProxy')
     : t('settings.registry.tSchema')
+}
+const appUrl = (a: AppDef) => parseCfg(a).url || ''
+
+// ---- 统一代理状态（/px/ 通用转发通道是否可用；OPENOS_PROXY=off 时关闭）----
+const pxStatus = ref<{ enabled: boolean } | null>(null)
+async function loadPxStatus() {
+  try { pxStatus.value = await api.get<{ enabled: boolean }>('/api/proxy/status') } catch { pxStatus.value = null }
 }
 
 function openAddWeb() {
@@ -440,12 +450,13 @@ async function loadSystem() {
 
 onMounted(() => {
   loadAI()
-  if (isAdmin) { loadUsers(); loadAccess() }
+  if (isAdmin) { loadUsers(); loadAccess(); loadPxStatus() }
 })
 watch(tab, (v) => {
   if (v === 'system') loadSystem()
   if (v === 'account') displayName.value = session.user?.displayName || ''
   if (v === 'users') loadUsers() // 账户页/别处改名后切回本页即时同步
+  if (v === 'webapps' && !allApps.value.length) loadAccess() // 直达本分区时兜底拉应用列表
 })
 </script>
 
@@ -658,30 +669,41 @@ watch(tab, (v) => {
       </div>
     </template>
 
-    <!-- 第三方应用：列表为主，添加/注册走弹窗 -->
-    <template v-else-if="tab === 'registry'">
+    <!-- 网页应用：统一代理的网页嵌入管理（kind=web 直嵌 / kind=proxy 服务端反代） -->
+    <template v-else-if="tab === 'webapps'">
       <div class="reg-head">
-        <h2 class="sec" style="margin: 0">{{ t('settings.registry.count', { n: registryApps.length }) }}</h2>
+        <h2 class="sec" style="margin: 0">{{ t('settings.webapps.count', { n: webApps.length }) }}</h2>
         <span class="grow" />
-        <OsButton size="sm" @click="openAddWeb">{{ t('settings.registry.addWeb') }}</OsButton>
-        <OsButton size="sm" @click="openAddSchema">{{ t('settings.registry.addSchema') }}</OsButton>
+        <OsButton variant="primary" size="sm" @click="openAddWeb">{{ t('settings.webapps.add') }}</OsButton>
       </div>
 
-      <OsPanel v-if="registryApps.length" class="reg-list">
-        <div v-for="a in registryApps" :key="a.id" class="reg-item">
+      <!-- 统一代理状态：开启时网页应用可用应用代理嵌入拒绝 iframe 的站点，
+           且网络请求类应用（网络请求/行情等）默认经 /px/ 通用转发发送 -->
+      <div class="card" :class="{ off: pxStatus && !pxStatus.enabled }">
+        <div class="group">
+          <div class="g-text">
+            <div class="g-title">{{ pxStatus?.enabled ? t('settings.webapps.pxOn') : t('settings.webapps.pxOff') }}</div>
+            <div class="g-sub">{{ pxStatus?.enabled ? t('settings.webapps.pxOnSub') : t('settings.webapps.pxOffSub') }}</div>
+          </div>
+          <span class="px-dot" :class="{ on: pxStatus?.enabled }">{{ pxStatus?.enabled ? 'ON' : 'OFF' }}</span>
+        </div>
+      </div>
+
+      <OsPanel v-if="webApps.length" class="reg-list">
+        <div v-for="a in webApps" :key="a.id" class="reg-item">
           <AppIcon :app="a.id" :icon="a.icon" :size="34" />
           <div class="reg-meta">
             <span class="an">{{ a.name }}<em v-if="a.builtin || a.locked" class="builtin-badge">{{ t('settings.registry.builtin') }}</em></span>
-            <span class="aid">{{ a.id }} · {{ appType(a) }}</span>
+            <span class="aid">{{ a.id }} · {{ appType(a) }} · {{ appUrl(a) }}</span>
           </div>
           <span class="grow" />
           <OsButton size="sm" @click="bus.emit('sys:open', { app: a.id })">{{ t('settings.registry.open') }}</OsButton>
           <!-- 内置应用配置随版本发布、宿主锁定（locked）应用由宿主种子维护，均不可编辑/删除 -->
-          <OsButton v-if="!a.builtin && !a.locked" size="sm" @click="isWebApp(a) ? openEditWeb(a) : openEditSchema(a)">{{ t('settings.registry.edit') }}</OsButton>
+          <OsButton v-if="!a.builtin && !a.locked" size="sm" @click="openEditWeb(a)">{{ t('settings.registry.edit') }}</OsButton>
           <OsButton v-if="!a.builtin && !a.locked" size="sm" variant="danger" @click="removeApp(a.id)">{{ t('common.delete') }}</OsButton>
         </div>
       </OsPanel>
-      <OsEmpty v-else :text="t('settings.registry.empty')" />
+      <OsEmpty v-else :text="t('settings.webapps.empty')" />
 
       <!-- 弹窗：添加 / 编辑网页应用（iframe 嵌入，可选服务端代理） -->
       <OsModal v-if="webDlg" :title="editing ? t('settings.registry.webTitleEdit') : t('settings.registry.webTitleAdd')" :ok-text="editing ? t('common.save') : t('settings.registry.addBtn')"
@@ -705,6 +727,31 @@ watch(tab, (v) => {
           <span class="msg">{{ webMsg }}</span>
         </div>
       </OsModal>
+    </template>
+
+    <!-- 第三方应用：声明式应用（JSON Schema）注册，添加/编辑走弹窗 -->
+    <template v-else-if="tab === 'registry'">
+      <div class="reg-head">
+        <h2 class="sec" style="margin: 0">{{ t('settings.registry.count', { n: registryApps.length }) }}</h2>
+        <span class="grow" />
+        <OsButton size="sm" @click="openAddSchema">{{ t('settings.registry.addSchema') }}</OsButton>
+      </div>
+
+      <OsPanel v-if="registryApps.length" class="reg-list">
+        <div v-for="a in registryApps" :key="a.id" class="reg-item">
+          <AppIcon :app="a.id" :icon="a.icon" :size="34" />
+          <div class="reg-meta">
+            <span class="an">{{ a.name }}<em v-if="a.builtin || a.locked" class="builtin-badge">{{ t('settings.registry.builtin') }}</em></span>
+            <span class="aid">{{ a.id }} · {{ appType(a) }}</span>
+          </div>
+          <span class="grow" />
+          <OsButton size="sm" @click="bus.emit('sys:open', { app: a.id })">{{ t('settings.registry.open') }}</OsButton>
+          <!-- 内置应用配置随版本发布、宿主锁定（locked）应用由宿主种子维护，均不可编辑/删除 -->
+          <OsButton v-if="!a.builtin && !a.locked" size="sm" @click="isWebApp(a) ? openEditWeb(a) : openEditSchema(a)">{{ t('settings.registry.edit') }}</OsButton>
+          <OsButton v-if="!a.builtin && !a.locked" size="sm" variant="danger" @click="removeApp(a.id)">{{ t('common.delete') }}</OsButton>
+        </div>
+      </OsPanel>
+      <OsEmpty v-else :text="t('settings.registry.empty')" />
 
       <!-- 弹窗：注册 / 编辑声明式应用（JSON Schema） -->
       <OsModal v-if="schemaDlg" :title="editing ? t('settings.registry.schemaTitleEdit') : t('settings.registry.schemaTitleAdd')" :ok-text="editing ? t('common.save') : t('settings.registry.okRegister')"
@@ -932,6 +979,14 @@ watch(tab, (v) => {
   font-family: var(--os-mono); font-size: 12px; line-height: 1.5;
 }
 .reg-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+/* 统一代理状态卡：开启为常规卡片，关闭时描边提示 */
+.card.off { border-color: #b25b00; }
+.px-dot {
+  font-family: var(--os-mono); font-size: 11px; font-weight: 700; flex: none;
+  padding: 2px 8px; border-radius: 999px; color: #b25b00; background: rgba(255, 159, 10, .14);
+}
+.px-dot.on { color: #1d8a3e; background: rgba(48, 209, 88, .12); }
+.card.off { margin-bottom: 12px; }
 .reg-list { padding: 4px 8px; }
 .reg-item { display: flex; align-items: center; gap: 12px; padding: 8px 4px; border-bottom: 1px solid var(--os-border); }
 .reg-item:last-child { border-bottom: none; }

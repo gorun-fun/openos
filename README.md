@@ -744,13 +744,37 @@ iframe 由浏览器同源策略天然隔离，双方脚本无法互访，OpenOS 
 政策约束，Safari 等严格环境下如遇登录异常可用工具栏「浏览器打开」兜底）。需要与
 桌面双向通信的站点，后续可经 `postMessage` 桥扩展。
 
-#### 应用代理（kind=proxy，拒绝 iframe 嵌入的站点）
+#### 统一代理（webproxy：应用反代 + 通用转发，一套引擎双入口）
 
 添加网页应用时勾选**「应用代理（服务端反代嵌入）」**，应用落库为
 `config = {"kind":"proxy","url":"https://目标/","headers":{"X-Api-Key":"…"}}`：目标站点不再由浏览器直连，而是经
 OpenOS 服务端反代加载——剥掉 `X-Frame-Options` / CSP `frame-ancestors` 等防嵌响应头，
 内部系统与设置了防嵌的公网站点（如 GitHub）都能在窗体内打开。前端仍是同一个
 `WebApp.vue` 容器，仅 iframe 地址换成 `/app/<id>/…`。
+
+代理代码是一套统一引擎（`engine.go`），两种入口共用同一条转发链路（请求清洗、
+SSRF 拨号防线、响应改写、站点适配器、WS 泵转），解决两类问题：
+
+| 入口 | 形态 | 用途 |
+|---|---|---|
+| `/app/<id>/<scheme>/<host>/…` | 应用反代（HTML/CSS 地址重写 + hook 注入） | 网页应用整页嵌入（解决 iframe 防嵌与多 iframe 嵌套） |
+| `/px/<scheme>/<host>/…` | 通用转发（纯透传，无重写无注入） | 网络请求类应用的统一 CORS 通道（见下「通用转发」） |
+
+**站点适配层（`adapter.go`）**：针对特定目标站点的特殊处理从统一链路解耦出来，
+按目标主机命中后叠加（`Hosts` 裸域后缀匹配），四个钩子：`OnRequest`（转发前
+请求头修正）、`OnResponse`（最终响应头修正）、`Hook`（按站点追加注入的 JS
+片段，serveHook 按 hook.js 请求的 Referer 解析目标主机后拼接）、`RewriteJS`
+（JS 响应体定点改写，含配套的缓存校验器处理）。内置适配器：origin-strict
+（美团系/金山文档/微信/网易系写接口严判 Origin 的兜底补源）、weixin-double-ct
+（微信 jslogin 重复 Content-Type 收敛）、music163-top-bridge（网易云登录体系的
+top 桥接与 QA 环境改写）。新增站点特殊处理改这个文件，勿动统一链路。
+
+**top 代理桥（`web/src/apps/web/pxTop.ts`）**：网易云等站点的登录/风控体系会把
+脚本与请求提升到**顶层窗口**执行（原生形态 top 即站点自身壳页），代理下 top 是
+OpenOS 桌面页，这些顶层请求会绕开代理直连目标站。桌面页在首个网页应用窗口挂载
+时安装 top 桥：顶层动态构造的绝对地址若命中已注册代理应用目标域后缀（目标 host
+末两段），重映射回 `/app/<id>/…`（fetch/XHR/script/link/img/iframe），OpenOS
+自身的相对路径请求不受影响。
 
 **URL 映射（紧凑形态）**：目标地址 `https://h:8443/a/b?q` 映射为
 `/app/<id>/https/h:8443/a/b?q`（scheme 段不写 `://`，避免路径中的 `//` 被浏览器与
@@ -789,13 +813,21 @@ Go ServeMux 的 cleanPath 折叠成 307 清洗重定向）。三层地址覆盖�
   （防头部注入，纵深防御）。
 - iframe 直嵌模式（kind=web）下浏览器无法附带自定义头，编辑区仅代理模式显示。
 
-**Referer / Sec-Fetch / Content-Type 的转发语义**：代理页面的 `Referer` 会被
+**Referer / Sec-Fetch / Content-Type / nosniff 的转发语义**：代理页面的 `Referer` 会被
 还原为**目标站自身的绝对地址**再转发（敏感接口常校验 Referer 白名单；还原值是
-目标站自己的地址，不泄露 OpenOS 宿主信息），无法识别的 Referer 不发送；浏览器
-的 `Sec-Fetch-*` 系头在反代后源关系语义失真，转发前整组剥除；上游偶发重复下发的
-`Content-Type`（实测微信 jslogin 同时给 text/javascript 与 text/html 两个值）按
-单值语义只透传首个——浏览器取末值会让 `<script>` 的严格 MIME 检查（配 nosniff）
-拒绝执行 JSONP。
+目标站自己的地址，不泄露 OpenOS 宿主信息），无法识别的 Referer 兜底补目标站
+根地址；浏览器 `Sec-Fetch-*` 系头在反代后源关系语义失真，转发前整组剥除；
+`Origin` 不无条件重建（原生 GET 不携带），严判站点由 origin-strict 适配器按
+主机兜底；上游偶发重复下发的 `Content-Type`（微信 jslogin 实测）由
+weixin-double-ct 适配器收敛为首个。代理响应**剥掉全局中间件附加的
+`X-Content-Type-Options: nosniff`**：目标站 JSONP/脚本接口常 MIME 不规范
+（网易云易盾配置回 application/json、百度 hm.js 回 text/plain），原生无 nosniff
+语义下浏览器照常执行，硬阻断会让这类站点的登录/风控初始化整体失败。
+
+**改写响应的缓存语义**：经重写的响应体（HTML/CSS/适配器 JS）与上游校验器不再
+匹配——响应剥 `ETag` / `Last-Modified` 并下发 `Cache-Control: no-cache`，
+RewriteJS 适配器命中的请求另剥 `If-None-Match` / `If-Modified-Since` 条件头，
+杜绝「304 协商命中 → 浏览器继续用改写前的缓存体」的死锁。
 
 **窗口内标签页（仅代理模式）**：页面弹出的新窗口被拦截，在原窗体内开标签页而非
 弹出真浏览器窗口——① `window.open(...)` 返回新标签的真实 window 代理（`closed` /
@@ -844,7 +876,19 @@ Go ServeMux 的 cleanPath 折叠成 307 清洗重定向）。三层地址覆盖�
   白名单校验不受影响）。极少数校验自身域名的站点（OAuth 严格回跳、银行类）仍
   可能不可用，用工具栏「浏览器打开」兜底。
 
-**开关**：`OPENOS_PROXY=off` 下架 `/app/*` 路由（应用配置保留，iframe 将得到 404）。
+**开关**：`OPENOS_PROXY=off` 下架 `/app/*` 与 `/px/*` 路由（应用配置保留，iframe
+将得到 404）。`GET /api/proxy/status` 返回统一代理是否可用（前端设置「网页应用」
+分区与网络请求类应用据此降级）。
+
+**通用转发（`/px/<scheme>/<host>/<路径>`）**：统一代理的无应用绑定入口，供
+网络请求类应用解决跨域——请求为 OpenOS 同源（自动携带登录态），服务端代为
+转发到公网目标，目标接口无需放行 CORS、响应头全量可读。语义与应用反代的差异：
+无 HTML/CSS 重写与 hook 注入（面向接口而非页面，也不构成页面嵌入通道）；无
+管理员配置头；SSRF 防线无配置目标放行（仅公网，内网/回环一律 502）；目标站
+`Set-Cookie` 收归 `/px/<scheme>/<host>/` 路径。消费方：**网络请求（http-client）**
+默认经它发送（顶栏「代理」开关可切回直连，内网/回环目标自动直连，代理不可用
+自动回落）；**声明式应用（SchemaApp）** 的跨域 `dataSource.kind=rest` 默认经
+`OpenOS.proxyUrl()` 走它，失败回落浏览器直连（`direct: true` 强制直连）。
 
 
 ### goder 界面操控指令

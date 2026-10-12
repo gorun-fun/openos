@@ -490,6 +490,12 @@ func main() {
 
 	// ---- 需要登录的接口 ----
 	authed := http.NewServeMux()
+	// 统一代理状态（登录即可读）：前端与网络请求类应用据此判定 /px/ 通用转发
+	// 通道是否可用（OPENOS_PROXY=off 时 enabled=false，应用回落浏览器直连）
+	proxyEnabled := envOr("OPENOS_PROXY", "") != "off"
+	authed.HandleFunc("GET /api/proxy/status", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"enabled": proxyEnabled, "path": "/px/"})
+	})
 	// 当前在线用户快照（增量事件走总线 sys:presence 主题；聊天等应用启动时取一次基线）
 	authed.HandleFunc("GET /api/presence", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"online": hub.OnlineUsers()})
@@ -1266,13 +1272,17 @@ func main() {
 		mux.Handle("/", spaHandler(dist, fileServer))
 	}
 
-	// ---- 应用代理（网页应用 config.kind=proxy 的服务端反代，见 README「应用代理」）----
+	// ---- 统一代理（网页应用 config.kind=proxy 的应用反代 + /px/ 通用转发，
+	// 见 README「应用代理」）----
 	// 同源 iframe 的子资源请求经 openos_token Cookie 自动携带登录态，
 	// 包内再按 role_apps 校验该用户对此应用的访问权。
 	root := http.Handler(mux)
-	if envOr("OPENOS_PROXY", "") != "off" {
+	if proxyEnabled {
 		px := webproxy.New(db)
 		mux.Handle("/app/{id}/", authSvc.Middleware(http.HandlerFunc(px.Handler)))
+		// /px/ 通用转发：网络请求类应用（http-client / 声明式应用 dataSource 等）
+		// 的统一 CORS 通道，无应用绑定、须登录、仅公网目标（SSRF 防线无配置放行）
+		mux.Handle("/px/", authSvc.Middleware(http.HandlerFunc(px.APIHandler)))
 		// CatchEscape 挂在整棵路由树外层：代理页面逃逸到本源任意路径（不止 SPA
 		// 兜底——目标站常用 /api 等本源真实路由前缀，SSO 跳转 location.href=
 		// '/api/auth/sso/login' 会撞 OpenOS 自身路由 404，路径重合甚至误调系统
@@ -1374,7 +1384,7 @@ func (s *statusWriter) Flush() {
 }
 
 // rateLimit 全局 IP 限流：600 次/分钟，突发 1200。覆盖 /api、/ws、/goder-api
-// 与 /app（webproxy 反代——登录用户可绕开 /api 桶打代理与子进程，安全审计 2026-09）。
+// 与 /app、/px（统一代理——登录用户可绕开 /api 桶打代理与子进程，安全审计 2026-09）。
 func rateLimit(_ *auth.Service, next http.Handler) http.Handler {
 	var mu sync.Mutex
 	buckets := map[string]*tokenBucket{}
@@ -1393,7 +1403,7 @@ func rateLimit(_ *auth.Service, next http.Handler) http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
-		if strings.HasPrefix(p, "/api") || p == "/ws" || strings.HasPrefix(p, "/goder-api") || strings.HasPrefix(p, "/app/") {
+		if strings.HasPrefix(p, "/api") || p == "/ws" || strings.HasPrefix(p, "/goder-api") || strings.HasPrefix(p, "/app/") || strings.HasPrefix(p, "/px/") {
 			if !get(clientIP(r)).allow(600.0/60.0, 1200) {
 				http.Error(w, `{"error":"请求过于频繁"}`, 429)
 				return

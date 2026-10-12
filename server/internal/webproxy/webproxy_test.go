@@ -475,11 +475,12 @@ func TestServeHTTPProxy(t *testing.T) {
 		t.Errorf("配置请求头应用不符合预期：%s", s)
 	}
 
-	// 重复 Content-Type：只透传首个（微信 jslogin 实测上游 bug，末值会让
-	// Chrome 严格 MIME 检查拒绝执行 JSONP）
+	// 重复 Content-Type：未知站点多值透传（单值收敛已解耦到 weixin-double-ct
+	// 适配器按目标主机生效，见 TestSiteAdapters；浏览器按末值解析是站点自身
+	// bug 的原生表现，未知站点维持原生语义）
 	w = do(upCompact+"/double-ct", nil)
-	if cts := w.Header().Values("Content-Type"); len(cts) != 1 || cts[0] != "text/javascript" {
-		t.Errorf("重复 Content-Type 应只透传首个，得到 %v", cts)
+	if cts := w.Header().Values("Content-Type"); len(cts) != 2 {
+		t.Errorf("未知站点的重复 Content-Type 应多值透传，得到 %v", cts)
 	}
 
 	// Referer 还原 + Sec-Fetch 剥离：代理页面的 Referer 还原为目标站自身地址
@@ -748,5 +749,202 @@ func TestServeHTTPProxyGzipBomb(t *testing.T) {
 		if w.Header().Get("Content-Encoding") == "" {
 			t.Errorf("%s Content-Encoding 应保留", path)
 		}
+	}
+}
+
+// TestSiteAdapters 站点适配层：主机匹配规则与两个内置适配器的钩子行为。
+func TestSiteAdapters(t *testing.T) {
+	// 匹配：裸域匹配自身与任意子域、精确段、端口剥离、大小写不敏感、未知域不命中
+	if got := matchAdapters("me.meituan.com"); len(got) == 0 || got[0].Name != "origin-strict" {
+		t.Errorf("me.meituan.com 应命中 origin-strict，得到 %v", got)
+	}
+	if got := matchAdapters("meituan.com"); len(got) == 0 || got[0].Name != "origin-strict" {
+		t.Errorf("meituan.com 裸域应命中自身，得到 %v", got)
+	}
+	if got := matchAdapters("ME.MEITUAN.COM:443"); len(got) == 0 {
+		t.Errorf("大写与端口应被归一后命中，得到 %v", got)
+	}
+	if got := matchAdapters("login.weixin.qq.com"); len(got) != 2 {
+		t.Errorf("微信域应命中 origin-strict + weixin-double-ct 两个适配器，得到 %v", names(got))
+	}
+	if got := matchAdapters("fake-meituan.com.evil.io"); len(got) != 0 {
+		t.Errorf("后缀伪造域名不应命中（须整段匹配），得到 %v", names(got))
+	}
+	if got := matchAdapters("unknown.example"); len(got) != 0 {
+		t.Errorf("未知域不应命中任何适配器，得到 %v", names(got))
+	}
+
+	// origin-strict：无 Origin 时补目标站自身源（不泄露宿主信息），已有则不覆盖
+	out := httptest.NewRequest("POST", "https://me.meituan.com/api/x", nil)
+	out.Header.Del("Origin")
+	for _, a := range matchAdapters("me.meituan.com") {
+		if a.OnRequest != nil {
+			a.OnRequest(out, nil)
+		}
+	}
+	if v := out.Header.Get("Origin"); v != "https://me.meituan.com" {
+		t.Errorf("origin-strict 应补 Origin=目标站自身源，得到 %q", v)
+	}
+	out.Header.Set("Origin", "https://custom.example")
+	for _, a := range matchAdapters("me.meituan.com") {
+		if a.OnRequest != nil {
+			a.OnRequest(out, nil)
+		}
+	}
+	if v := out.Header.Get("Origin"); v != "https://custom.example" {
+		t.Errorf("已有 Origin 不应被覆盖，得到 %q", v)
+	}
+	// 未知站点：通用链路不补 Origin（原生 GET 不携带 Origin）
+	out2 := httptest.NewRequest("GET", "https://unknown.example/x", nil)
+	if v := out2.Header.Get("Origin"); v != "" {
+		t.Errorf("未知站点不应凭空补 Origin，得到 %q", v)
+	}
+
+	// weixin-double-ct：重复 Content-Type 收敛为首个（微信 jslogin 上游 bug，
+	// 浏览器按末值解析会让 script 严格 MIME 检查拒执行）
+	h := http.Header{}
+	h.Add("Content-Type", "text/javascript")
+	h.Add("Content-Type", "text/html; charset=gbk")
+	for _, a := range matchAdapters("login.weixin.qq.com") {
+		if a.OnResponse != nil {
+			a.OnResponse(h)
+		}
+	}
+	if cts := h.Values("Content-Type"); len(cts) != 1 || cts[0] != "text/javascript" {
+		t.Errorf("微信域重复 Content-Type 应收敛为首个，得到 %v", cts)
+	}
+}
+
+func names(as []*SiteAdapter) []string {
+	var out []string
+	for _, a := range as {
+		out = append(out, a.Name)
+	}
+	return out
+}
+
+// TestAPIForward 通用转发（/px/ 模式）：与统一引擎共用链路——会话 Cookie 剥离、
+// Set-Cookie 收归 /px/ 前缀、剥嵌入封锁头；差异面——HTML 不重写不注入 hook。
+func TestAPIForward(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/data":
+			w.Header().Add("Set-Cookie", "sid=9; Domain=t.example; Path=/")
+			w.Header().Set("X-Frame-Options", "DENY")
+			_, _ = w.Write([]byte(`{"ok":1}`))
+		case "/echo":
+			fmt.Fprintf(w, "Cookie:%s|Auth:%s|Origin:%s", r.Header.Get("Cookie"), r.Header.Get("Authorization"), r.Header.Get("Origin"))
+		case "/page":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<html><head></head><body><a href="/z">z</a></body></html>`))
+		}
+	}))
+	defer upstream.Close()
+	upURL := mustURL(t, upstream.URL)
+	compact := upURL.Scheme + "/" + upURL.Host
+
+	p := New(nil)
+	// 通用转发无应用配置；测试上游是回环地址，经 cfg 放行拨号（SSRF 防线按
+	// 配置目标主机豁免——生产 /px/ 无 cfg、回环一律拒绝，见下方 APIHandler
+	// 直测的 SSRF 用例）
+	pcfg := &proxyConfig{Kind: "proxy", URL: upstream.URL}
+	do := func(rest string, hdr map[string]string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", "/px/"+rest, nil)
+		for k, v := range hdr {
+			r.Header.Set(k, v)
+		}
+		w := httptest.NewRecorder()
+		tu, err := decodeTarget(rest)
+		if err != nil {
+			t.Fatalf("decodeTarget(%q): %v", rest, err)
+		}
+		p.serveForward(w, r, tu, forwardOpts{prefix: "/px/", cfg: pcfg})
+		return w
+	}
+
+	// JSON 接口：Set-Cookie 收归 /px/ 前缀 + 剥 Domain；剥嵌入封锁头
+	w := do(compact+"/api/data", nil)
+	if w.Code != 200 || w.Body.String() != `{"ok":1}` {
+		t.Fatalf("/api/data code=%d body=%s", w.Code, w.Body.String())
+	}
+	if sc := w.Header().Get("Set-Cookie"); !strings.Contains(sc, "Path=/px/"+compact+"/") || strings.Contains(sc, "Domain=") {
+		t.Errorf("Set-Cookie 应收归 /px/ 前缀且剥 Domain：%q", sc)
+	}
+	if v := w.Header().Get("X-Frame-Options"); v != "" {
+		t.Errorf("X-Frame-Options 应被剥掉：%q", v)
+	}
+
+	// 会话剥离：OpenOS 会话不外泄、其余 Cookie 放行；Authorization 剥除；
+	// Referer 兜底为目标站自身（同应用反代语义）
+	w = do(compact+"/echo", map[string]string{
+		"Cookie":         "openos_token=SECRET; sid=7",
+		"Authorization":  "Bearer x",
+	})
+	if s := w.Body.String(); strings.Contains(s, "SECRET") || !strings.Contains(s, "sid=7") ||
+		strings.Contains(s, "Auth:Bearer") || !strings.Contains(s, "Origin:") {
+		t.Errorf("会话剥离/Referer 语义不符：%s", s)
+	}
+
+	// HTML 不重写不注入（通用转发面向接口，不是页面嵌入通道）
+	w = do(compact+"/page", nil)
+	if strings.Contains(w.Body.String(), "hook.js") || strings.Contains(w.Body.String(), "/px/"+compact+"/z") {
+		t.Errorf("通用转发不应重写 HTML 或注入 hook：%s", w.Body.String())
+	}
+
+	// SSRF：无配置目标放行，回环一律拒绝
+	w = do("https/localhost:1/x", nil)
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("内网目标应 502，得到 %d", w.Code)
+	}
+
+	// 非法地址
+	r := httptest.NewRequest("GET", "/px/", nil)
+	w2 := httptest.NewRecorder()
+	p.APIHandler(w2, r)
+	if w2.Code != http.StatusBadRequest {
+		t.Errorf("空目标应 400，得到 %d", w2.Code)
+	}
+}
+
+// TestRefererTargetHook 站点适配器的 Hook 注入：按 hook.js 请求的 Referer 解析
+// 目标主机，命中适配器的文档拿到追加片段、未命中的只拿通用 hook。
+func TestRefererTargetHook(t *testing.T) {
+	cases := []struct {
+		ref  string
+		want string
+	}{
+		{"http://h.example/app/music-163/https/music.163.com/discover", "music.163.com"},
+		{"http://h.example/discover?__os_px=music-163~https~music.163.com", "music.163.com"},
+		{"http://h.example/app/x/https/unknown.example/p", "unknown.example"},
+		{"", ""},
+		{"http://h.example/other", ""},
+	}
+	for _, c := range cases {
+		if got, ok := refererTargetHost(c.ref); got != c.want || ok != (c.want != "") {
+			t.Errorf("refererTargetHost(%q) = %q,%v，期望 %q", c.ref, got, ok, c.want)
+		}
+	}
+
+	// music-163 域的 hook.js 响应应包含 top 桥接片段；未知域不包含
+	r := httptest.NewRequest("GET", "/app/music-163/hook.js", nil)
+	r.Header.Set("Referer", "http://h.example/app/music-163/https/music.163.com/discover")
+	w := httptest.NewRecorder()
+	serveHook(w, r, "music-163")
+	if !strings.Contains(w.Body.String(), "top[k] = window[k]") {
+		t.Errorf("music.163.com 的 hook 应包含 top 桥接片段")
+	}
+	r2 := httptest.NewRequest("GET", "/app/x/hook.js", nil)
+	r2.Header.Set("Referer", "http://h.example/app/x/https/unknown.example/p")
+	w2 := httptest.NewRecorder()
+	serveHook(w2, r2, "x")
+	if strings.Contains(w2.Body.String(), "top[k] = window[k]") {
+		t.Errorf("未知站点的 hook 不应包含站点适配片段")
+	}
+	if !strings.Contains(w2.Body.String(), "__openosPx") {
+		t.Errorf("通用 hook 主体缺失")
+	}
+	// __PREFIX__ 占位符全量替换（含适配片段）
+	if strings.Contains(w.Body.String(), "__PREFIX__") || strings.Contains(w2.Body.String(), "__PREFIX__") {
+		t.Errorf("占位符应被全量替换")
 	}
 }

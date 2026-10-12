@@ -26,6 +26,19 @@ export async function fetchWsTicket(): Promise<string> {
 let onUnauthorized: (() => void) | null = null
 export function setUnauthorizedHandler(fn: () => void) { onUnauthorized = fn }
 
+/** 统一代理地址映射：把绝对 http(s) 地址映射为通用转发路径 /px/<scheme>/<host>/<路径>。
+ *  应用把跨域接口地址经此映射后请求为同源（携带 openos_token Cookie 自动鉴权），
+ *  目标接口无需放行 CORS、响应头全量可读；非绝对 http(s) 地址原样返回。
+ *  目标编码与服务端 compactTarget 同规则（scheme 段不写 ://，防路径 // 折叠）。 */
+export function proxyUrl(u: string): string {
+  const m = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\/([^/\s?#]+)([\s\S]*)$/.exec(u.trim())
+  if (!m) return u
+  const [, scheme, host, rest] = m
+  const s = scheme.toLowerCase()
+  if (s !== 'http' && s !== 'https' && s !== 'ws' && s !== 'wss') return u
+  return `/px/${s}/${host}${rest || '/'}`
+}
+
 /** 401 静默恢复钩子（宿主注册，如 grf-hotel 经宿主 /api/v1/auth/os-token 换发
  *  新桌面令牌）：返回非空令牌 → setToken 后由调用方原地重试原请求，全程不清
  *  状态不跳转；返回空 / 抛错 → 调用方落回 triggerUnauthorized 全局登出。

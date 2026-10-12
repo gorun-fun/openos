@@ -48,13 +48,12 @@ func copyRespHeaders(w http.ResponseWriter, resp *http.Response, prefix string, 
 			}
 			continue
 		case "content-type":
-			// 单值语义，只透传首个（与 Header.Get、服务端 HTML/CSS 判定一致）。
-			// 上游偶发重复下发（微信 jslogin 同时给 text/javascript 与
-			// text/html 两个值）：浏览器按末值解析会让 <script> 的严格 MIME
-			// 检查（配 nosniff）拒绝执行 JSONP——实测 Chrome 拿不到 uuid、
-			// 二维码不渲染
-			if len(vs) > 0 {
-				h.Add(k, vs[0])
+			// 多值透传（罕见形态）：单值收敛不再通用处理——上游真下发重复
+			// Content-Type 属站点自身 bug，由 adapter.go 的 weixin-double-ct
+			// 适配器按目标主机收敛（微信 jslogin 实测：浏览器按末值解析会让
+			// <script> 严格 MIME 检查拒绝执行 JSONP），其余站点维持原生语义
+			for _, v := range vs {
+				h.Add(k, v)
 			}
 			continue
 		}
@@ -63,10 +62,17 @@ func copyRespHeaders(w http.ResponseWriter, resp *http.Response, prefix string, 
 		}
 	}
 	// Referrer-Policy=same-origin：同源请求携带完整 Referer——这是逃逸回捕
-	// （CatchEscape 按 Referer 把 location.href='/x' 类跳转 307 回代理路径）的
+	//（CatchEscape 按 Referer 把 location.href='/x' 类跳转 307 回代理路径）的
 	// 判定依据；跨源不发送（转发上游前本就剥 Referer，不外泄）。覆盖全局
 	// 中间件的 no-referrer（其会让代理页面的所有导航都不带 Referer）
 	h.Set("Referrer-Policy", "same-origin")
+	// 剥掉全局中间件附加的 X-Content-Type-Options: nosniff：代理透传的是目标站
+	// 内容，须维持其「无 nosniff」的原生宽松 MIME 语义——上游 JSONP/脚本接口
+	// 常 MIME 不规范（网易云易盾配置 JSONP 回 application/json、百度 hm.js 回
+	// text/plain），原生下浏览器照常执行，nosniff 会按严格 MIME 检查硬阻断脚本
+	//（易盾初始化失败 → 登录二维码无法生成）。信任模型不变：经代理的第三方
+	// 脚本本就与桌面同源执行（等同 goder 内嵌），nosniff 不提供额外保护
+	h.Del("X-Content-Type-Options")
 }
 
 // rewriteSetCookie 把目标站的 Cookie 收归代理路径下：

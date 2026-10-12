@@ -1,30 +1,41 @@
-// Package webproxy 实现网页应用的「应用代理」：把 config.kind=proxy 的目标站点
-// 经服务端反代映射到 /app/<id>/<目标URL> 路径下，剥掉 X-Frame-Options / CSP
-// frame-ancestors 等拒绝嵌入的响应头，并重写 HTML/CSS 里的资源地址与
-// Set-Cookie / Location，使原本禁止 iframe 嵌入的页面可以在 OpenOS 窗体内打开。
+// Package webproxy 实现统一代理：把外部站点/接口经服务端转发到 OpenOS 同源路径下，
+// 解决浏览器的跨域（CORS）与 iframe 嵌套（X-Frame-Options / CSP frame-ancestors）
+// 两类限制。两种入口形态共用同一套转发引擎（engine.go）：
 //
-// 三层地址覆盖（覆盖 JS 动态构造的 URL）：
+//	/app/<id>/<scheme>/<host>/<路径>   应用反代（config.kind=proxy 的网页应用）
+//	/px/<scheme>/<host>/<路径>          通用转发（网络请求类应用解决 CORS 的通道）
+//
+// 应用反代面向「整页嵌入」：剥掉拒绝嵌入的响应头、重写 HTML/CSS 里的资源地址、
+// 注入 hook.js 包装 JS 动态构造 URL 的入口，使原本禁止 iframe 嵌入的页面可以在
+// OpenOS 窗体内打开。通用转发面向「接口请求」：纯透传（无重写无注入），供
+// http-client / 声明式应用 dataSource 等网络请求默认走代理发送，目标接口无需
+// 放行跨域；不重写不注入也让它不适合当页面嵌入通道（地址不会被映射回代理路径）。
+//
+// 三层地址覆盖（覆盖 JS 动态构造的 URL，应用反代形态）：
 //  1. 服务端重写 HTML/CSS 中的静态资源地址（含根绝对路径，这是 <base> 注入做不到的）
 //  2. 注入 hook.js 包装 fetch/XHR/WebSocket/window.open/history/URL 属性等动态构造入口
 //  3. 相对地址天然按 /app/<id>/<目标URL> 前缀解析，JS 动态拼接的相对路径无需拦截即命中
 //
 // 文件布局（按职责划分）：
-//   - target.go   紧凑目标地址编解码（/app/<id>/ 之后的地址空间）
+//   - target.go   紧凑目标地址编解码（/app/<id>/ 与 /px/ 之后的地址空间）
+//   - engine.go   统一转发主链路（双模式：读入、解压、重写、透传）
+//   - adapter.go  站点适配层（特定目标站点的特殊处理，从转发链路解耦）
 //   - config.go   代理配置解析与自定义请求头清洗
 //   - guard.go    SSRF 拨号防线与宿主自身地址判定
 //   - catch.go    逃逸回捕（CatchEscape）与 hook 还原标记
 //   - request.go  转发请求的清洗与改写（Referer/Cookie/OAuth 回跳参数）
 //   - response.go 转发响应的头改写（Set-Cookie/Location/Refresh/Referrer-Policy）
-//   - forward.go  HTTP 转发主链路（读入、解压、重写、透传）
 //   - ws.go       WebSocket 泵转
 //   - hook.go     注入脚本下发
 //   - rewrite.go  HTML/CSS 地址重写（字节级标签扫描）
 //
 // 安全边界：
-//   - 代理目标只来自管理员在应用注册中的配置（kind=proxy），不接受请求方传 URL；
-//     配置目标本身允许内网地址（管理员的显式选择）
-//   - 目标以外的主机（子资源/重定向/OAuth 跳转）只允许公网地址，内网一律拒绝（防 SSRF）
-//   - 转发前剥离 OpenOS 自身会话（openos_token 等 Cookie 与 Authorization 头）
+//   - 应用反代的目标只来自管理员在应用注册中的配置（kind=proxy），不接受请求方
+//     传 URL；配置目标本身允许内网地址（管理员的显式选择）
+//   - 通用转发与目标以外的主机（子资源/重定向/OAuth 跳转）只允许公网地址，内网
+//     一律拒绝（防 SSRF）
+//   - 两种形态都要求登录态；转发前剥离 OpenOS 自身会话（openos_token 等 Cookie
+//     与 Authorization 头）
 //   - 经代理执行的第三方 JS 与桌面同源，仅应配置可信应用（信任模型与 goder 内嵌一致）
 package webproxy
 
@@ -107,7 +118,7 @@ func (p *Proxy) Handler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Location", "/app/"+id+"/"+compactTarget(cfgURL))
 		w.WriteHeader(http.StatusFound)
 	case rest == hookPath || strings.HasPrefix(rest, hookPath+"?"):
-		serveHook(w, id)
+		serveHook(w, r, id)
 	case strings.HasPrefix(rest, "http://") || strings.HasPrefix(rest, "https://"):
 		// 宽容：直接携带 :// 的旧式地址压回紧凑形态
 		w.Header().Set("Location", "/app/"+id+"/"+strings.Replace(rest, "://", "/", 1))
@@ -134,4 +145,31 @@ func (p *Proxy) Handler(w http.ResponseWriter, r *http.Request) {
 			p.serveHTTPProxy(w, r, id, tu, cfg)
 		}
 	}
+}
+
+// APIHandler 处理 /px/<scheme>/<host>/<路径> 全部子路径：统一代理的通用转发
+// 端点（无应用绑定）。网络请求类应用（http-client、声明式应用 dataSource 等）
+// 把跨域绝对地址映射到本路径发送，服务端代为转发——同源请求无 CORS 限制、
+// 响应头全量可读。挂载方式：authSvc.Middleware（须登录）。
+//
+// 与应用反代的差异（其余链路完全一致，见 engine.go）：
+//   - 不做 HTML/CSS 地址重写、不注入 hook（面向接口而非页面）
+//   - 无管理员配置：不附加自定义请求头；SSRF 防线无配置目标放行，仅公网可达
+//   - Cookie 收归 /px/<scheme>/<host>/ 路径（与浏览器对目标站的直连会话天然隔离）
+func (p *Proxy) APIHandler(w http.ResponseWriter, r *http.Request) {
+	// 用 EscapedPath 重建目标原始地址（保留 %XX 编码），查询串拼回
+	rest := strings.TrimPrefix(r.URL.EscapedPath(), "/px/")
+	if r.URL.RawQuery != "" {
+		rest += "?" + r.URL.RawQuery
+	}
+	tu, err := decodeTarget(rest)
+	if err != nil {
+		http.Error(w, "代理目标地址不合法："+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if tu.Scheme == "ws" || tu.Scheme == "wss" {
+		p.serveWS(w, r, tu, nil)
+		return
+	}
+	p.serveForward(w, r, tu, forwardOpts{prefix: "/px/"})
 }

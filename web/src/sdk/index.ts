@@ -25,7 +25,7 @@ import { runtimeComponents, appChrome } from '../stores/apps'
 import { useWindows } from '../stores/windows'
 import { useApps } from '../stores/apps'
 import { useSession } from '../stores/session'
-import { api, fsApi, getToken, fetchWsTicket, type SessionUser } from '../api/client'
+import { api, fsApi, getToken, fetchWsTicket, proxyUrl, type SessionUser } from '../api/client'
 import { notify } from '../stores/notifications'
 import { useCalendar, todayStr, REMIND_OPTIONS, type CalMark, type RemindOffset } from '../stores/calendar'
 import { registerDialog, unregisterDialog, openDialog, dialogRegistry, type DialogDef } from '../ui/dialogService'
@@ -171,6 +171,11 @@ export const OpenOS = {
   async authTicket(): Promise<string> {
     return fetchWsTicket()
   },
+  /** 统一代理地址映射：把绝对 http(s)/ws(s) 地址映射为通用转发路径
+   *  /px/<scheme>/<host>/<路径>（同源请求，服务端代为转发）。网络请求类应用
+   *  默认经它发送跨域请求——目标接口无需放行 CORS、响应头全量可读：
+   *  fetch(OpenOS.proxyUrl('https://api.example.com/v1/data')) */
+  proxyUrl,
   /** 向 goder AI 注册自定义桌面工具（P6 扩展点）：AI 经 os_app_tools 可见、
    *  os_app_tool({tool, args}) 调用（run 在桌面壳执行）。返回完整工具名。
    *  const key = OpenOS.registerAgentTool({ appId:'rooms', name:'vacant',

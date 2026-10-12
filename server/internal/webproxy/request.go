@@ -37,14 +37,15 @@ func sanitizeOutRequest(out, orig *http.Request, id string, cfg *proxyConfig, tu
 			h.Set("Referer", rr)
 		}
 	}
-	// Origin/Referer 兜底重建：kdocs 等站点的写接口要求二者至少一个匹配自家域，
-	// 反代剥光后直接 403「SessionDeleted」（带 X-Forwarded-* 的代理链请求尤其
-	// 严判）。识别不出原始 Referer 的兜底补目标站根地址；Origin 统一补目标站
-	// 自身源——二者值都是目标站自己的，与 Referer 还原同一语义，不泄露宿主信息。
+	// Referer 兜底重建：反代页里同源请求原生形态本就携带目标站自身地址的
+	// Referer（代理前缀/还原标记两种形态上面已还原），识别不出时补目标站根
+	// 地址——值是目标站自己的，不泄露宿主信息。
 	if h.Get("Referer") == "" {
 		h.Set("Referer", tu.Scheme+"://"+tu.Host+"/")
 	}
-	h.Set("Origin", tu.Scheme+"://"+tu.Host)
+	// Origin 不在此无条件重建：原生 GET 请求不携带 Origin，凭空补上是对未知
+	// 站点的多余改写。kdocs/美团系等写接口严判 Origin 的已知站点由 adapter.go
+	// 的 origin-strict 适配器按目标主机兜底补齐（与 Referer 重建同一语义）。
 	// Sec-Fetch-* 描述浏览器视角的源关系（代理后基准源是 OpenOS 宿主，到达目标站
 	// 语义全失真——如跨域跳转显示成 same-origin），整组剥除，服务器按无该头处理
 	for k := range h {

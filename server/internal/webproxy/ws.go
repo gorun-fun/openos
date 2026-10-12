@@ -13,7 +13,13 @@ import (
 )
 
 func (p *Proxy) serveWS(w http.ResponseWriter, r *http.Request, tu *url.URL, cfg *proxyConfig) {
-	cfgHost := cfgURLHost(cfg.URL)
+	// cfg 可为 nil（/px/ 通用转发形态：无管理员配置头与配置目标放行）
+	var cfgHost string
+	var dialHeader http.Header
+	if cfg != nil {
+		cfgHost = cfgURLHost(cfg.URL)
+		dialHeader = cfg.dialHeader()
+	}
 	tu.RawQuery = stripPxMark(tu.RawQuery) // 还原标记不外带
 	dialURL := &url.URL{Scheme: tu.Scheme, Host: tu.Host, Path: tu.Path, RawPath: tu.RawPath, RawQuery: tu.RawQuery}
 	dialer := &websocket.Dialer{
@@ -24,7 +30,7 @@ func (p *Proxy) serveWS(w http.ResponseWriter, r *http.Request, tu *url.URL, cfg
 		},
 	}
 	// 握手同样带上管理员配置的自定义请求头（内网 WS 网关常按头鉴权）
-	upconn, _, err := dialer.Dial(dialURL.String(), cfg.dialHeader())
+	upconn, _, err := dialer.Dial(dialURL.String(), dialHeader)
 	if err != nil {
 		http.Error(w, "上游 WebSocket 连接失败："+err.Error(), http.StatusBadGateway)
 		return

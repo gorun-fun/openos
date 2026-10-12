@@ -15,7 +15,8 @@
 //
 // dataSource.kind = "rest" 时的完整字段：
 //   url      请求地址。相对路径（/api/...）默认携带当前登录态（走统一 API 客户端）；
-//            跨域绝对地址默认裸 fetch，避免令牌外泄，可用 auth: true 强制携带
+//            跨域绝对地址默认经统一代理（/px/ 通用转发）发送，无需目标放行 CORS，
+//            代理不可用时回落浏览器直连；direct: true 强制直连，auth: true 强制携带登录态
 //   method   可选，默认 GET；POST 时可携带 body（JSON）
 //   body     POST 请求体（对象）
 //   headers  自定义请求头（对象，键值对）
@@ -25,7 +26,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import type { WinState } from '../stores/windows'
 import { OsTabs, OsTable, OsEmpty } from '../ui'
-import { api } from '../api/client'
+import { api, proxyUrl } from '../api/client'
 import { bus } from '../bus/bus'
 
 const props = defineProps<{ schema: any; win: WinState }>()
@@ -53,6 +54,27 @@ function getPath(data: any, path?: string): any {
   return String(path).split('.').reduce((acc, k) => (acc == null ? undefined : acc[k.trim()]), data)
 }
 
+// 跨域 rest 取数：默认经统一代理（同源无 CORS 限制），任何失败（代理未开启、
+// 网络错误、非 2xx、解析失败）回落浏览器直连——直连受 CORS 约束，但保证旧
+// 服务端/代理故障时数据仍尽可能可用（新鲜度降级而非完全不可用）
+async function restFetch(ds: any, method: string, isPost: boolean, direct: boolean): Promise<any> {
+  const doFetch = async (url: string) => {
+    const headers: Record<string, string> = { ...(ds.headers || {}) }
+    if (isPost) headers['Content-Type'] = 'application/json'
+    const resp = await fetch(url, {
+      method: isPost ? 'POST' : method,
+      headers,
+      body: isPost ? JSON.stringify(ds.body) : undefined,
+    })
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    return await resp.json()
+  }
+  if (!direct) {
+    try { return await doFetch(proxyUrl(ds.url)) } catch { /* 回落直连 */ }
+  }
+  return doFetch(ds.url)
+}
+
 async function load() {
   const ds = props.schema?.dataSource
   if (!ds) { loading.value = false; return }
@@ -63,23 +85,19 @@ async function load() {
     } else if (ds.kind === 'rest') {
       const method = String(ds.method || 'GET').toUpperCase()
       const isPost = method === 'POST' && ds.body !== undefined
-      // 相对路径默认带登录态（同源 API）；跨域绝对地址用裸 fetch，避免令牌外泄
-      const withAuth = ds.auth ?? !/^(https?:)?\/\//i.test(ds.url)
+      // 相对路径默认带登录态（同源 API）；跨域绝对地址默认经统一代理（/px/）
+      // 发送——服务端代为转发，目标接口无需放行 CORS；代理不可用（OPENOS_PROXY=off
+      // 或旧服务端）或转发失败时回落浏览器直连。ds.direct=true 强制直连。
+      const isCross = /^(https?:)?\/\//i.test(ds.url)
+      const withAuth = ds.auth ?? !isCross
+      const direct = ds.direct === true || !isCross
       let data: any
       if (withAuth) {
         data = isPost
           ? await api.post(ds.url, ds.body, ds.headers)
           : await api.get(ds.url, ds.headers)
       } else {
-        const headers: Record<string, string> = { ...(ds.headers || {}) }
-        if (isPost) headers['Content-Type'] = 'application/json'
-        const resp = await fetch(ds.url, {
-          method: isPost ? 'POST' : method,
-          headers,
-          body: isPost ? JSON.stringify(ds.body) : undefined,
-        })
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-        data = await resp.json()
+        data = await restFetch(ds, method, isPost, direct)
       }
       items.value = getPath(data, ds.path)
       if (!Array.isArray(items.value)) items.value = []

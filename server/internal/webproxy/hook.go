@@ -1,6 +1,8 @@
 // 注入脚本下发：rewriteHTML 把 <script src="/app/<id>/hook.js"> 注入每个代理
-// 页面，本文件负责按应用 id 替换占位符后下发（go:embed，改动 hook.js 后必须
-// 重新编译服务端）。
+// 页面，本文件按应用 id 替换占位符后下发（go:embed，改动 hook.js 后必须
+// 重新编译服务端）。请求的 Referer 携带页面地址（代理前缀或还原标记形态），
+// 据此解析目标主机并追加命中的站点适配器 Hook 片段（见 adapter.go）——无
+// Referer / 解析失败时只下发通用 hook。
 package webproxy
 
 import (
@@ -19,9 +21,17 @@ const (
 	hookPath       = "hook.js"
 )
 
-func serveHook(w http.ResponseWriter, id string) {
+func serveHook(w http.ResponseWriter, r *http.Request, id string) {
 	// 全量替换：源文件注释与代码中均出现占位符，只换首个会漏掉 PREFIX 赋值
 	body := bytes.ReplaceAll(hookJS, []byte("__PREFIX__"), []byte("/app/"+id+"/"))
+	if host, ok := refererTargetHost(r.Referer()); ok {
+		for _, a := range matchAdapters(host) {
+			if a.Hook != "" {
+				body = append(body, '\n')
+				body = append(body, bytes.ReplaceAll([]byte(a.Hook), []byte("__PREFIX__"), []byte("/app/"+id+"/"))...)
+			}
+		}
+	}
 	h := w.Header()
 	h.Set("Content-Type", "application/javascript; charset=utf-8")
 	h.Set("Cache-Control", "no-store")

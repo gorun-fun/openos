@@ -10,6 +10,7 @@ import { useWindows } from '../../stores/windows'
 import { useApps } from '../../stores/apps'
 import { OsEmpty, icons } from '../../ui'
 import { handleExternalKey } from '../../ui/keys'
+import { installPxTopBridge } from './pxTop'
 import { WEB_APPS } from './registry'
 
 const props = defineProps<{ win: WinState }>()
@@ -123,6 +124,9 @@ onBeforeUnmount(() => { clearTimeout(loadTimer); clearInterval(anchorTimer); win
 
 onMounted(() => {
   if (url.value) windows.setTitle(props.win.id, title.value)
+  // top 代理桥：站点（网易云登录体系等）把脚本与请求提升到顶层窗口执行，桥把
+  // 这些顶层动态构造的目标站地址重映射回代理路径（幂等，首个网页应用窗口安装）
+  installPxTopBridge()
   window.addEventListener('message', onDeskHandshake)
   window.addEventListener('message', onIframeKey)
   // 代理页 hook 的越权导航代执行：外层 iframe 带 sandbox（防 framebusting），sandbox
