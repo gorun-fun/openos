@@ -77,9 +77,11 @@ RUN --mount=type=cache,id=openos-gomod,target=/go/pkg/mod \
 # ---- 运行镜像 ----
 FROM alpine:3.24
 # 国内 Alpine 源（与 .gitlab-ci.yml 部署阶段同款）；su-exec 用于入口降权；
-# git 供 gh 与后续自动修复应用（goder 拉取应用源码 → 修复 → commit/push 回仓库）使用
+# git 供 gh 与后续自动修复应用（goder 拉取应用源码 → 修复 → commit/push 回仓库）使用；
+# bash 供 gh 的 bash 工具（契约恒 bash -c，无 sh 兜底）——alpine 默认只有
+# busybox sh，缺 bash 时容器内每次工具调用直接 fork/exec 失败
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories \
-    && apk add --no-cache ca-certificates tzdata su-exec git && adduser -D -u 1000 openos
+    && apk add --no-cache ca-certificates tzdata su-exec git bash && adduser -D -u 1000 openos
 WORKDIR /app
 COPY --from=server /openos /app/openos
 COPY --from=web /build/web/dist /app/web/dist
