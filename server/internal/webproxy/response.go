@@ -79,27 +79,39 @@ func copyRespHeaders(w http.ResponseWriter, resp *http.Response, prefix string, 
 // 剥 Domain（落回 OpenOS 源）、Path 改写到 /app/<id>/<目标绝对地址> 前缀（缺省
 // Path 本就按请求目录作用域，无需改写）、http 部署下剥 Secure 并把 SameSite=None
 // 降级为 Lax（None 依赖 Secure，缺失时浏览器直接丢弃）。
+// 例外：原 Cookie 声明了 Domain=（跨子域共享语义——美团 eprt/eprtimg 登录票据
+// 即 Domain=.meituan.com）时，Path 提升到应用级 /app/<id>/ 而非下发域的子路径。
+// 代理剥 Domain 后无法靠域共享，Path 限在下发域子路径会让其他子域（票据下发在
+// epassport/me、消费在 tpt 等）的代理请求永远带不上票据——美团发票接口 403
+//（无权访问）的根因。代价：票据会随 /app/<id>/ 前缀请求发给该应用的全部目标域
+//（含 CDN），是代理同源化的固有放宽；同名跨子域 Cookie 相互覆盖与原生语义一致。
 func rewriteSetCookie(v, prefix string, target *url.URL, secure bool) string {
 	parts := strings.Split(v, ";")
 	var b strings.Builder
 	b.WriteString(parts[0])
+	hasDomain := false
 	for _, p := range parts[1:] {
 		t := strings.TrimSpace(p)
 		lower := strings.ToLower(t)
 		switch {
-		case strings.HasPrefix(lower, "domain="): // 剥 Domain
+		case strings.HasPrefix(lower, "domain="): // 剥 Domain；标记跨子域语义
+			hasDomain = true
 		case strings.HasPrefix(lower, "path="):
 			pv := t[len("path="):]
-			if strings.HasPrefix(pv, "/") {
+			if strings.HasPrefix(pv, "/") && !hasDomain {
 				b.WriteString("; Path=" + prefix + target.Scheme + "/" + target.Host + pv)
 			}
-			// 非法 path 丢弃属性，回落按请求目录的默认作用域
+			// 带 Domain 的由下方统一提升到应用级；非法 path 丢弃属性，回落
+			// 按请求目录的默认作用域
 		case lower == "secure" && !secure:
 		case strings.HasPrefix(lower, "samesite=none") && !secure:
 			b.WriteString("; SameSite=Lax")
 		default:
 			b.WriteString("; " + t)
 		}
+	}
+	if hasDomain {
+		b.WriteString("; Path=" + prefix)
 	}
 	return b.String()
 }
@@ -109,10 +121,22 @@ func rewriteLocation(v, prefix string, target *url.URL, selfHost string) string 
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return v
 	}
-	u.Fragment = ""
+	// Fragment 保留（compactTarget 原样输出）：302 目标带 hash 是 SPA 微前端的
+	// 业务路由（美团 ebooking 挂载链），剥掉会让业务页以无路由形态初始化、降级
+	// 成门户首页并自愈式再挂容器（无限套娃的根因）；hash 不随请求进服务端
 	// 宿主自身绝对地址：目标站 JS 读 location.origin 拼出的自我引用。挂回当前
-	// 文档的目标域而非前缀化宿主地址（后者会让代理拨号自身、触发 SSRF 防线）
+	// 文档的目标域而非前缀化宿主地址（后者会让代理拨号自身、触发 SSRF 防线）；
+	// path 携带 /app/<id>/ 前缀的复合形态（hook pxQuery 的回跳参数产物被上游
+	// 原样 302 回来）按前缀还原完整目标，不剥前缀会把代理路径段带进目标 path
 	if isSelfHost(u.Host, selfHost) {
+		prefixLen := len(prefix)
+		if len(u.Path) > prefixLen && u.Path[:prefixLen] == prefix {
+			if tu, err := decodeTarget(u.Path[prefixLen:]); err == nil {
+				tu.RawQuery = u.RawQuery
+				tu.Fragment = u.Fragment
+				return prefix + compactTarget(tu)
+			}
+		}
 		u.Scheme, u.Host = target.Scheme, target.Host
 	}
 	return prefix + compactTarget(u)

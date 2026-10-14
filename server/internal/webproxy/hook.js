@@ -25,12 +25,23 @@
   var APPID = PREFIX.split('/')[2] || '';            // /app/<id>/ → <id>
   var PXMARK = sm ? APPID + '~' + SCHEME + '~' + AUTH : ''; // 还原标记（逃逸回捕依据）
 
-  // pxQuery 把 query 中 OAuth 回跳参数（redirect_uri/redirectUri）的绝对地址改写
-  // 为代理路径：IdP 前端（Casdoor 等纯前端授权页）会从文档 URL 解析该参数、拼上
-  // code 后用 location 赋值跳转——绝对地址会跨源逃逸出代理（iframe 直接导航到
-  // 真实域名，登录态建立在代理之外）；改写为代理路径后跳转落回本源，回调经代理
-  // 完成、会话落在代理路径下。已是代理前缀的值跳过（幂等）。服务端转发上游时
-  // 会把该参数还原为注册的原始值（IdP 白名单校验不受影响）。
+  // pxQuery 把 query 中 OAuth 回跳参数（redirect_uri/redirectUri/continue/
+  // continueUrl）的绝对地址改写为代理路径：IdP 前端（Casdoor 等纯前端授权页）会
+  // 从文档 URL 解析该参数、拼上 code 后用 location 赋值跳转——绝对地址会跨源
+  // 逃逸出代理（iframe 直接导航到真实域名，登录态建立在代理之外）；改写为代理
+  // 路径后跳转落回本源，回调经代理完成、会话落在代理路径下。值是宿主自身地址
+  // （还原模式下页面 JS 用 location.origin 拼的回跳）先重解释为目标域——直接
+  // 包前缀会把宿主地址当目标源代理出去。continue/continueUrl 是美团 ebooking
+  // （epassport oauth-login → me.meituan.com callback）的回跳参数。
+  //
+  // 改写结果保持【宿主绝对 URL】形态（location.origin+代理路径）而非相对路径：
+  // 目标站页面 JS 常把该参数值读出放进登录请求体（美团 gw/login/password 的
+  // continueUrl 字段），服务端在验密前先校验它是合法绝对 URL——相对路径形态
+  // 会被判「系统配置异常-5002」直接拒绝（实测）；绝对形态与还原模式下 JS 用
+  // location.origin 拼出的原生形态同构，服务端放行，且跳转导航仍落回本源代理
+  // 路径、服务端 restorePxParam（宿主形态还原）与 rewriteLocation（isSelfHost
+  // 挂当前域）两条既有链路都对它闭环。已是代理前缀的值跳过（幂等）。服务端
+  // 转发上游时会把该参数还原为注册的原始值（IdP 白名单校验不受影响）。
   function pxQuery(u) {
     if (!u || !sm || u.charAt(0) === '#') return u;
     try {
@@ -40,16 +51,29 @@
       if (qi < 0) return u + h;
       var sp = new URLSearchParams(u.slice(qi + 1));
       var hit = false;
-      ['redirect_uri', 'redirectUri'].forEach(function (k) {
+      ['redirect_uri', 'redirectUri', 'continue', 'continueUrl'].forEach(function (k) {
         var v = sp.get(k);
-        if (v && /^https?:\/\//i.test(v)) {
-          sp.set(k, PREFIX + compact(v));
+        // 幂等：已是本源绝对+代理前缀形态（本函数上一轮的产物）不再包一层
+        if (v && /^https?:\/\//i.test(v) && v.indexOf(location.origin + PREFIX) !== 0) {
+          sp.set(k, location.origin + PREFIX + compact(rebase(v)));
           hit = true;
         }
       });
       if (!hit) return u + h;
       return u.slice(0, qi) + '?' + sp.toString() + h;
     } catch (e) { return u; }
+  }
+
+  // rebase 把宿主自身绝对地址重解释为目标域地址（带端口与不带端口两种拼法，
+  // 与 toProxy 的本源重解释同语义；含跨 scheme 硬编码形态），其余地址原样返回。
+  function rebase(v) {
+    var o = location.origin;
+    if (v.indexOf(o + '/') === 0) return SCHEME + '://' + AUTH + v.slice(o.length);
+    var np = location.protocol + '//' + location.hostname + '/';
+    if (v.indexOf(np) === 0) return SCHEME + '://' + AUTH + v.slice(np.length - 1);
+    var xs = (location.protocol === 'https:' ? 'http' : 'https') + '//' + location.hostname + '/';
+    if (v.indexOf(xs) === 0) return SCHEME + '://' + AUTH + v.slice(xs.length - 1);
+    return v;
   }
 
   // withMark 给还原空间的地址补 __os_px 标记（pushState 会整体覆盖 query，须持续
@@ -66,8 +90,10 @@
   }
 
   // 还原文档地址为目标站形态。REALBASE/PREFIX/AUTH 等已在此前算好，不受影响。
+  // hash 原样保留：iframe src 携带的业务路由（#/statement-…，美团 ebooking 微前端
+  // 挂载链）在 replaceState 整体覆盖地址时会连带清掉，SPA 就以无路由形态初始化
   if (sm && sm[3]) {
-    try { history.replaceState(history.state, '', withMark(sm[3])); } catch (e) { /* 保持原地址 */ }
+    try { history.replaceState(history.state, '', withMark(sm[3]) + (location.hash || '')); } catch (e) { /* 保持原地址 */ }
   }
 
   function compact(abs) {
@@ -81,7 +107,10 @@
     var s = u.trim();
     if (!s || s.charAt(0) === '#') return u;
     if (/^(data|blob|javascript|vbscript|mailto|tel|about|file|chrome|ws|wss):/i.test(s)) return u;
-    if (s.indexOf(PREFIX) === 0) return s; // 已是代理路径（服务端重写过的属性值），勿再包一层
+    // 已是代理路径（服务端重写过的属性值）勿再包一层；query 里的回跳参数仍按
+    // 本页面目标域改写——服务端只改地址不改 query 参数值，宿主地址形态的
+    // continue 在子文档（跨主机 OAuth 表单页）里 rebase 会落到表单域而非发起域
+    if (s.indexOf(PREFIX) === 0) return pxQuery(s);
     try {
       var abs;
       // 协议相对地址按目标站 scheme 解析（代理页是 http 时 location.protocol 会把
@@ -95,7 +124,7 @@
       var oi = abs.indexOf(location.origin);
       if (oi === 0) {
         var sub = abs.slice(location.origin.length);
-        if (sub.indexOf(PREFIX) === 0) return abs;
+        if (sub.indexOf(PREFIX) === 0) return pxQuery(abs);
         abs = SCHEME + '://' + AUTH + sub;
       } else {
         // 无端口的本源形态：页面 JS 常以 location.protocol+'//'+location.hostname
@@ -103,10 +132,21 @@
         // 会代理到本源 80 端口（必拒）。与带端口形态同语义：按目标站路径重新解释
         var noPort = location.protocol + '//' + location.hostname + '/';
         if (abs.indexOf(noPort) === 0) abs = SCHEME + '://' + AUTH + abs.slice(noPort.length - 1);
+        // 跨 scheme 同主机无端口形态：生产站恒 https 的前端常硬编码 'https://'+
+        // location.hostname 拼绝对地址（美团 ebooking 工作台微前端加载 sub-app
+        // 子应用入口即此形态）——代理页是 http 时不匹配上两种形态，漏重解释会
+        // 代理到本机 https 端口被 SSRF 防线拒绝，子应用加载 502
+        var xScheme = (location.protocol === 'https:' ? 'http' : 'https') + '://' + location.hostname + '/';
+        if (abs.indexOf(xScheme) === 0) abs = SCHEME + '://' + AUTH + abs.slice(xScheme.length - 1);
       }
       var hi = abs.indexOf('#');
+      // hash 是客户端路由状态（SPA 微前端入口把业务路由放 hash：美团 ebooking
+      // SDK 以 iframe.src=tpt…/index.html#/statement-… 挂载业务页），剥掉后业务页
+      // 以无路由形态初始化、降级成门户首页并自愈式再挂容器（无限套娃的根因）；
+      // hash 不随请求发往代理服务端、纯客户端语义，须原样拼回
+      var hh = hi >= 0 ? abs.slice(hi) : '';
       if (hi >= 0) abs = abs.slice(0, hi);
-      return PREFIX + compact(abs);
+      return pxQuery(PREFIX + compact(abs)) + hh;
     } catch (e) {
       return u;
     }
@@ -133,14 +173,46 @@
           var nu = toProxy(input.url);
           if (nu !== input.url) input = new Request(nu, input);
         }
+        if (init && typeof init.body === 'string') {
+          init = Object.assign({}, init, { body: restoreBody(init.body) });
+        }
       } catch (e) { /* 保持原参数 */ }
       return of.call(window, input, init);
     };
   }
+  // restoreBody 把请求体（JSON）中 OAuth 回跳字段的代理形态值还原为目标站
+  // 原始绝对地址：页面 JS 常把文档 URL 里的 continue/redirect_uri 读出放进登录
+  // 请求体（美团 gw/login/password 的 continueUrl 字段），目标站在验密前先校验
+  // 它是注册的原始形态——携带代理前缀段（/app/<id>/https/<host>/…）或宿主前缀
+  // 的形态会被判「系统配置异常-5002」直接拒绝（实测）。非 JSON / 未命中字段
+  // 原样返回。
+  function restoreBody(b) {
+    if (typeof b !== 'string' || b.charAt(0) !== '{') return b;
+    try {
+      var obj = JSON.parse(b), hit = false;
+      ['redirect_uri', 'redirectUri', 'continue', 'continueUrl'].forEach(function (k) {
+        var v = obj[k];
+        if (typeof v === 'string') {
+          var i = v.indexOf(PREFIX);
+          if (i >= 0) {
+            var m = /^([a-z][a-z0-9+.-]*)\/(.+)$/i.exec(v.slice(i + PREFIX.length));
+            if (m) { obj[k] = m[1] + '://' + m[2]; hit = true; }
+          }
+        }
+      });
+      return hit ? JSON.stringify(obj) : b;
+    } catch (e) { return b; }
+  }
+
   var oo = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function () {
     try { arguments[1] = toProxy(arguments[1]); } catch (e) { /* 保持原参数 */ }
     return oo.apply(this, arguments);
+  };
+  var oSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.send = function (body) {
+    try { body = restoreBody(body); } catch (e) { /* 保持原参数 */ }
+    return oSend.call(this, body);
   };
 
   // ---- WebSocket / EventSource / Worker ----
@@ -277,7 +349,15 @@
     }
   } catch (e) { /* 无 SW API 时忽略 */ }
 
-  // ---- document.cookie：显式 path=/ 会把 cookie 种到整个 OpenOS 源，改写回代理路径 ----
+  // ---- document.cookie：改写回代理路径 + 剥 domain ----
+  // ① 显式 path=/ 会把 cookie 种到整个 OpenOS 源，改写回代理路径；
+  // ② domain=<目标站域> 在代理页（host 是 OpenOS 源）会被浏览器整条拒收——
+  //    settoken 类「跨子域种会话」页面（美团登录票据 domain=.meituan.com）
+  //    写不进任何 Cookie，登录态种不上、queryAccountInfo 判未登录跳回登录页
+  //    （与响应侧 rewriteSetCookie 剥 Domain 同一语义）；剥后落本源，作用域由
+  //    path 前缀限定到目标站，跨目标站不串；
+  // ③ 无显式 path 的补目标站根路径：默认作用域是当前文档目录（如 /settoken/），
+  //    同站其它路径（/api/…）带不上，原生跨子域语义靠 domain，剥后须由 path 承担
   try {
     var desc = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie');
     if (desc && desc.set && desc.get) {
@@ -287,10 +367,27 @@
         set: function (v) {
           try {
             var s = String(v);
+            // 带 domain= 声明的是跨子域共享语义（美团 eprt 票据 domain=.meituan.com）：
+            // 剥域后须把 path 提升到应用级 PREFIX，限在本目标源子路径会让其他子域
+            // 的代理请求带不上票据（发票接口 403 根因，与响应侧 rewriteSetCookie
+            // 同一语义）
+            var hadDomain = /(^|;\s*)domain\s*=\s*[^;]*/i.test(s);
+            s = s.replace(/(^|;\s*)domain\s*=\s*[^;]*/ig, function (all, sp) { return sp ? '; ' : ''; });
             var re = /(^|;\s*)path\s*=\s*(\/[^;]*)/i;
-            if (re.test(s)) {
-              v = s.replace(re, function (all, sp, p) { return sp + 'path=' + PREFIX + ORIGIN + p; });
+            var m = s.match(re);
+            if (hadDomain) {
+              s = s.replace(re, function (all, sp) { return sp ? '; ' : ''; });
+              s = s.replace(/;\s*$/, '');
+              s += '; path=' + PREFIX;
+            } else if (m) {
+              // 显式 path：已是本应用目标源前缀则跳过（幂等，防二次包装）
+              if (m[2].indexOf(PREFIX + ORIGIN + '/') !== 0) {
+                s = s.replace(re, function (all, sp, p) { return sp + 'path=' + PREFIX + ORIGIN + p; });
+              }
+            } else {
+              s += '; path=' + PREFIX + ORIGIN + '/';
             }
+            v = s;
           } catch (e) { /* 保持原值 */ }
           desc.set.call(document, v);
         },
@@ -315,12 +412,20 @@
     var d;
     try { d = Object.getOwnPropertyDescriptor(C.prototype, prop); } catch (e) { return; }
     if (!d || !d.set || !d.get) return;
+    var isFrameSrc = C === window.HTMLIFrameElement && prop === 'src';
     try {
       Object.defineProperty(C.prototype, prop, {
         configurable: true,
         get: function () { return d.get.call(this); },
         set: function (v) {
           try { v = toProxy(String(v)); } catch (e) { /* 保持原值 */ }
+          // 容器自举递归检测（判定细节见文末 MutationObserver 段）：先插空 iframe
+          // 占位、后赋 src 的创建流不走 MutationObserver 的 fixFrameSrc（占位轮
+          // 已消耗 __osPxSeen 幂等标记），属性赋值路径须自带同款检测——美团 ME
+          // 容器业务页自举实测：第二层同名 iframe 恰经此路径漏网
+          if (isFrameSrc) {
+            try { if (pxInAncestors(pxTargetOf(v))) v = 'about:blank'; } catch (e) { }
+          }
           d.set.call(this, v);
         },
       });
@@ -368,7 +473,14 @@
     try {
       var n = String(name).toLowerCase();
       if (n === 'integrity') return; // SRI 与重写代理不兼容（运行时注入的 chunk 同样剥除）
-      if (urlAttrs[n]) value = toProxy(String(value));
+      if (urlAttrs[n]) {
+        value = toProxy(String(value));
+        // 容器自举递归检测（同属性 setter 路径）：setAttribute('src') 创建的
+        // 自举 iframe 与属性赋值路径同风险，统一拦截
+        if (n === 'src' && this.tagName === 'IFRAME') {
+          try { if (pxInAncestors(pxTargetOf(value))) value = 'about:blank'; } catch (e) { }
+        }
+      }
       else if (n === 'srcset' && value) {
         value = String(value).split(',').map(function (part) {
           var t = part.trim(), k = t.indexOf(' ');
@@ -550,7 +662,69 @@
   // location.protocol+'//'+location.hostname 拼绝对地址插入，丢代理前缀与端口，
   // 直连本源 80 端口必拒）。MutationObserver 观察新增节点，iframe 的 src 经
   // toProxy 改写后逃逸形态归位到代理路径（幂等：已是代理路径的不动）。
+  // 另拦截「容器自举递归」：子页面环境判定失败后把整只容器页塞进自己内容区，
+  // 容器再加载子页面……无限套娃（美团财务子页实测：同 URL 层层加载 26 次）。
+  // 判据：新 iframe 的目标地址与任一祖先窗口的目标地址相同（host+path+query，
+  // 剥 hash——SPA hash 漂移不参与容器身份；剥 __os_px——本钩子给祖先 location
+  // 追加的还原标记，不代表目标站语义）。query 必须参与比对：美团 ME 微前端的
+  // 合法双层结构是同一 index.html 以「带 isMeIframeContainer 参数=容器壳 / 无参
+  // =业务页」复用（剥 query 会连第一层合法结构一起杀掉），而自举递归的特征
+  // 恰是完整 URL 层层重现。两边都归一到「目标站绝对地址」再比：iframe 的 src
+  // 是代理路径形态（/app/…），祖先窗口的 location 已被 replaceState 还原成目标
+  // 站形态 + __os_px 标记（直接拿代理路径比还原形态的 location.href 恒不相等，
+  // 判据全部落空、套娃照常生长——美团 ME 容器实测）——祖先从 __os_px 标记还原
+  // 出目标源，iframe 从代理前缀解出目标源。
   try {
+    // 比对键：剥 hash、剥 __os_px 标记参数（含前导 ?/& 的清理），留 query
+    var pxKey = function (u) {
+      try {
+        var s = String(u).split('#')[0]
+          .replace(/([?&])__os_px=[^&]*/ig, function (_, lead) { return lead; });
+        return s.replace(/[?&]$/, '');
+      } catch (e) { return String(u); }
+    };
+    // 代理路径（/app/<id>/… 或宿主绝对+代理前缀）解出目标站绝对地址；非代理形态返回 ''
+    var pxTargetOf = function (u) {
+      try {
+        var s = String(u), i = s.indexOf(PREFIX);
+        if (i < 0) return '';
+        var qi = s.indexOf('?', i);
+        var rest = s.slice(i + PREFIX.length, qi < 0 ? undefined : qi);
+        var q = qi < 0 ? '' : s.slice(qi);
+        var m = /^([a-z][a-z0-9+.-]*)\/([^\/?#]+)/i.exec(rest);
+        return m ? m[1].toLowerCase() + '://' + m[2] + (rest.slice(m[0].length) || '/') + q : '';
+      } catch (e) { return ''; }
+    };
+    // 祖先窗口的目标站绝对地址：还原形态（__os_px=<id>~<scheme>~<auth> 标记）优先，
+    // 未还原的代理前缀形态次之，都不是（宿主桌面页等）返回 null
+    var pxAncestorTarget = function (w) {
+      var href, search, pathname;
+      try { href = w.location.href; search = w.location.search; pathname = w.location.pathname; }
+      catch (e) { return null; }
+      var t = pxTargetOf(href);
+      if (t) return t;
+      try {
+        var mark = new URLSearchParams(search).get('__os_px') || '';
+        var m = /^[^~]+~([a-z][a-z0-9+.-]*)~(.+)$/i.exec(mark);
+        if (m) return m[1].toLowerCase() + '://' + m[2] + pathname + search;
+      } catch (e) { }
+      return null;
+    };
+    var pxInAncestors = function (tgt) {
+      if (!tgt) return false;
+      var t = pxKey(tgt);
+      // 比对链含 window 自身：「容器/业务页在自己内容区再挂一个与自己同 URL 的
+      // 页面」恰是最典型的自举（美团 ME：无参业务页在自身文档里创建无参同名
+      // iframe，创建者自身不在 parent 链里会漏判）；从自身起逐级向上（顶层
+      // window.parent === window 停）
+      try {
+        for (var w = window, i = 0; w && i < 17; w = (w === w.parent ? null : w.parent), i++) {
+          var at = pxAncestorTarget(w);
+          if (at && pxKey(at) === t) return true;
+        }
+      } catch (e) { }
+      return false;
+    };
     var fixFrameSrc = function (f) {
       if (f.__osPxSeen) return;
       f.__osPxSeen = 1;
@@ -559,6 +733,11 @@
       try {
         var mapped = toProxy(raw);
         if (mapped !== raw) f.src = mapped; // 属性 setter 已包装且 toProxy 对代理路径幂等
+        // 自举递归检测：以目标站地址比对祖先（非代理目标不构成容器自举，不拦）
+        if (pxInAncestors(pxTargetOf(mapped))) {
+          f.removeAttribute('src');
+          try { f.src = 'about:blank'; } catch (e) { }
+        }
       } catch (e) { /* 保持原值 */ }
     };
     var mo = new MutationObserver(function (muts) {

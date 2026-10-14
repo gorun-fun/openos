@@ -59,6 +59,10 @@ func TestRewriteURLVal(t *testing.T) {
 		{"../up.png", "/app/x/https/t.example/up.png"},
 		{"//cdn.example/x.js", "/app/x/https/cdn.example/x.js"},
 		{"https://other.example/y?k=1", "/app/x/https/other.example/y?k=1"},
+		// 带 hash 的完整地址：fragment 原样保留（SPA 微前端入口的业务路由在
+		// hash 里，美团 ebooking 挂 tpt index.html#/statement-… 实测剥掉会让
+		// 业务页以无路由形态初始化、降级门户首页并自愈式再挂容器=无限套娃）
+		{"https://t.example/eb/index.html#/statement-9", "/app/x/https/t.example/eb/index.html#/statement-9"},
 		{"#frag", "#frag"},
 		{"javascript:void(0)", "javascript:void(0)"},
 		{"data:image/png;base64,xx", "data:image/png;base64,xx"},
@@ -69,6 +73,28 @@ func TestRewriteURLVal(t *testing.T) {
 		got := string(rewriteURLVal([]byte(c.in), "/app/x/", base))
 		if got != c.want {
 			t.Errorf("rewriteURLVal(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestIsSelfHostNoPort 无端口形态的宿主自身判定：目标站 JS 用 location.hostname
+// 拼绝对地址（端口丢失，含硬编码 https:// 的跨 scheme 形态——美团工作台 sub-app
+// 子应用入口实测漏判会让代理拨本机被 SSRF 拒绝）。
+func TestIsSelfHostNoPort(t *testing.T) {
+	cases := []struct {
+		host, selfHost string
+		want           bool
+	}{
+		{"localhost", "localhost:8081", true},         // 无端口 + 硬编码 https
+		{"localhost:8081", "localhost:8081", true},     // 原有：全等
+		{"127.0.0.1", "localhost:8081", true},          // 无端口回环变体
+		{"localhost:7712", "localhost:8081", false},    // 端口不同=别的服务（原有语义）
+		{"me.meituan.com", "localhost:8081", false},    // 无关域
+		{"localhost:8081", "openos.example.com", false}, // 主机名不同
+	}
+	for _, c := range cases {
+		if got := isSelfHost(c.host, c.selfHost); got != c.want {
+			t.Errorf("isSelfHost(%q, %q) = %v, want %v", c.host, c.selfHost, got, c.want)
 		}
 	}
 }
@@ -149,12 +175,19 @@ func TestRewriteSetCookie(t *testing.T) {
 	if strings.Contains(got, "Domain=") || strings.Contains(got, "Secure") {
 		t.Errorf("http 部署应剥 Domain/Secure：%s", got)
 	}
-	if !strings.Contains(got, "Path=/app/x/https/t.example/") || !strings.Contains(got, "SameSite=Lax") || !strings.Contains(got, "HttpOnly") {
-		t.Errorf("Set-Cookie 改写不符合预期：%s", got)
+	// 带 Domain= 的是跨子域共享语义（美团 eprt 票据 domain=.meituan.com）：剥域后
+	// Path 提升到应用级 /app/<id>/——限在下发域子路径会让其他子域的代理请求
+	// （票据下发在 epassport/me、消费在 tpt）永远带不上票据（发票接口 403）
+	if !strings.Contains(got, "Path=/app/x/") || !strings.Contains(got, "SameSite=Lax") || !strings.Contains(got, "HttpOnly") {
+		t.Errorf("Set-Cookie 跨子域票据应提升到应用级路径：%s", got)
 	}
 	got = rewriteSetCookie(v, "/app/x/", target, true)
 	if !strings.Contains(got, "Secure") || !strings.Contains(got, "SameSite=None") {
 		t.Errorf("https 部署应保留 Secure/SameSite=None：%s", got)
+	}
+	// 无 Domain 声明（host-only）：Path 仍收归目标域代理子路径
+	if got := rewriteSetCookie("sid=2; Path=/acct", "/app/x/", target, true); !strings.Contains(got, "Path=/app/x/https/t.example/acct") {
+		t.Errorf("host-only Cookie 应收归目标域子路径：%s", got)
 	}
 	// 无 Path 属性：回落默认（按请求目录），不追加 Path
 	if got := rewriteSetCookie("a=b", "/app/x/", target, true); got != "a=b" {
@@ -188,6 +221,12 @@ func TestRewriteLocation(t *testing.T) {
 	}
 	if got := rewriteLocation("http://intra.example/x", "/app/x/", base, "127.0.0.1:8081"); got != "/app/x/http/intra.example/x" {
 		t.Errorf("普通绝对地址应保持前缀化：%s", got)
+	}
+	// Fragment 保留：SPA 微前端入口把业务路由放 hash（美团 ebooking 以
+	// iframe.src=tpt…/index.html#/statement-… 挂载业务页），剥掉会让业务页以
+	// 无路由形态初始化、降级门户首页并自愈式再挂容器（无限套娃的根因）
+	if got := rewriteLocation("https://t.example/eb/index.html#/statement-9?tab=1", "/app/x/", base, ""); got != "/app/x/https/t.example/eb/index.html#/statement-9?tab=1" {
+		t.Errorf("Location 应保留 fragment：%s", got)
 	}
 }
 
@@ -288,6 +327,23 @@ func TestRestorePxParam(t *testing.T) {
 	// 非法代理前缀形态：解析失败保持原值
 	if got := restorePxParam("x", "redirect_uri=/app/x/ftp/x", wx, "example.com"); got != "redirect_uri=/app/x/ftp/x" {
 		t.Errorf("非法形态应保持原值，得到 %q", got)
+	}
+	// continue/continueUrl（美团 ebooking：epassport oauth-login 的 continue 指向
+	// me.meituan.com 的 callback）：宿主地址形态还原为配置目标域——缺失时上游拿到
+	// 宿主地址、302 被挂到表单所在域，跨主机 callback 落错误主机 404；代理路径
+	// 形态（hook pxQuery 改写后）还原为原始绝对地址，嵌套 query 保留
+	mt := &proxyConfig{Kind: "proxy", URL: "https://me.meituan.com/ebooking/merchant/ebIframe"}
+	got = restorePxParam("m", "service=eb&continue=http%3A%2F%2Flocalhost%3A8081%2Fapi%2Fgw%2Fv1%2Fbase%2Flogin%2Fcallback%3FclientId%3D1", mt, "localhost:8081")
+	if v, err := url.ParseQuery(got); err != nil || v.Get("continue") != "https://me.meituan.com/api/gw/v1/base/login/callback?clientId=1" || v.Get("service") != "eb" {
+		t.Errorf("continue 宿主地址还原不符：%q", got)
+	}
+	got = restorePxParam("m", "continue=" + url.QueryEscape("/app/m/https/me.meituan.com/api/gw/v1/base/login/callback?clientId=1&continueUrl=https%3A%2F%2Fme.meituan.com%2Fsettoken%2Findex.html"), mt, "localhost:8081")
+	if v, err := url.ParseQuery(got); err != nil || v.Get("continue") != "https://me.meituan.com/api/gw/v1/base/login/callback?clientId=1&continueUrl=https%3A%2F%2Fme.meituan.com%2Fsettoken%2Findex.html" {
+		t.Errorf("continue 代理路径还原不符：%q", got)
+	}
+	// continue 站内相对值（其他站点把 continue 用作普通站内跳转）不受扰动
+	if got := restorePxParam("m", "continue=/home/next&x=1", mt, "localhost:8081"); got != "continue=/home/next&x=1" {
+		t.Errorf("continue 相对值应原样，得到 %q", got)
 	}
 }
 
@@ -423,8 +479,9 @@ func TestServeHTTPProxy(t *testing.T) {
 		t.Errorf("CSP 应被剥掉：%q", v)
 	}
 	sc := w.Header().Get("Set-Cookie")
-	if !strings.Contains(sc, "Path=/app/x/"+upCompact+"/") || strings.Contains(sc, "Domain=") {
-		t.Errorf("Set-Cookie 应收归代理路径且剥 Domain：%q", sc)
+	// 带 Domain= 的跨子域票据语义：剥域后 Path 提升到应用级（非目标域子路径）
+	if !strings.Contains(sc, "Path=/app/x/") || strings.Contains(sc, "Domain=") {
+		t.Errorf("Set-Cookie 应提升到应用级路径且剥 Domain：%q", sc)
 	}
 	body := w.Body.String()
 	if !strings.Contains(body, `src="/app/x/hook.js"`) || !strings.Contains(body, `href="/app/x/`+upCompact+`/z"`) {
@@ -839,6 +896,16 @@ func TestSiteAdapters(t *testing.T) {
 			t.Errorf("改写结果缺少 %s，得到 %s", want, got)
 		}
 	}
+	// epassport 商家 Epassport 登录分支（login JS 以 location.href= 字面量直跳，
+	// 漏改写时重新登录逃逸到真实域、票据种不进代理路径→发票接口 403）
+	epJS := []byte(`Oe?"//fepassport.sjst.test.sankuai.com/portal/oauth-login?":"https://epassport.meituan.com/portal/oauth-login?"`)
+	epGot := string(mtRewrite(epJS, "/app/web-me.meituan.com/"))
+	if strings.Contains(epGot, `"https://epassport.meituan.com`) {
+		t.Errorf("epassport 绝对地址字面量应改写为代理路径，得到 %s", epGot)
+	}
+	if !strings.Contains(epGot, `"/app/web-me.meituan.com/https/epassport.meituan.com/portal/oauth-login?"`) {
+		t.Errorf("epassport 改写结果不符，得到 %s", epGot)
+	}
 	if r := mtRewrite([]byte("https://example.com/x"), "/app/a/"); string(r) != "https://example.com/x" {
 		t.Errorf("无关字面量不应被改写，得到 %s", r)
 	}
@@ -915,8 +982,8 @@ func TestAPIForward(t *testing.T) {
 	if w.Code != 200 || w.Body.String() != `{"ok":1}` {
 		t.Fatalf("/api/data code=%d body=%s", w.Code, w.Body.String())
 	}
-	if sc := w.Header().Get("Set-Cookie"); !strings.Contains(sc, "Path=/px/"+compact+"/") || strings.Contains(sc, "Domain=") {
-		t.Errorf("Set-Cookie 应收归 /px/ 前缀且剥 Domain：%q", sc)
+	if sc := w.Header().Get("Set-Cookie"); !strings.Contains(sc, "Path=/px/") || strings.Contains(sc, "Domain=") {
+		t.Errorf("Set-Cookie 应提升到 /px/ 前缀且剥 Domain：%q", sc)
 	}
 	if v := w.Header().Get("X-Frame-Options"); v != "" {
 		t.Errorf("X-Frame-Options 应被剥掉：%q", v)

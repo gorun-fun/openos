@@ -305,7 +305,10 @@ func rewriteURLVal(val []byte, prefix string, base *url.URL) []byte {
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return val
 	}
-	u.Fragment = ""
+	// Fragment 保留（compactTarget 原样输出）：SPA 微前端入口把业务路由放 hash
+	//（美团 ebooking 挂 tpt index.html#/statement-…），剥掉会让业务页以无路由
+	// 形态初始化、降级成门户首页并自愈式再挂容器（无限套娃的根因）；hash 不随
+	// 请求进服务端，纯客户端语义
 	u.User = nil // 极罕见的 userinfo 直接丢弃，避免污染紧凑段
 	return []byte(escapeAttr(prefix + compactTarget(u)))
 }

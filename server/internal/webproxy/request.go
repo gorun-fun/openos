@@ -107,8 +107,9 @@ func rewriteReferer(ref, id string) string {
 	return (&url.URL{Scheme: scheme, Host: host, Path: u.Path, RawQuery: vals.Encode()}).String()
 }
 
-// restorePxParam 把转发上游的 query 中 OAuth 回跳参数（redirect_uri/redirectUri）
-// 还原为目标站注册的原始绝对地址，两种命中形态：
+// restorePxParam 把转发上游的 query 中 OAuth 回跳参数
+// （redirect_uri/redirectUri/continue/continueUrl）还原为目标站注册的原始绝对
+// 地址，两种命中形态：
 //  1. 代理路径值（/app/<id>/…）：hook 会把文档地址里该参数改写为代理路径（防 IdP
 //     前端解析参数、拼 code 后 location 赋值跳转时跨源逃逸出代理），上游（Casdoor
 //     等）校验 redirect_uri 白名单需要注册的原始值；
@@ -117,10 +118,18 @@ func rewriteReferer(ref, id string) string {
 //     微信 jslogin 即此形态，注册成宿主地址的回跳会被服务端风控拒绝（扫码后
 //     webwxnewloginpage 返回「暂不支持使用网页版微信」）。
 //
+// continue/continueUrl 是美团 ebooking 的回跳参数（epassport oauth-login 的
+// continue 指向 me.meituan.com 的 callback）：还原缺失时上游拿到宿主地址，302
+// Location 被 rewriteLocation 按「宿主地址挂当前请求域」处理——跨主机回跳被挂到
+// 表单所在域（epassport）而非 continue 语义域（me.meituan.com），callback 落在
+// 错误主机上 404，登录链断（Chrome「表单显示 404」实测）。continue 是通用参数名
+// （Google/微软系登录同用），仅对「值是宿主/代理前缀形态」的命中改写，站内相对
+// 值不受扰动。
+//
 // 无命中时 query 原样返回。注意预检不能按明文前缀匹配 query——参数值经
 // encodeURIComponent 编码后是 %2Fapp%2F<id>%2F 形态，判断须在解码后进行。
 func restorePxParam(id, q string, cfg *proxyConfig, selfHost string) string {
-	if q == "" || !strings.Contains(q, "redirect") {
+	if q == "" || (!strings.Contains(q, "redirect") && !strings.Contains(q, "continue")) {
 		return q
 	}
 	vals, err := url.ParseQuery(q)
@@ -129,7 +138,7 @@ func restorePxParam(id, q string, cfg *proxyConfig, selfHost string) string {
 	}
 	cfgURL, cfgErr := url.Parse(cfg.URL)
 	changed := false
-	for _, k := range []string{"redirect_uri", "redirectUri"} {
+	for _, k := range []string{"redirect_uri", "redirectUri", "continue", "continueUrl"} {
 		v := vals.Get(k)
 		if v == "" {
 			continue
@@ -142,6 +151,13 @@ func restorePxParam(id, q string, cfg *proxyConfig, selfHost string) string {
 			continue
 		}
 		if u, err := url.Parse(v); err == nil && u.Host != "" && cfgErr == nil && isSelfHost(u.Host, selfHost) {
+			if tu, ok := selfRefTarget(u, id); ok {
+				// hook pxQuery 产物：宿主绝对地址 + path 携带 /app/<id>/ 前缀——
+				// 按前缀还原出完整目标（比 cfg 域更准，跨主机引用也正确）
+				vals.Set(k, tu.String())
+				changed = true
+				continue
+			}
 			u.Scheme, u.Host = cfgURL.Scheme, cfgURL.Host
 			vals.Set(k, u.String())
 			changed = true
@@ -151,6 +167,26 @@ func restorePxParam(id, q string, cfg *proxyConfig, selfHost string) string {
 		return q
 	}
 	return vals.Encode()
+}
+
+// selfRefTarget 解析「宿主自身绝对地址且 path 携带本应用代理前缀」的复合形态
+//（hook 的 pxQuery 把回跳参数改写为 location.origin+/app/<id>/… 的绝对 URL，
+// 防目标站把相对路径形态的回跳值判为非法——美团 gw/login/password 请求体的
+// continueUrl 实测 5002）：命中时返回前缀里的完整目标地址；非复合形态返回
+// !ok，调用方回落到「挂配置域」的原有语义。
+func selfRefTarget(u *url.URL, id string) (*url.URL, bool) {
+	rest := strings.TrimPrefix(u.Path, "/app/"+id+"/")
+	if len(rest) == len(u.Path) {
+		return nil, false
+	}
+	tu, err := decodeTarget(rest)
+	if err != nil {
+		return nil, false
+	}
+	if u.RawQuery != "" {
+		tu.RawQuery = u.RawQuery
+	}
+	return tu, true
 }
 
 // applyCfgHeaders 把管理员配置的自定义请求头应用到上游请求（在 sanitize 之后，

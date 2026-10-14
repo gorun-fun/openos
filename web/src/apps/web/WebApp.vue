@@ -27,7 +27,7 @@ const def = WEB_APPS[props.win.appId]
 // fulfillResponse 该版本不可用，客户端层无解，只能回反代）；未声明的 proxy 应用在
 // 桌面模式直连真实地址（美团等微前端容器依赖直连形态）
 const dyn = computed(() => apps.byId(props.win.appId))
-const dynCfg = computed<{ kind?: string; url?: string; desktopProxy?: boolean }>(() => {
+const dynCfg = computed<{ kind?: string; url?: string; desktopProxy?: boolean; noSandbox?: boolean }>(() => {
   const c = dyn.value?.config as any
   if (!c) return {}
   if (typeof c === 'string') { try { return JSON.parse(c) } catch { return {} } }
@@ -58,9 +58,14 @@ const src = computed(() => {
 // top.location 自拔）由桌面客户端监听主帧导航兜底回捕。其余形态（含 desktopProxy 走
 // 反代的、普通 web 的）桌面端仍带 sandbox（同浏览器模式）：这类站点 framebusting 时
 // 拔走主帧，客户端回捕虽能拉回但整页重载=窗口全丢，观感即「打开闪退」（网易云音乐
-// 实测踩中），sandbox 从浏览器层面直接挡住导航
+// 实测踩中），sandbox 从浏览器层面直接挡住导航。
+// 浏览器模式同样支持按应用放开：config.noSandbox=true 时去 sandbox——sandbox 帧内
+// JS 导航 parent/top 一律被 Chrome 拒（仅许自身/子孙），美团 settoken 页登录成功后
+// window.parent.location 跳回业务页的链路在 sandbox 下 SecurityError 静默卡死
+//（实测）；放开后防走失由 hook __osPxNav__ + checkAnchor 锚定回正兜底，仅管理员
+// 对可信站点显式配置
 const sandboxAttr = computed(() =>
-  desktopMode() && dynCfg.value.kind === 'proxy' && !dynCfg.value.desktopProxy ? undefined : 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads')
+  dynCfg.value.kind === 'proxy' && !dynCfg.value.desktopProxy && (desktopMode() || dynCfg.value.noSandbox) ? undefined : 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads')
 
 // ---- 桌面端专用：美团系 ME 微前端的父容器握手应答。子页向父容器发
 // {eventType:"hotel-query-container", signature:"ME_IFRAME_…"} 探测，3s 无应答则按

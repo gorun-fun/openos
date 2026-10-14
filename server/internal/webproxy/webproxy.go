@@ -129,6 +129,20 @@ func (p *Proxy) Handler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "代理目标地址不合法："+err.Error(), http.StatusBadRequest)
 			return
 		}
+		// 嵌套代理前缀自愈：目标站 JS 把「已前缀化的代理路径」当相对路径拼进
+		// 当前目标源，形成 /app/<id>/<s>/<host>/app/<id>/<s2>/<host2>/… 双层前缀
+		// （美团工作台子应用的 CDN 切换拼接实测）——内层才是真实目标（host2），
+		// 不剥则外层主机按自身路径应答、资源 404/回落页，样式脚本全歪。302 到
+		// 内层目标（多层嵌套剥一层、浏览器跟随自愈）；目标站自身路径恰好叫
+		// /app/<本应用id>/ 的概率可忽略（id 为系统生成）
+		if inner := strings.TrimPrefix(tu.Path, "/app/"+id+"/"); inner != "" && len(inner) < len(tu.Path) {
+			if itu, ierr := decodeTarget(inner); ierr == nil {
+				itu.RawQuery = tu.RawQuery
+				w.Header().Set("Location", "/app/"+id+"/"+compactTarget(itu))
+				w.WriteHeader(http.StatusFound)
+				return
+			}
+		}
 		// 宿主自身地址兜底：目标站（或其登录链）在代理页里读 location.origin 拼出
 		// 的自我引用绝对地址（还原模式只改 pathname，origin 恒为 OpenOS 宿主），
 		// 经 Location 重写/hook 前缀化后以宿主为拨号目标进入代理——SSRF 防线会

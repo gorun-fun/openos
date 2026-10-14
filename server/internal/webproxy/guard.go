@@ -76,7 +76,9 @@ func isPublicIP(ip net.IP) bool {
 // 形态且端口一致（localhost ↔ 127.0.0.1 ↔ [::1]——页面读到的 origin 与请求 Host
 // 的字符串形态可能不一致；端口不同则是别的内网服务，不是宿主）。目标站 JS 在
 // 代理页里读 location.origin 拼自我引用（登录回调/continueUrl 等）时拿到的就是
-// 宿主地址。
+// 宿主地址。无端口形态（location.hostname 拼接，含生产站硬编码 https:// 的跨
+// scheme 形态——美团 ebooking 工作台 sub-app 子应用入口实测）按主机名一致或同为
+// 回环判定。
 func isSelfHost(host, selfHost string) bool {
 	if selfHost == "" || host == "" {
 		return false
@@ -86,7 +88,17 @@ func isSelfHost(host, selfHost string) bool {
 	}
 	h1, p1, err1 := net.SplitHostPort(host)
 	h2, p2, err2 := net.SplitHostPort(selfHost)
-	if err1 != nil || err2 != nil || p1 != p2 {
+	if err1 != nil || err2 != nil {
+		h1n, h2n := strings.ToLower(host), strings.ToLower(selfHost)
+		if err1 == nil {
+			h1n = strings.ToLower(h1)
+		}
+		if err2 == nil {
+			h2n = strings.ToLower(h2)
+		}
+		return h1n == h2n || (isLoopbackHost(h1n) && isLoopbackHost(h2n))
+	}
+	if p1 != p2 {
 		return false
 	}
 	return isLoopbackHost(strings.ToLower(h1)) && isLoopbackHost(strings.ToLower(h2))

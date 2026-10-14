@@ -144,6 +144,29 @@ var adapters = []SiteAdapter{
 			return bytes.ReplaceAll(body, []byte("qa.igame.163.com"), []byte("music.163.com"))
 		},
 	},
+	// 美团容器菜单伪造 referrer：ebooking 容器页（ebIframe）检测
+	// isInIframe() && !isNoCodeSandboxRuntime() 即藏自身菜单（仅豁免 referrer
+	// 匹配自家低代码沙箱 nocode.sankuai.com 的场景）——反代形态容器页恒在
+	// OpenOS 窗体 iframe 里，菜单永远被藏（登录后只剩内容区）。与桌面客户端
+	// 同方案（desktop/main.go docReferrer）：重定义 Document.prototype.referrer
+	// getter 伪造为 nocode 沙箱域，只骗页面 JS 的嵌入检测、请求头不动。
+	{
+		Name:  "meituan-referrer-spoof",
+		Hosts: []string{"meituan.com", "meituan.net", "sankuai.com", "dianping.com", "dpfile.com", "51ping.com"},
+		Hook: `
+try {
+  if (!window.__osRefSpoofed) {
+    window.__osRefSpoofed = true;
+    var rd = Object.getOwnPropertyDescriptor(Document.prototype, 'referrer');
+    if (rd && rd.get) {
+      Object.defineProperty(Document.prototype, 'referrer', {
+        configurable: true, enumerable: rd.enumerable,
+        get: function () { return 'https://nocode.sankuai.com/'; }
+      });
+    }
+  }
+} catch (e) { /* referrer getter 不可重定义时忽略 */ }`,
+	},
 	// 美团 SSO 登录跳转代理化：ebooking 商家后台的登录入口（美团员工登录等）在
 	// 前端 JS 里以字面量拼出 SSO 绝对地址（https://ssosv.sankuai.com/sson/login?…
 	// redirect_uri=location.origin+…）并 location.href 直跳——绝对地址导航完全
@@ -157,8 +180,16 @@ var adapters = []SiteAdapter{
 		Name:  "meituan-sso-rewrite",
 		Hosts: []string{"meituan.com", "meituan.net", "sankuai.com", "dianping.com", "dpfile.com", "51ping.com"},
 		RewriteJS: func(body []byte, prefix string) []byte {
-			// 先替换更长的 test/st 域，防 ssosv.sankuai.com 前缀截断后者
-			for _, h := range []string{"ssosv.it.st.sankuai.com", "ssosv.it.test.sankuai.com", "ssosv.sankuai.com"} {
+			// 先替换更长的 test/st 域，防 ssosv.sankuai.com 前缀截断后者。
+			// epassport（含 fepassport 测试变体）是商家 Epassport 登录分支
+			//（login JS 的 EP 分支以 location.href= 字面量直跳——页面自身
+			// location 不可包装、hook 拦不住跨源导航）：漏改写时重新登录直接
+			// 逃逸到真实域完成，票据（eprt 等 Domain=.meituan.com）种不进代理
+			// 路径，发票等严校验接口恒 403「无访问权限」（实测 2026-10-15）
+			for _, h := range []string{
+				"ssosv.it.st.sankuai.com", "ssosv.it.test.sankuai.com", "ssosv.sankuai.com",
+				"fepassport.sjst.test.sankuai.com", "epassport.meituan.com",
+			} {
 				to := prefix + "https/" + h
 				body = bytes.ReplaceAll(body, []byte("https://"+h), []byte(to))
 			}

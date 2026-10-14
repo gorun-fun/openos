@@ -11,7 +11,9 @@ import (
 )
 
 // compactTarget 把绝对目标地址映射为代理路径段：https://h:8443/a/b?q →
-// https/h:8443/a/b?q。
+// https/h:8443/a/b?q。fragment（#…）原样保留——它是客户端路由状态（SPA 微前端
+// 入口把业务路由放 hash），仅出现在属性值/Location 头等客户端可见形态；浏览器
+// 发请求时自动剥除、不会进入服务端路由。
 func compactTarget(u *url.URL) string {
 	host := u.Host
 	if host == "" {
@@ -20,6 +22,9 @@ func compactTarget(u *url.URL) string {
 	out := u.Scheme + "/" + host + u.EscapedPath()
 	if u.RawQuery != "" {
 		out += "?" + u.RawQuery
+	}
+	if u.Fragment != "" {
+		out += "#" + u.EscapedFragment()
 	}
 	return out
 }
