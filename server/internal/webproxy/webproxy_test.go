@@ -1044,14 +1044,14 @@ func TestRefererTargetHook(t *testing.T) {
 	r := httptest.NewRequest("GET", "/app/music-163/hook.js", nil)
 	r.Header.Set("Referer", "http://h.example/app/music-163/https/music.163.com/discover")
 	w := httptest.NewRecorder()
-	serveHook(w, r, "music-163")
+	serveHook(w, r, "music-163", nil)
 	if !strings.Contains(w.Body.String(), "Object.defineProperty(T, k") {
 		t.Errorf("music.163.com 的 hook 应包含 top 桥接片段")
 	}
 	r2 := httptest.NewRequest("GET", "/app/x/hook.js", nil)
 	r2.Header.Set("Referer", "http://h.example/app/x/https/unknown.example/p")
 	w2 := httptest.NewRecorder()
-	serveHook(w2, r2, "x")
+	serveHook(w2, r2, "x", nil)
 	if strings.Contains(w2.Body.String(), "Object.defineProperty(T, k") {
 		t.Errorf("未知站点的 hook 不应包含站点适配片段")
 	}
@@ -1061,5 +1061,56 @@ func TestRefererTargetHook(t *testing.T) {
 	// __PREFIX__ 占位符全量替换（含适配片段）
 	if strings.Contains(w.Body.String(), "__PREFIX__") || strings.Contains(w2.Body.String(), "__PREFIX__") {
 		t.Errorf("占位符应被全量替换")
+	}
+}
+
+// TestAppConfigHook 应用级注入脚本（config.hook）：随通用 hook 与适配器片段
+// 之后追加、__PREFIX__ 占位符替换为应用前缀；超限置空不拒整个应用。
+func TestAppConfigHook(t *testing.T) {
+	cfg := parseProxyConfig([]byte(`{"kind":"proxy","url":"https://t.example/","hook":"window.__biz=1;fetch(__PREFIX__)"}`))
+	if cfg == nil {
+		t.Fatal("parseProxyConfig 应成功")
+	}
+	r := httptest.NewRequest("GET", "/app/mt/hook.js", nil)
+	w := httptest.NewRecorder()
+	serveHook(w, r, "mt", cfg)
+	body := w.Body.String()
+	if !strings.Contains(body, "window.__biz=1") {
+		t.Errorf("应用级脚本应被追加进 hook.js 响应")
+	}
+	if !strings.Contains(body, `window.__biz=1;fetch(/app/mt/)`) {
+		t.Errorf("__PREFIX__ 应替换为应用前缀，得到：%s", body[len(body)-80:])
+	}
+	if strings.Contains(body, "__PREFIX__") {
+		t.Errorf("占位符应被全量替换")
+	}
+
+	// 与站点适配器共存：美团域命中适配器片段时应用级脚本仍在
+	r2 := httptest.NewRequest("GET", "/app/mt/hook.js", nil)
+	r2.Header.Set("Referer", "http://h.example/app/mt/https/ebooking.meituan.com/")
+	w2 := httptest.NewRecorder()
+	serveHook(w2, r2, "mt", cfg)
+	b2 := w2.Body.String()
+	if !strings.Contains(b2, "nocode.sankuai.com") || !strings.Contains(b2, "window.__biz=1") {
+		t.Errorf("适配器片段与应用级脚本应共存")
+	}
+	// 应用级脚本在适配器片段之后（可依赖先就位的包装入口）
+	if strings.Index(b2, "nocode.sankuai.com") > strings.Index(b2, "window.__biz=1") {
+		t.Errorf("应用级脚本应追加在适配器片段之后")
+	}
+
+	// 无 hook 的应用不受影响（与旧行为一致）
+	cfgNil := parseProxyConfig([]byte(`{"kind":"proxy","url":"https://t.example/"}`))
+	w3 := httptest.NewRecorder()
+	serveHook(w3, httptest.NewRequest("GET", "/app/x/hook.js", nil), "x", cfgNil)
+	if strings.Contains(w3.Body.String(), "window.__biz") {
+		t.Errorf("未配置 hook 的应用不应出现业务脚本")
+	}
+
+	// 超限置空：应用仍可用（代理语义不受影响），脚本不注入
+	big := `{"kind":"proxy","url":"https://t.example/","hook":"` + strings.Repeat("x", maxAppHook+1) + `"}`
+	cfgBig := parseProxyConfig([]byte(big))
+	if cfgBig == nil || cfgBig.Hook != "" {
+		t.Errorf("超限 hook 应置空且应用可用")
 	}
 }

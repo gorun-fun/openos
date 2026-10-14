@@ -118,7 +118,7 @@ func (p *Proxy) Handler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Location", "/app/"+id+"/"+compactTarget(cfgURL))
 		w.WriteHeader(http.StatusFound)
 	case rest == hookPath || strings.HasPrefix(rest, hookPath+"?"):
-		serveHook(w, r, id)
+		serveHook(w, r, id, cfg)
 	case strings.HasPrefix(rest, "http://") || strings.HasPrefix(rest, "https://"):
 		// 宽容：直接携带 :// 的旧式地址压回紧凑形态
 		w.Header().Set("Location", "/app/"+id+"/"+strings.Replace(rest, "://", "/", 1))

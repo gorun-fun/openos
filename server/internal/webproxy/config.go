@@ -11,13 +11,23 @@ import (
 )
 
 // proxyConfig 应用 config 的代理形态：{"kind":"proxy","url":"https://目标/",
-// "headers":{"X-Api-Key":"…"}}。headers 为管理员配置的自定义请求头，随代理
-// 转发附加到上游请求（含 WebSocket 握手），常用于内网系统的固定认证头。
+// "headers":{"X-Api-Key":"…"},"hook":"…JS 源码…"}。headers 为管理员配置的自定义
+// 请求头，随代理转发附加到上游请求（含 WebSocket 握手），常用于内网系统的固定
+// 认证头。hook 为应用级注入脚本（宿主平台的业务接管管道）：随通用 hook.js 之后
+// 注入代理页面，__PREFIX__ 占位符同样替换为 /app/<id>/——监听目标站动作、
+// postMessage 通知宿主等业务逻辑由宿主（grf-hotel 等）经 /api/host/apps 维护，
+// openos 只提供管道。
 type proxyConfig struct {
 	Kind    string            `json:"kind"`
 	URL     string            `json:"url"`
 	Headers map[string]string `json:"headers"`
+	Hook    string            `json:"hook"`
 }
+
+// maxAppHook 应用级注入脚本长度上限：业务监听脚本（接口判据 + postMessage）
+// 百行级即够，256KB 已极宽裕；超限置空保持应用可用（config 存 SQLite，防
+// 无上限膨胀）。
+const maxAppHook = 256 << 10
 
 // bannedCfgHeaders 配置请求头黑名单：逐跳与传输控制类头由代理自身管理，
 // 允许配置会破坏连接语义（Content-Length/Transfer-Encoding 还构成请求走私）。
@@ -107,5 +117,8 @@ func parseProxyConfig(raw json.RawMessage) *proxyConfig {
 		return nil
 	}
 	c.Headers = sanitizeCfgHeaders(c.Headers)
+	if len(c.Hook) > maxAppHook {
+		c.Hook = "" // 超限丢弃脚本不拒绝整个应用（代理本身仍可用）
+	}
 	return &c
 }

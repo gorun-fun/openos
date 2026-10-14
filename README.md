@@ -876,6 +876,20 @@ RewriteJS 适配器命中的请求另剥 `If-None-Match` / `If-Modified-Since` �
   白名单校验不受影响）。极少数校验自身域名的站点（OAuth 严格回跳、银行类）仍
   可能不可用，用工具栏「浏览器打开」兜底。
 
+**应用级注入脚本（`config.hook`，宿主平台业务接管管道）**：kind=proxy 应用的
+config 可声明 `hook` 字段（JS 源码，≤256KB，超限静默置空不拒应用），随通用
+hook.js 与站点适配器片段**之后**注入代理页面（执行顺序保证业务脚本可依赖已包装
+的 fetch/XHR 入口做接口判据）；脚本内 `__PREFIX__` 占位符同样替换为
+`/app/<id>/`。用途：第三方站点（美团 ebooking 等）页面内发生业务动作（办理
+入住等）时由宿主平台接管——脚本监听目标站接口/DOM，`postMessage` 通知宿主页
+（代理页与宿主同源，宿主自行 `addEventListener('message')` 并校验 `e.source`），
+宿主再经 `OpenOS.launch(appId, props)` 拉起自家业务应用（目标应用以
+`launchOf` 识别拉起态并回执，见「跨应用联动」）。分工边界：**判据写什么、命中后
+做什么全部在宿主仓库维护**（经 `/api/host/apps` 随时更新 config 即热生效，
+hook.js 响应 `no-store`），openos 只提供注入管道；信任模型与 apps config 一致
+（管理员/宿主全信任通道，与商店 bundle 远程代码同级）。桌面客户端形态网页应用
+iframe 直连、不经代理，本管道不覆盖。
+
 **开关**：`OPENOS_PROXY=off` 下架 `/app/*` 与 `/px/*` 路由（应用配置保留，iframe
 将得到 404）。`GET /api/proxy/status` 返回统一代理是否可用（前端设置「网页应用」
 分区与网络请求类应用据此降级）。
