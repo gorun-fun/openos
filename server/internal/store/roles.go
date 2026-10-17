@@ -258,6 +258,22 @@ func (db *DB) DeleteRole(key string) error {
 	return tx.Commit()
 }
 
+// ---- 宿主角色编辑回写通道（declare 声明，system_kv 持久化）----
+
+// roleWritebackKV 宿主回写地址的 system_kv 键。非空 = 宿主声明愿意接管宿主角色的
+// 编辑写（PUT /api/roles/{key} 对 host 角色转发该地址）；空/不存在 = 宿主角色只读。
+const roleWritebackKV = "host_role_writeback"
+
+// RoleWritebackURL 宿主角色编辑回写地址（未声明返回空串）。
+func (db *DB) RoleWritebackURL() (string, error) {
+	return db.GetSystemKV(roleWritebackKV)
+}
+
+// SetRoleWritebackURL 设置/清除宿主角色编辑回写地址（空串 = 清除）。
+func (db *DB) SetRoleWritebackURL(url string) error {
+	return db.SetSystemKV(roleWritebackKV, url)
+}
+
 // PermsCatalog 权限点目录（system 在前 host 在后，组内按 code 排序）。
 func (db *DB) PermsCatalog() ([]PermDef, error) {
 	rows, err := db.Query(`SELECT code,grp,label,managed_by FROM perm_defs ORDER BY managed_by, grp, code`)

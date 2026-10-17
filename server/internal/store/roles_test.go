@@ -49,3 +49,26 @@ func TestDeclareHostRolesUnresolved(t *testing.T) {
 		t.Fatal("unbound stale role must be removed after re-declare")
 	}
 }
+
+// TestRoleWritebackKV 回写地址持久化：设置/读取/清除（declare 的 roleWriteback 字段落点）。
+func TestRoleWritebackKV(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := db.RoleWritebackURL(); v != "" {
+		t.Fatalf("unset writeback should be empty, got %q", v)
+	}
+	if err := db.SetRoleWritebackURL("http://127.0.0.1:8082/api/v1/openos/role-write"); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := db.RoleWritebackURL(); v != "http://127.0.0.1:8082/api/v1/openos/role-write" {
+		t.Fatalf("writeback not persisted: %q", v)
+	}
+	if err := db.SetRoleWritebackURL(""); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := db.RoleWritebackURL(); v != "" {
+		t.Fatalf("empty set should clear, got %q", v)
+	}
+}

@@ -174,12 +174,29 @@ const permsDirty = ref(false)
 
 const isAdminUser = computed(() => session.user?.role === 'admin')
 const activeRoleDef = computed(() => roleDefs.value.find((r) => r.key === accessRole.value))
-/** 宿主托管角色与只读查看者均不可编辑（宿主接管模式：权威在宿主自己的库） */
-const roleReadonly = computed(() => !isAdminUser.value || activeRoleDef.value?.managedBy === 'host')
-const permsByOrigin = computed(() => {
-  const host: PermDefVM[] = [], system: PermDefVM[] = []
-  for (const p of permDefs.value) (p.managedBy === 'host' ? host : system).push(p)
-  return { host, system }
+// 宿主声明了角色编辑回写通道（GET /api/roles hostRolesWritable）：宿主托管角色
+// 的编辑经 openos 转发宿主权威落库，设置页解锁可编辑
+const hostWritable = ref(false)
+/** 只读查看者不可编辑；宿主托管角色在宿主未声明回写通道前同样只读（权威在宿主库） */
+const roleReadonly = computed(() => !isAdminUser.value || (activeRoleDef.value?.managedBy === 'host' && !hostWritable.value))
+// 权限点按声明的 group（业务模块，宿主声明如「客房管理」）分组展示；组名为空回落
+// 归属标签（宿主业务权限/系统权限），openos 内置组 "system" 映射为系统权限文案。
+// 目录顺序即展示顺序（host 组在前、system 在后，组内按 code）。
+const permGroupsUI = computed(() => {
+  const out: { key: string; group: string; managedBy: string; perms: PermDefVM[] }[] = []
+  const idx = new Map<string, (typeof out)[number]>()
+  for (const p of permDefs.value) {
+    const group = p.group && p.group !== 'system' ? p.group : ''
+    const mk = p.managedBy + '\u0000' + group
+    let g = idx.get(mk)
+    if (!g) {
+      g = { key: mk, group, managedBy: p.managedBy, perms: [] }
+      idx.set(mk, g)
+      out.push(g)
+    }
+    g.perms.push(p)
+  }
+  return out
 })
 const rolesDirty = computed(() => accessDirty.value || permsDirty.value)
 
@@ -192,16 +209,17 @@ async function loadAccess() {
   allApps.value = await api.get<AppDef[]>('/api/apps?all=1')
   // 角色目录（含宿主声明角色）与权限点目录
   try {
-    const cat = await api.get<{ roles: RoleDefVM[]; perms: PermDefVM[] }>('/api/roles')
+    const cat = await api.get<{ roles: RoleDefVM[]; perms: PermDefVM[]; hostRolesWritable?: boolean }>('/api/roles')
     roleDefs.value = cat.roles || []
     permDefs.value = cat.perms || []
+    hostWritable.value = !!cat.hostRolesWritable
     rolePerms.value = {}
     for (const r of roleDefs.value) {
       rolePerms.value[r.key] = [...(r.perms || [])]
       if (!roles.value.includes(r.key)) roles.value.push(r.key)
       if (r.label && !roleLabels.value[r.key]) roleLabels.value[r.key] = r.label
     }
-  } catch { roleDefs.value = []; permDefs.value = [] }
+  } catch { roleDefs.value = []; permDefs.value = []; hostWritable.value = false }
 }
 function toggleApp(role: string, id: string) {
   const cur = access.value[role] || []
@@ -625,17 +643,20 @@ watch(tab, (v) => {
           {{ rolesDirty && !roleReadonly ? t('settings.roles.dirty') : t('settings.roles.saved') }}
         </OsButton>
       </div>
-      <p v-if="activeRoleDef?.managedBy === 'host'" class="hint">{{ t('settings.roles.hostManaged') }}</p>
+      <p v-if="activeRoleDef?.managedBy === 'host' && !hostWritable" class="hint">{{ t('settings.roles.hostManaged') }}</p>
+      <p v-else-if="activeRoleDef?.managedBy === 'host'" class="hint">{{ t('settings.roles.hostEditable') }}</p>
       <p v-else-if="!isAdminUser" class="hint">{{ t('settings.roles.readonly') }}</p>
       <div class="roles-grid">
-        <!-- 左区：功能级权限点（admin 直通提示 + 分组勾选） -->
+        <!-- 左区：功能级权限点（admin 直通提示 + 按业务模块分组勾选） -->
         <div class="roles-perms">
           <h3 class="sec">{{ t('settings.roles.perms') }}</h3>
           <p v-if="accessRole === 'admin'" class="hint">{{ t('settings.roles.allPerms') }}</p>
           <template v-else>
-            <div v-for="grp in ['host', 'system'] as const" :key="grp">
-              <p v-if="permsByOrigin[grp].length" class="perm-group">{{ t(grp === 'host' ? 'settings.roles.hostGroup' : 'settings.roles.systemGroup') }}</p>
-              <label v-for="p in permsByOrigin[grp]" :key="p.code" class="perm-item" :class="{ ro: roleReadonly }">
+            <div v-for="g in permGroupsUI" :key="g.key">
+              <p v-if="g.perms.length" class="perm-group">
+                {{ g.group || t(g.managedBy === 'host' ? 'settings.roles.hostGroup' : 'settings.roles.systemGroup') }}
+              </p>
+              <label v-for="p in g.perms" :key="p.code" class="perm-item" :class="{ ro: roleReadonly }">
                 <input
                   type="checkbox"
                   :disabled="roleReadonly"

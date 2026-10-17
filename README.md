@@ -589,7 +589,8 @@ v0.0.48 彻底移除）。审计 operator 记为 `host`。
     ],
     "perms": [
       { "code": "order.view", "group": "业务", "label": "订单查看" }
-    ]
+    ],
+    "roleWriteback": "http://127.0.0.1:8082/api/v1/openos/role-write"
   }
   ```
 
@@ -597,7 +598,12 @@ v0.0.48 彻底移除）。审计 operator 记为 `host`。
   响应 `unresolved` 报告，宿主先把这些用户的角色同步走再重 declare 即收敛——直接删
   会让用户挂着不存在的角色悬空）、system 角色不动、保存即广播 `sys:apps-changed`、
   整体清用户态缓存权限即时生效；取代宿主侧 os_role_seed 标记表这类种子 workaround。
-  host 角色在设置页只读展示（「宿主托管」徽标）。
+  host 角色在设置页默认只读展示；**声明 `roleWriteback` 地址后解锁可编辑**——宿主
+  角色的保存（PUT /api/roles/{key}）整包转发该地址（携带 X-Exchange-Secret 与
+  X-OS-User 操作者用户名，宿主反查身份做归属/权限校验），宿主权威落库后自行重新
+  declare 收敛投影；携带空串 = 清除回写声明（回到只读）。未携带字段 = 不动既有声明
+  （hostsdk `Declare` 不携带，`DeclareRoles` 恒携带）。权限点目录按宿主声明的
+  `group`（业务模块）分组展示，组名缺失回落归属标签。
 - **权限快照**：`POST /api/auth/exchange`、`/api/users/sync` 与 `PUT /api/users/{name}`
   均支持可选 `perms[]` 字段——宿主权威库算出的该用户权限并集写入 users.perms（变化
   即时生效、不吊销令牌）；未传时按角色权限矩阵推导。JWT claims 与 `/api/auth/me`
@@ -609,8 +615,10 @@ v0.0.48 彻底移除）。审计 operator 记为 `host`。
   `ai.manage` → AI 配置与每用户供应商、`system.manage` → 审计/统计/角色目录写
   （admin 恒直通）。防提权约束：持 users.manage 的非 admin 不可操作 admin 用户、
   不可授予 admin 角色。
-- 角色目录 API：`GET /api/roles`（登录态，含每角色 perms/apps 快照与权限点目录）、
-  `PUT /api/roles/{key}` / `DELETE /api/roles/{key}`（system.manage；host 角色只读拒绝）。
+- 角色目录 API：`GET /api/roles`（登录态，含每角色 perms/apps 快照、权限点目录与
+  `hostRolesWritable` 回写可用标记）、`PUT /api/roles/{key}` / `DELETE /api/roles/{key}`
+  （system.manage；host 角色声明回写地址时 PUT 转发宿主落库，否则只读拒绝；DELETE
+  对 host 角色恒拒绝——角色生命周期归宿主）。
 
 **裁剪部署（数据边界）**：宿主以 SQLite 只保存**演示数据与每用户界面设置**为目标时：
 

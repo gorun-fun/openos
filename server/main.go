@@ -8,6 +8,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -317,14 +318,18 @@ func main() {
 	// 这类种子 workaround。与令牌交换/定向推送共用 X-Exchange-Secret。
 	// 清单外仍被用户绑定的 host 角色不删，响应 unresolved 报告（宿主先迁用户再
 	// 重 declare，幂等收敛）——直接删会让用户挂着不存在的角色悬空。
+	// roleWriteback（可选项）：宿主角色编辑回写地址——声明后 PUT /api/roles/{key}
+	// 对宿主角色的编辑转发该地址（宿主权威落库后自行重新 declare 收敛投影），
+	// 设置「角色与权限」对宿主角色解锁可编辑；未声明 = 宿主角色只读（原行为）。
 	mux.HandleFunc("POST /api/host/declare", func(w http.ResponseWriter, r *http.Request) {
 		if !authSvc.CheckExchangeSecret(r.Header.Get("X-Exchange-Secret")) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		var req struct {
-			Roles []store.HostRoleEntry `json:"roles"`
-			Perms []store.PermDef       `json:"perms"`
+			Roles         []store.HostRoleEntry `json:"roles"`
+			Perms         []store.PermDef       `json:"perms"`
+			RoleWriteback *string               `json:"roleWriteback"`
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&req); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
@@ -337,6 +342,13 @@ func main() {
 		for _, e := range req.Roles {
 			if e.Key == "" || !auth.ValidRoleKey(e.Key) {
 				http.Error(w, "非法角色键: "+e.Key, http.StatusBadRequest)
+				return
+			}
+		}
+		if req.RoleWriteback != nil {
+			// 指针区分「未携带」（不动）与「携带空串」（清除）——全量同步语义
+			if err := db.SetRoleWritebackURL(strings.TrimSpace(*req.RoleWriteback)); err != nil {
+				http.Error(w, "回写地址保存失败: "+err.Error(), 500)
 				return
 			}
 		}
@@ -826,7 +838,8 @@ func main() {
 
 	// ---- 角色目录与功能级权限（P2 2026-10）----
 	// 目录对所有登录用户可读（角色/权限的展示性信息；编辑需 system.manage，
-	// admin 恒直通——宿主托管角色只读，host 模式权威在宿主自己的数据库）。
+	// admin 恒直通——宿主托管角色默认只读，宿主声明回写地址后解锁：编辑转发
+	// 宿主落库（host 模式权威在宿主自己的数据库）。
 	authed.HandleFunc("GET /api/roles", func(w http.ResponseWriter, r *http.Request) {
 		roles, err := db.ListRoleDefs()
 		if err != nil {
@@ -838,13 +851,14 @@ func main() {
 			http.Error(w, "读取权限点目录失败", 500)
 			return
 		}
+		wb, _ := db.RoleWritebackURL()
 		if roles == nil {
 			roles = []store.RoleDef{}
 		}
 		if perms == nil {
 			perms = []store.PermDef{}
 		}
-		writeJSON(w, map[string]any{"roles": roles, "perms": perms})
+		writeJSON(w, map[string]any{"roles": roles, "perms": perms, "hostRolesWritable": wb != ""})
 	})
 	authed.HandleFunc("PUT /api/roles/{key}", func(w http.ResponseWriter, r *http.Request) {
 		id := auth.FromContext(r)
@@ -860,6 +874,19 @@ func main() {
 		}
 		if json.NewDecoder(r.Body).Decode(&req) != nil || !auth.ValidRoleKey(key) {
 			http.Error(w, "参数错误", 400)
+			return
+		}
+		// 宿主托管角色：声明了回写地址 → 整包转发宿主权威落库（宿主重新 declare
+		// 收敛投影 + 广播刷新）；未声明 → 只读拒绝（host 模式权威在宿主库，
+		// 本端写了也会被下次 declare 覆盖）。
+		var managedBy string
+		if err := db.QueryRow(`SELECT managed_by FROM roles WHERE key=?`, key).Scan(&managedBy); err == nil && managedBy == "host" {
+			wb, wbErr := db.RoleWritebackURL()
+			if wbErr != nil || wb == "" {
+				http.Error(w, "宿主托管角色不可在本端编辑（权威在宿主系统）", 400)
+				return
+			}
+			forwardRoleWrite(w, r, authSvc, db, hub, wb, key, req.Label, req.Perms, req.Apps, id.Username)
 			return
 		}
 		if err := db.UpsertRole(key, req.Label, req.Perms); err != nil {
@@ -1557,6 +1584,64 @@ func sanitizeID(s string) string {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(v)
+}
+
+// forwardRoleWrite 宿主托管角色编辑转发（PUT /api/roles/{key} 的 host 分支）：
+// 整包（label/perms/apps）转发宿主 declare 声明的回写地址，随请求携带
+// X-Exchange-Secret（与宿主调 openos 同一把密钥、方向反转）+ X-OS-User（操作者
+// openos 用户名，宿主反查员工做归属/权限校验）。宿主权威落库后自行重新 declare
+// 收敛投影（顺带广播 sys:apps-changed），openos 本端不落库——写了也会被下次
+// declare 覆盖。错误按宿主回包透传（{code,msg} → 前端契约 {error}）。
+func forwardRoleWrite(w http.ResponseWriter, r *http.Request, authSvc *auth.Service, db *store.DB, hub *bus.Hub, wbURL, key, label string, perms, apps []string, operator string) {
+	payload, err := json.Marshal(map[string]any{"key": key, "label": label, "perms": perms, "apps": apps})
+	if err != nil {
+		http.Error(w, "请求组装失败", 500)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, wbURL, bytes.NewReader(payload))
+	if err != nil {
+		http.Error(w, "回写地址非法: "+err.Error(), 500)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Exchange-Secret", authSvc.ExchangeSecretValue())
+	req.Header.Set("X-OS-User", operator)
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		log.Printf("[roles] 宿主回写不可达 key=%s operator=%s: %v", key, operator, err)
+		http.Error(w, "宿主回写不可达: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		db.Audit(operator, "roles.upsert-host", key, "")
+		authSvc.InvalidateAllCache() // 宿主 declare 也会清，此处兜底（回写端不重新 declare 的宿主）
+		hub.Publish("sys:apps-changed", map[string]any{"role": key})
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		w.Write(body)
+		return
+	}
+	// 宿主错误透传：宿主回包 {code,msg}（grf-hotel 风格）或 {error}（openos 风格）
+	// 都取可读消息进前端契约 {error}
+	var he struct {
+		Msg   string `json:"msg"`
+		Error string `json:"error"`
+	}
+	msg := fmt.Sprintf("宿主回写失败: HTTP %d", resp.StatusCode)
+	if json.Unmarshal(body, &he) == nil {
+		if he.Error != "" {
+			msg = he.Error
+		} else if he.Msg != "" {
+			msg = he.Msg
+		}
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(resp.StatusCode)
+	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
 // usersHoldingPerm 全部持某权限点且启用中的用户（perm 收件人展开）：

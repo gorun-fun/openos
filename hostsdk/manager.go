@@ -464,8 +464,20 @@ type PermDecl struct {
 // Declare 声明式全量同步角色目录/权限点/应用授权到 openos（POST /api/host/declare，
 // 幂等收敛：清单外 host 角色移除、system 角色不动）。取代宿主侧 os_role_seed
 // 标记表 / 「access 含 gateway」这类种子 workaround。保存即广播 sys:apps-changed。
+// 不携带 roleWriteback 字段——既有回写声明保持不变（见 DeclareRoles）。
 func (m *Manager) Declare(roles []RoleDecl, perms []PermDecl) error {
 	body := map[string]any{"roles": roles, "perms": perms}
+	return m.serviceCall(http.MethodPost, "/api/host/declare", body, nil)
+}
+
+// DeclareRoles 声明式全量同步 + 宿主角色编辑回写通道声明（Declare 的超集）。
+// roleWritebackURL 非空 = 宿主愿意接管宿主角色的编辑写：openos 设置「角色与权限」
+// 对宿主角色解锁可编辑，PUT /api/roles/{key} 整包转发该地址（X-Exchange-Secret +
+// X-OS-User 操作者），宿主权威落库后自行重新 declare 收敛投影；空串 = 清除回写
+// 声明（宿主角色回到只读）。字段恒随声明携带（全量同步语义），与 Declare 的
+// 「不携带=不变」互不干扰。
+func (m *Manager) DeclareRoles(roles []RoleDecl, perms []PermDecl, roleWritebackURL string) error {
+	body := map[string]any{"roles": roles, "perms": perms, "roleWriteback": roleWritebackURL}
 	return m.serviceCall(http.MethodPost, "/api/host/declare", body, nil)
 }
 

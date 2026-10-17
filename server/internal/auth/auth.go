@@ -198,6 +198,11 @@ func (s *Service) CheckExchangeSecret(v string) bool {
 	return s.exchangeSecret != "" && subtle.ConstantTimeCompare([]byte(v), []byte(s.exchangeSecret)) == 1
 }
 
+// ExchangeSecretValue 暴露宿主间密钥本体：仅用于 openos 主动回调宿主的场景
+// （宿主角色编辑回写转发），随请求携带 X-Exchange-Secret——宿主侧用同一把密钥
+// 校验，双向同源。调用方均为进程内路由处理器，不外发给前端。
+func (s *Service) ExchangeSecretValue() string { return s.exchangeSecret }
+
 // SetExchangeRoleWhitelist 配置 exchange 可指定的角色白名单（逗号分隔，空 = 不限制）。
 func (s *Service) SetExchangeRoleWhitelist(v string) {
 	if v == "" {
