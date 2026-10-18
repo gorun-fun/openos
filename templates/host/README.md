@@ -66,12 +66,13 @@ hostsdk.NewAISyncer(hostsdk.AISyncConfig{
 ## 前端接线（app/web）
 
 ```ts
-import { createOpenOS } from '@openos/framework'
-import { createHostApi } from '@openos/host'
+import { createOpenOS, createHostApi } from '@openos/framework'
 
 // 宿主业务 API 客户端：令牌内存缓存 + 401 静默续期（refresh Cookie 复活）重试
 // + SSO 跳转挂起 + 6h 保活，续期响应带 openos_token 时自动同步 openos 客户端。
 // 不配置 session 则退化为简单形态（401 → onUnauthorized）。
+// 注意经 '@openos/framework' 导入（非 '@openos/host'）：宿主 deps 构建的
+// importmap 只登记既有裸名即可保 openos 令牌态单实例。
 export const os = createHostApi({
   tokenKey: 'token', base: '/api/v1',
   headers: () => ({}),                                    // 动态附加头（如门店上下文）

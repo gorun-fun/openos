@@ -310,6 +310,11 @@ export { registerCapabilities, unregisterCapabilities, listCapabilities } from '
 export type { AppCapabilities, CapDef, CapViewDef, CapHTTPSpec, CapWindowSpec, CapOrigin, CapListing } from './desktop/capabilities'
 // 能力清单声明式构建件（宿主 REST 端点 → CapDef 的样板收敛；也可直引 '@openos/capkit'）
 export * from './capkit'
+// 宿主业务 API 客户端工厂（@openos/host 的消费面收敛到 framework 导出：宿主 deps
+// 构建 importmap 只登记既有裸名即可单实例复用——避免宿主把 host.ts 及其依赖的
+// api/client 内联进自家 core 产物造成 openos 令牌态双实例）
+export { createHostApi, HostApiError } from './host'
+export type { HostApi, HostApiOptions, HostSessionOptions, RenewResult } from './host'
 export { registerIcons } from './desktop/icons'
 export type { IconDef } from './desktop/icons'
 // i18n：宿主从 '@openos/framework' 直接导入（词条注入/切换/取词）
