@@ -22,6 +22,10 @@ type SSOConfig struct {
 	ClientID     string
 	ClientSecret string
 	RedirectURL  string // 回调绝对地址（…/api/v1/auth/sso/callback）
+	// RedirectFunc 请求期解析回调地址（优先于 RedirectURL）：X-Forwarded-Proto/
+	// Host 感知推导的宿主用（同一部署经 http 直连 IP 与 https 域名双形态可达时，
+	// Casdoor 侧登记同值即可，无须静态写死）。设置时 Enabled 不再要求 RedirectURL。
+	RedirectFunc func(r *http.Request) string
 	// Group 允许登录的组（空=不限制）。匹配规则：全名相等或组织前缀路径末段相等
 	//（"org/hotel-staff" ↔ "hotel-staff"）。
 	Group string
@@ -57,7 +61,18 @@ func NewSSO(cfg SSOConfig) *SSO {
 
 // Enabled 配置是否完整。
 func (s *SSO) Enabled() bool {
-	return s.cfg.Endpoint != "" && s.cfg.ClientID != "" && s.cfg.ClientSecret != "" && s.cfg.RedirectURL != ""
+	ok := s.cfg.Endpoint != "" && s.cfg.ClientID != "" && s.cfg.ClientSecret != ""
+	return ok && (s.cfg.RedirectURL != "" || s.cfg.RedirectFunc != nil)
+}
+
+// redirect 请求期回调地址：RedirectFunc 优先于静态 RedirectURL。
+func (s *SSO) redirect(r *http.Request) string {
+	if s.cfg.RedirectFunc != nil {
+		if u := s.cfg.RedirectFunc(r); u != "" {
+			return u
+		}
+	}
+	return s.cfg.RedirectURL
 }
 
 // LoginRedirect 302 跳 Casdoor 授权页（先种 state Cookie 防重放）。
@@ -79,7 +94,7 @@ func (s *SSO) LoginRedirect(w http.ResponseWriter, r *http.Request, devFallback 
 	q := url.Values{}
 	q.Set("client_id", s.cfg.ClientID)
 	q.Set("response_type", "code")
-	q.Set("redirect_uri", s.cfg.RedirectURL)
+	q.Set("redirect_uri", s.redirect(r))
 	q.Set("scope", "read")
 	q.Set("state", state)
 	http.Redirect(w, r, strings.TrimRight(s.cfg.Endpoint, "/")+"/login/oauth/authorize?"+q.Encode(), http.StatusFound)
@@ -110,7 +125,7 @@ func (s *SSO) Callback(w http.ResponseWriter, r *http.Request) (SSOUser, error) 
 	}
 	http.SetCookie(w, &http.Cookie{Name: ssoStateCookie, Value: "", Path: "/", MaxAge: -1})
 
-	accessToken, err := s.exchange(r.Context(), code)
+	accessToken, err := s.exchange(r.Context(), code, s.redirect(r))
 	if err != nil {
 		return SSOUser{}, fmt.Errorf("认证服务通信失败: %w", err)
 	}
@@ -129,13 +144,13 @@ func (s *SSO) FailRedirect(w http.ResponseWriter, r *http.Request, msg string) {
 	http.Redirect(w, r, "/?sso_error="+url.QueryEscape(msg), http.StatusFound)
 }
 
-func (s *SSO) exchange(ctx context.Context, code string) (string, error) {
+func (s *SSO) exchange(ctx context.Context, code, redirectURI string) (string, error) {
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("client_id", s.cfg.ClientID)
 	form.Set("client_secret", s.cfg.ClientSecret)
 	form.Set("code", code)
-	form.Set("redirect_uri", s.cfg.RedirectURL)
+	form.Set("redirect_uri", redirectURI)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		strings.TrimRight(s.cfg.Endpoint, "/")+"/api/login/oauth/access_token", strings.NewReader(form.Encode()))
 	if err != nil {
