@@ -315,6 +315,10 @@ export * from './capkit'
 // api/client 内联进自家 core 产物造成 openos 令牌态双实例）
 export { createHostApi, HostApiError } from './host'
 export type { HostApi, HostApiOptions, HostSessionOptions, RenewResult } from './host'
+// 用户级设置同步 composable（宿主业务组件的「服务端权威+缓存+防抖回写」收敛件，
+// 经 framework 导出同样为保 api/client 单实例）
+export { useUserSetting, createUserSetting, fetchUserSettings } from './composables/useUserSetting'
+export type { UserSettingOptions, UserSettingChannel } from './composables/useUserSetting'
 export { registerIcons } from './desktop/icons'
 export type { IconDef } from './desktop/icons'
 // i18n：宿主从 '@openos/framework' 直接导入（词条注入/切换/取词）
