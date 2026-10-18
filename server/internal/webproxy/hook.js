@@ -25,6 +25,47 @@
   var APPID = PREFIX.split('/')[2] || '';            // /app/<id>/ → <id>
   var PXMARK = sm ? APPID + '~' + SCHEME + '~' + AUTH : ''; // 还原标记（逃逸回捕依据）
 
+  // ---- 存储隔离：代理页与宿主桌面同源，localStorage/sessionStorage 原生直写
+  // 会与宿主互踩——宿主自身会话键（openos 桌面 openos_token）、被代理的嵌套宿主
+  // 登录引导页写 token/openos_token（覆盖外层会话，外层登出 clearToken 又连锁杀
+  // 内层）、以及站点 SDK 的 localStorage.clear() 清光宿主登录态（美团风控曾踩）。
+  // 门面把本代理页可见的存储整体映射到 __px_<appid>:: 前缀：页面代码无感读写
+  // 自己的命名空间，clear() 只清本应用。属性式读写（localStorage.x）不覆盖——
+  // 标准 API 已覆盖现代站点，保持门面极简；defineProperty 失败时保持原生（隔离
+  // 失效但不破坏页面）。----
+  function pxStorage(orig, ns) {
+    function own() { // 本命名空间键快照（保持底层插入序）
+      var out = [];
+      for (var i = 0; i < orig.length; i++) {
+        var k = orig.key(i);
+        if (k.indexOf(ns) === 0) out.push(k.slice(ns.length));
+      }
+      return out;
+    }
+    return {
+      get length() { return own().length; },
+      key: function (i) { var a = own(); return i >= 0 && i < a.length ? a[i] : null; },
+      getItem: function (k) { return orig.getItem(ns + k); },
+      setItem: function (k, v) { orig.setItem(ns + k, String(v)); },
+      removeItem: function (k) { orig.removeItem(ns + k); },
+      clear: function () { own().forEach(function (k) { orig.removeItem(ns + k); }); }
+    };
+  }
+  if (APPID) {
+    var NS = '__px_' + APPID + '::';
+    var oLS = window.localStorage, oSS = window.sessionStorage;
+    try {
+      Object.defineProperty(window, 'localStorage', {
+        configurable: true,
+        get: function () { return pxStorage(oLS, NS); }
+      });
+      Object.defineProperty(window, 'sessionStorage', {
+        configurable: true,
+        get: function () { return pxStorage(oSS, NS); }
+      });
+    } catch (e) { /* 原生属性不可覆盖时保持原生（隔离失效但不破坏页面） */ }
+  }
+
   // pxQuery 把 query 中 OAuth 回跳参数（redirect_uri/redirectUri/continue/
   // continueUrl）的绝对地址改写为代理路径：IdP 前端（Casdoor 等纯前端授权页）会
   // 从文档 URL 解析该参数、拼上 code 后用 location 赋值跳转——绝对地址会跨源
@@ -152,11 +193,27 @@
     }
   }
 
+  // toWs：WebSocket 地址映射，返回【绝对 ws(s)://宿主+代理路径】——构造器不接受
+  // 相对地址（曾经的实现返回裸路径，new WebSocket 直接 SyntaxError，等于从未生效），
+  // 协议跟页面走（https 页面连 ws:// 会被混合内容拦）。自源形态
+  // （ws://<location.host>/…）先重解释为目标域——代理页里 location.host 是代理
+  // 宿主，页面 JS（openos 桌面总线等）按 location 拼出的 ws 地址会把连接拨到宿主
+  // 自己（回环地址非配置目标被 SSRF 防线拒绝）；重解释后嵌套宿主（grf-hotel 这类
+  // 自身就是 openos 宿主的系统）的总线 /ws 经代理回到目标站自己的 /ws，令牌随
+  // query 原样透传。相对地址按 REALBASE 补全（兜底不影响主路径）。
   function toWs(u) {
     try {
       var s = String(u);
-      if (!/^wss?:\/\//i.test(s)) return u;
-      return PREFIX + compact(s);
+      if (!/^wss?:\/\//i.test(s)) {
+        try { s = new URL(s, REALBASE).href.replace(/^http/i, 'ws'); } catch (e) { return u; }
+        if (!/^wss?:\/\//i.test(s)) return u;
+      }
+      var wsBase = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + PREFIX;
+      var m = /^(ws|wss):\/\/([^\/]+)([\s\S]*)$/i.exec(s);
+      if (m && (m[2] === location.host || m[2] === location.hostname)) {
+        return wsBase + m[1].toLowerCase() + '/' + AUTH + m[3];
+      }
+      return wsBase + compact(s);
     } catch (e) {
       return u;
     }
