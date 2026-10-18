@@ -66,6 +66,82 @@
     } catch (e) { /* 原生属性不可覆盖时保持原生（隔离失效但不破坏页面） */ }
   }
 
+  // ---- 跨帧 postMessage 的源语义还原（代理同源化的结构性补偿）----
+  // 代理把目标站的全部帧（含其跨域子帧）同源化到本源后，页面间 postMessage 的
+  // 两个真实世界语义都被破坏：①发送方 targetOrigin 写真实站域名——收件帧真实
+  // 源已是本源，浏览器按源不符【整条丢弃】；②收件方的 e.origin 域名白名单校验
+  // （美团 ME 容器 hotel-container-redirect 指令：origin 须 .meituan.com/
+  // .sankuai.com 后缀，不通过即静默丢弃）——同源化后 e.origin 恒为本源、校验
+  // 全失配，容器收不到路由指令、内容区永远停在默认页（线上 A/B 实证：真实站
+  // 正常渲染订单列表，代理内同账号点同一菜单恒 404）。两向分别补偿：
+  // ① 发送侧：targetOrigin 为绝对 http(s) 源且非本源 → 改 '*' 投递（消息本就
+  //    发给本源帧树内的窗，只是字面源不符；真实跨源目标窗在代理内不存在）；
+  // ② 接收侧：同源帧间消息（e.origin===本源）且发送帧是代理帧（地址可解出
+  //    目标站源）→ 以 Proxy 把 e.origin 呈现为发送帧的目标站源，页面域名校验
+  //    按真实世界语义通过。e.source/其余属性原样（帧匹配类逻辑不受影响）；
+  //    自身消息（e.source===window）、无源消息（MessageChannel 端口等）与发送
+  //    方非代理帧（宿主桌面等）一律原样透传。
+  function pxFrameOrigin(win) {
+    try {
+      var href = win.location.href;
+      var qi = href.indexOf("?"), q = qi >= 0 ? href.slice(qi) : "";
+      var mk = /__os_px=[a-z0-9._-]+~([a-z][a-z0-9+.-]*)~([^&#]+)/i.exec(q);
+      if (mk) return mk[1].toLowerCase() + "://" + decodeURIComponent(mk[2]);
+      var pn = win.location.pathname;
+      if (pn.indexOf("/app/") === 0) {
+        var m = /^[a-z0-9._-]+\/([a-z][a-z0-9+.-]*)\/([^/?#]+)/i.exec(pn.slice(5));
+        if (m) return m[1].toLowerCase() + "://" + m[2];
+      }
+    } catch (e) { }
+    return "";
+  }
+  var opm = window.postMessage.bind(window);
+  window.postMessage = function (msg, targetOrigin, transfer) {
+    try {
+      if (typeof targetOrigin === "string" && /^https?:\/\//i.test(targetOrigin) && targetOrigin !== location.origin) {
+        return opm(msg, "*", transfer);
+      }
+    } catch (e) { /* 保持原参数 */ }
+    return opm(msg, targetOrigin, transfer);
+  };
+  function pxRestoreOrigin(ev) {
+    try {
+      if (!ev || ev.origin !== location.origin) return ev;
+      var src = ev.source;
+      if (!src || src === window) return ev;
+      var o = pxFrameOrigin(src);
+      if (!o) return ev; // 发送方非代理帧（宿主桌面等）：原样
+      return new Proxy(ev, {
+        get: function (t, k) {
+          if (k === "origin") return o;
+          var v = t[k];
+          return typeof v === "function" ? v.bind(t) : v;
+        }
+      });
+    } catch (e) { return ev; }
+  }
+  var pxMsgWrap = new WeakMap();
+  var oael = window.addEventListener;
+  window.addEventListener = function (type, fn, opts) {
+    try {
+      if (type === "message" && typeof fn === "function") {
+        var wrapped = function (ev) { return fn.call(this, pxRestoreOrigin(ev)); };
+        pxMsgWrap.set(fn, wrapped);
+        return oael.call(window, type, wrapped, opts);
+      }
+    } catch (e) { /* 回落原生注册 */ }
+    return oael.apply(window, arguments);
+  };
+  var orel = window.removeEventListener;
+  window.removeEventListener = function (type, fn, opts) {
+    try {
+      if (type === "message" && typeof fn === "function" && pxMsgWrap.has(fn)) {
+        return orel.call(window, type, pxMsgWrap.get(fn), opts);
+      }
+    } catch (e) { }
+    return orel.apply(window, arguments);
+  };
+
   // pxQuery 把 query 中 OAuth 回跳参数（redirect_uri/redirectUri/continue/
   // continueUrl）的绝对地址改写为代理路径：IdP 前端（Casdoor 等纯前端授权页）会
   // 从文档 URL 解析该参数、拼上 code 后用 location 赋值跳转——绝对地址会跨源
