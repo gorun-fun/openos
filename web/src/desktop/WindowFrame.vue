@@ -4,6 +4,7 @@ import type { WinState } from '../stores/windows'
 import { MENUBAR_H, useWindows, viewport, type SnapZone } from '../stores/windows'
 import { builtinComponents, runtimeComponents, appChrome, useApps } from '../stores/apps'
 import SchemaApp from '../sdk/SchemaApp.vue'
+import { parseAppConfig } from '../api/client'
 import { snapPreview } from './snapState'
 import { isMobile } from '../ui/formfactor'
 
@@ -89,8 +90,10 @@ async function resolveComp() {
     const def = apps.byId(appId)
     if (def?.config) {
       try {
-        const raw: any = def.config
-        const cfg = typeof raw === 'string' ? JSON.parse(raw) : raw
+        // 统一二态解析（client.ts parseAppConfig）：非法 JSON 返回 undefined、解析结果
+        // 为 null 时同理，下方属性访问抛错落 catch → Placeholder，
+        // 与原先 JSON.parse 抛错兜底的行为一致
+        const cfg = parseAppConfig(def)
         if (cfg.kind === 'web' || cfg.kind === 'proxy') {
           // 网页应用（iframe 容器，地址存 config.url；proxy 形态经服务端反代）：
           // 统一融合工具栏窗体

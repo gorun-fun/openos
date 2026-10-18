@@ -1,11 +1,13 @@
 // 日历数据仓库：日程事件（user_settings 的 calendar.events 键持久化，与 notes
-// 同一模式）+ 中国节假日（/api/calendar/holidays 按年加载）+ 提醒引擎
-// （30s 轮询，到期经通知中心横幅提醒；已触发记录存 localStorage 防重复）。
+// 同一模式，走 composables/useUserSetting 同步管线）+ 中国节假日
+// （/api/calendar/holidays 按年加载）+ 提醒引擎（30s 轮询，到期经通知中心横幅
+// 提醒；已触发记录存 localStorage 防重复——设备级偏好，不上云）。
 // 日历应用、桌面日历小组件与提醒引擎三方共享本仓库。
 import { defineStore } from 'pinia'
 import { useSession } from './session'
 import { useNotifications } from './notifications'
 import { api } from '../api/client'
+import { createUserSetting } from '../composables/useUserSetting'
 
 /** 提醒提前量：none=不提醒，at=事件时刻（全天事件按 09:00） */
 export type RemindOffset = 'none' | 'at' | '5m' | '15m' | '1h' | '1d'
@@ -51,8 +53,6 @@ export function todayStr(): string {
 }
 
 let loadedFor = ''
-let serverReady = false
-let saveTimer = 0
 let remindTimer = 0
 
 function parseEvents(raw: string | null | undefined): CalEvent[] {
@@ -65,6 +65,12 @@ function parseEvents(raw: string | null | undefined): CalEvent[] {
       : []
   } catch { return [] }
 }
+
+const setting = createUserSetting<CalEvent[]>(EVENTS_KEY, {
+  cacheKey: KEY,
+  parse: parseEvents,
+  serialize: (v) => JSON.stringify(v),
+})
 
 /** 事件的提醒触发时刻（ms）；全天事件按 09:00。 */
 export function remindAtOf(e: CalEvent): number {
@@ -99,11 +105,9 @@ export const useCalendar = defineStore('calendar', {
       const user = useSession().user?.username
       if (!user || loadedFor === user) return
       loadedFor = user
-      try { this.events = parseEvents(localStorage.getItem(KEY())) } catch { this.events = [] }
-      void api.get<Record<string, string>>('/api/settings').then((s) => {
-        if (s[EVENTS_KEY]) this.events = parseEvents(s[EVENTS_KEY])
-        serverReady = true
-      }).catch(() => { /* 离线容忍 */ })
+      // 先用本地缓存即时上屏，再以服务端数据校正
+      this.events = setting.readCache() ?? []
+      void setting.sync((v, has) => { if (has && v) this.events = v })
 
       const y = new Date().getFullYear()
       this.loadYear(y - 1)
@@ -122,13 +126,9 @@ export const useCalendar = defineStore('calendar', {
         .catch(() => { /* 失败不重试到下次刷新；节假日标记缺省不展示 */ })
     },
 
+    /** 保存：localStorage 即时写（缓存），服务端 400ms 防抖回写（权威）。 */
     save() {
-      try { localStorage.setItem(KEY(), JSON.stringify(this.events)) } catch { /* 存储满时静默 */ }
-      if (!serverReady) return
-      clearTimeout(saveTimer)
-      saveTimer = window.setTimeout(() => {
-        api.put('/api/settings', { key: EVENTS_KEY, value: JSON.stringify(this.events) }).catch(() => {})
-      }, 400)
+      setting.commit(this.events)
     },
 
     addEvent(input: { title: string; date: string; time?: string; remind?: RemindOffset; note?: string }): CalEvent {

@@ -32,7 +32,7 @@ import { useWindows } from '../stores/windows'
 import { useCalendar } from '../stores/calendar'
 import { useNotes } from '../stores/notes'
 import { can } from '../ui/perms'
-import { api } from '../api/client'
+import { api, parseAppConfig, type AppDef } from '../api/client'
 import { agentTools, runAgentTool } from './agentTools'
 import type { Note } from '../stores/notes'
 
@@ -175,18 +175,23 @@ function sanitizeDefs(defs: CapDef[] | undefined): CapDef[] {
   return out
 }
 
+/** schemaCaps 结果缓存（MCP 每次工具调用都会走 listCapabilities/resolveCapability/
+ *  findView，避免对全部 apps 配置重复 JSON.parse）：key = apps 数组引用 + 长度——
+ *  refresh 整组替换数组即换引用，OpenOS.registerApp/unregisterApp 原地 push/splice
+ *  只变长度，任一变化即失效重解析；返回条目为只读共享（消费方均不改动）。 */
+let schemaCapsCache: { src: AppDef[]; len: number; entries: Entry[] } | null = null
+
 function schemaCaps(): Entry[] {
   const apps = useApps()
+  const arr = apps.apps
+  const hit = schemaCapsCache
+  if (hit && hit.src === arr && hit.len === arr.length) return hit.entries
   const out: Entry[] = []
-  for (const app of apps.apps) {
+  for (const app of arr) {
     const raw = (app as any).config
     if (!raw) continue
-    let cfg: any
-    try {
-      cfg = typeof raw === 'string' ? JSON.parse(raw) : raw
-    } catch {
-      continue
-    }
+    const cfg = parseAppConfig(app)
+    if (cfg === undefined) continue // 非法 JSON（与原实现 catch { continue } 同义）
     const ac = cfg?.agentCaps
     if (!ac || typeof ac !== 'object') continue
     out.push({
@@ -200,6 +205,7 @@ function schemaCaps(): Entry[] {
       },
     })
   }
+  schemaCapsCache = { src: arr, len: arr.length, entries: out }
   return out
 }
 

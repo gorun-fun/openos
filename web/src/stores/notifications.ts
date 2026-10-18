@@ -6,10 +6,11 @@
 //   服务端定向：hub.PublishTo(user, "sys:notify", { title, body, appId })
 //
 // 历史与偏好（声音/勿扰）持久化到服务端 user_settings 的 notifications 键
-// （localStorage 仅缓存，与 notes 同一模式）；通知横幅不入持久化，重启即清。
+// （localStorage 仅缓存，与 notes 同一模式，走 composables/useUserSetting 同步
+// 管线）；通知横幅不入持久化，重启即清。
 import { defineStore } from 'pinia'
 import { useSession } from './session'
-import { api } from '../api/client'
+import { createUserSetting } from '../composables/useUserSetting'
 import { bus } from '../bus/bus'
 
 export interface OsNotification {
@@ -39,9 +40,7 @@ const KEY = () => `openos_notifications_${useSession().user?.username || 'defaul
 // 相同，因此用随机 tab id 标记自己发出的广播并忽略之，避免重复弹出。
 const TAB_ID = Math.random().toString(36).slice(2, 10)
 
-let loadedFor = ''       // 已加载用户名（幂等）
-let serverReady = false  // 服务端数据就位后的变更才回写
-let saveTimer = 0
+let loadedFor = '' // 已加载用户名（幂等）
 
 function parse(raw: string | null | undefined): OsNotification[] {
   try {
@@ -49,6 +48,23 @@ function parse(raw: string | null | undefined): OsNotification[] {
     return Array.isArray(arr) ? arr.filter((n) => n && n.id && n.title) : []
   } catch { return [] }
 }
+
+/** 持久化形态：历史列表 + 偏好（缓存与服务端同构，共用同一解析）。 */
+interface Persisted { list: OsNotification[]; sound: boolean; dnd: boolean }
+
+function parsePersisted(raw: string): Persisted | undefined {
+  try {
+    const d = JSON.parse(raw)
+    if (!d || typeof d !== 'object') return undefined
+    return { list: parse(JSON.stringify(d.list)), sound: d.sound !== false, dnd: d.dnd === true }
+  } catch { return undefined }
+}
+
+const setting = createUserSetting<Persisted>(SETTINGS_KEY, {
+  cacheKey: KEY,
+  parse: parsePersisted,
+  serialize: (v) => JSON.stringify({ list: v.list, sound: v.sound, dnd: v.dnd }),
+})
 
 // ---- 提示音：WebAudio 合成短促「叮-咚」（无外部资源；浏览器要求用户交互后
 //      AudioContext 才能出声，静默失败即可） ----
@@ -95,25 +111,20 @@ export const useNotifications = defineStore('notifications', {
       const user = useSession().user?.username
       if (user && loadedFor !== user) {
         loadedFor = user
-        try {
-          const cached = JSON.parse(localStorage.getItem(KEY()) || 'null')
-          if (cached) {
-            this.list = parse(JSON.stringify(cached.list))
-            this.sound = cached.sound !== false
-            this.dnd = cached.dnd === true
+        // 先用本地缓存即时上屏，再以服务端数据校正
+        const cached = setting.readCache()
+        if (cached) {
+          this.list = cached.list
+          this.sound = cached.sound
+          this.dnd = cached.dnd
+        }
+        void setting.sync((v, has) => {
+          if (has && v) {
+            this.list = v.list
+            this.sound = v.sound
+            this.dnd = v.dnd
           }
-        } catch { /* 本地缓存损坏则忽略 */ }
-        void api.get<Record<string, string>>('/api/settings').then((s) => {
-          if (s[SETTINGS_KEY]) {
-            try {
-              const d = JSON.parse(s[SETTINGS_KEY])
-              this.list = d.list || []
-              this.sound = d.sound !== false
-              this.dnd = d.dnd === true
-            } catch { /* 损坏数据忽略 */ }
-          }
-          serverReady = true
-        }).catch(() => { /* 离线容忍：继续用本地缓存 */ })
+        })
       }
       // 总线：服务端定向（osmcp 等）与其他端的广播
       return bus.on('sys:notify', (p: any) => {
@@ -176,17 +187,7 @@ export const useNotifications = defineStore('notifications', {
 
     /** 保存：localStorage 即时写（缓存），服务端 400ms 防抖回写（权威）。 */
     save() {
-      try {
-        localStorage.setItem(KEY(), JSON.stringify({ list: this.list, sound: this.sound, dnd: this.dnd }))
-      } catch { /* 存储满时静默 */ }
-      if (!serverReady) return
-      clearTimeout(saveTimer)
-      saveTimer = window.setTimeout(() => {
-        api.put('/api/settings', {
-          key: SETTINGS_KEY,
-          value: JSON.stringify({ list: this.list, sound: this.sound, dnd: this.dnd }),
-        }).catch(() => {})
-      }, 400)
+      setting.commit({ list: this.list, sound: this.sound, dnd: this.dnd })
     },
   },
 })

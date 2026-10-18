@@ -1,19 +1,25 @@
 <script setup lang="ts">
 // 文件应用（访达拟合）：四视图 + 侧栏收藏/位置/废纸篓 + 右键菜单 + 多选 + 键盘导航
 // + 拖拽移动/复制 + 废纸篓 + 快速预览（空格）+ 路径栏 + 原位重命名。
+// 拆分组件：QuickLook（快速预览）、FilePickerBar/useFilePicker（fileDialog 选择模式）、
+// FileRenameInput（原位重命名输入块）、FileGlyph（条目图标/缩略图）。
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import type { WinState } from '../../stores/windows'
 import { useWindows } from '../../stores/windows'
 import { useApps } from '../../stores/apps'
 import { useSession } from '../../stores/session'
-import { fsApi, api, downloadFile, fetchRawBlob, type VFile, type ShareDef } from '../../api/client'
+import { fsApi, downloadFile, fetchRawBlob, type VFile, type ShareDef } from '../../api/client'
 import { bus } from '../../bus/bus'
-import { OsInput, OsButton, OsEmpty, OsModal, MobileNavToggle, OsTbOverflow, toast, useMenu, menuPos, icons, resolveFileDialog, type FileDialogRequest } from '../../ui'
+import { OsInput, OsEmpty, OsModal, MobileNavToggle, OsTbOverflow, toast, useMenu, menuPos, icons, type FileDialogRequest } from '../../ui'
 import { openPath, openWithApps, isImage, fileEmoji, kindOf, extOf, fmtSize, IMAGE_EXTS, parentOf } from '../openWith'
 import { t } from '../../i18n'
-import { renderMarkdown } from '../../lib/md'
-import { parseCSV } from '../sheets/engine'
 import { blankDeck } from '../slides/format'
+import { createUserSetting } from '../../composables/useUserSetting'
+import QuickLook from './QuickLook.vue'
+import FilePickerBar from './FilePickerBar.vue'
+import FileRenameInput from './FileRenameInput.vue'
+import FileGlyph from './FileGlyph.vue'
+import { useFilePicker } from './useFilePicker'
 
 const props = defineProps<{ win: WinState }>()
 const windows = useWindows()
@@ -25,67 +31,56 @@ const home = `/home/${session.user!.username}`
 const trashPath = home + '/.Trash'
 
 // —— 文件选择模式（其他应用经 ui/fileDialog 服务唤起本窗口充当「打开/存储」对话框） ——
-// 本窗口仍是完整可拖动的文件管理窗，仅底部状态栏换成选择栏、双击文件=确认。
+// 状态机与回执在 useFilePicker.ts；本窗口仍是完整可拖动的文件管理窗，
+// 仅底部状态栏换成选择栏（FilePickerBar）、双击文件=确认。
 const pickerReq: FileDialogRequest | undefined = props.win.props?.picker
 const path = ref(props.win.props?.path || pickerReq?.defaultDir || home)
-const pickName = ref(pickerReq?.defaultName || '')
-const pickOverwrite = ref(false) // save 模式重名：第一次点变「替换」，再点才覆盖
-watch([pickName, path], () => { pickOverwrite.value = false })
-onBeforeUnmount(() => { if (pickerReq) resolveFileDialog(pickerReq.reqId, null) }) // 关窗=取消（幂等）
 const entries = ref<VFile[]>([])
 const loading = ref(true)
 const query = ref('')
 // 视图/排序偏好：服务端 user_settings 的 files.prefs 键权威（同一账号跨设备一致），
-// localStorage 按用户分键缓存；旧版全局键（不分用户）首次读取时迁移。
-const PREFS_SETTINGS_KEY = 'files.prefs'
-const PREFS_KEY = () => `openos_files_prefs_${session.user!.username}`
+// localStorage 按用户分键缓存；旧版全局键（不分用户）首次读取时迁移上云。
+// 同步管线走 composables/useUserSetting（共享 GET + 防抖回写 + 基线去重）。
 // 四种视图：图标 / 列表 / 分栏 / 画廊（仿 macOS Finder，全局记忆）
 type View = 'icon' | 'list' | 'column' | 'gallery'
-function readPrefsCache(): { view?: View; sortBy?: string } {
-  try {
-    const raw = localStorage.getItem(PREFS_KEY())
-    if (raw) return JSON.parse(raw)
-  } catch { /* ignore */ }
+interface FilesPrefs { view?: View; sortBy?: string }
+/** 缓存读取：新版按用户分键优先，旧版全局键（不分用户）合并迁移。 */
+function readPrefsCache(): FilesPrefs | undefined {
+  const raw = localStorage.getItem(`openos_files_prefs_${session.user!.username}`)
+  if (raw) {
+    try { return JSON.parse(raw) } catch { /* 损坏回落旧键 */ }
+  }
   const v = localStorage.getItem('openos_files_view') as View | null
   const s = localStorage.getItem('openos_files_sort')
-  return { view: v || undefined, sortBy: s || undefined }
+  return v || s ? { view: v || undefined, sortBy: s || undefined } : undefined
 }
-const prefs0 = readPrefsCache()
-const sortBy = ref(prefs0.sortBy || 'name')
+const prefsSetting = createUserSetting<FilesPrefs>('files.prefs', {
+  cacheKey: () => `openos_files_prefs_${session.user!.username}`,
+  readCache: readPrefsCache,
+  parse: (raw) => {
+    try {
+      const p = JSON.parse(raw)
+      return p && typeof p === 'object' ? { view: p.view, sortBy: p.sortBy } : undefined
+    } catch { return undefined }
+  },
+  serialize: (p) => JSON.stringify({ view: p.view, sortBy: p.sortBy }),
+})
+const prefs0 = prefsSetting.readCache()
+const sortBy = ref(prefs0?.sortBy || 'name')
 const sortDir = ref<1 | -1>(1)
-const view = ref<View>(prefs0.view || 'icon')
-let prefsReady = false // 服务端数据已就位（就位后的变更才回写服务端）
-let prefsTimer = 0
-let prefsSynced = '' // 最近一次写往服务端的内容（无变化不回写）
-function persistPrefs() {
-  try { localStorage.setItem(PREFS_KEY(), JSON.stringify({ view: view.value, sortBy: sortBy.value })) } catch { /* ignore */ }
-  if (!prefsReady) return
-  const v = JSON.stringify({ view: view.value, sortBy: sortBy.value })
-  if (v === prefsSynced) return
-  clearTimeout(prefsTimer)
-  prefsTimer = window.setTimeout(() => {
-    prefsSynced = v
-    api.put('/api/settings', { key: PREFS_SETTINGS_KEY, value: v }).catch(() => { prefsSynced = '' })
-  }, 400)
-}
-watch([view, sortBy], persistPrefs)
-onMounted(async () => {
-  try {
-    const s = await api.get<Record<string, string>>('/api/settings')
-    prefsReady = true
-    const raw = s[PREFS_SETTINGS_KEY]
-    if (raw !== undefined) {
-      try {
-        const p = JSON.parse(raw)
-        if (p?.view) view.value = p.view
-        if (p?.sortBy) sortBy.value = p.sortBy
-      } catch { /* 损坏忽略 */ }
-      prefsSynced = JSON.stringify({ view: view.value, sortBy: sortBy.value })
-    } else {
-      persistPrefs() // 旧版本偏好只在 localStorage：一次性迁移到服务端
-    }
-  } catch { /* 离线容忍 */ }
-  prefsReady = true
+const view = ref<View>(prefs0?.view || 'icon')
+// 偏好变更 → 提交（缓存即时写 + 服务端 400ms 防抖回写、内容未变不回写）
+watch([view, sortBy], () => prefsSetting.commit({ view: view.value, sortBy: sortBy.value }))
+prefsSetting.sync((p, has) => {
+  if (!has) {
+    // 服务端无该键：旧版本偏好只在 localStorage，一次性迁移上云
+    prefsSetting.commit({ view: view.value, sortBy: sortBy.value })
+    return
+  }
+  if (p?.view) view.value = p.view
+  if (p?.sortBy) sortBy.value = p.sortBy
+  // 回写基线 = 服务端值校正后的当前值
+  return { view: view.value, sortBy: sortBy.value }
 })
 const usage = ref({ used: 0, quota: 100 * 1024 * 1024 })
 const uploadInput = ref<HTMLInputElement>()
@@ -305,6 +300,11 @@ const selectedFile = computed(() => {
   return null
 })
 
+// ---- 选择模式（fileDialog）：目标路径 / 重名确认 / 回执（状态机见 useFilePicker.ts） ----
+const { pickName, pickOverwrite, pickSel, pickExists, canPick, confirmPick, cancelPick, handleOpen: pickOpen } = useFilePicker({
+  win: props.win, req: pickerReq, path, entries, selectedFile,
+})
+
 // ---- 导航 ----
 function enter(p: string, push = true) {
   if (p === path.value && !push) return
@@ -344,40 +344,11 @@ const crumbs = computed(() => {
 // ---- 打开 / 快速预览 ----
 async function openFile(f: VFile) {
   if (f.isDir) { enter(f.path); return }
-  if (pickerReq) {
-    // 选择模式：open 双击文件=确认选择；save 双击=带出文件名
-    if (pickerReq.mode === 'open') confirmPick()
-    else pickName.value = baseName(f.path)
-    return
-  }
+  if (pickOpen(f)) return // 选择模式：open 双击文件=确认选择；save 双击=带出文件名
   if (IMAGE_EXTS.includes(extOf(f.path))) { quickLook(f); return }
   openPath(f.path)
 }
 
-// ---- 选择模式（fileDialog）：目标路径 / 重名确认 / 回执 ----
-const pickSel = computed(() => (selectedFile.value && !selectedFile.value.isDir ? selectedFile.value : null))
-const pickTarget = computed(() => {
-  if (!pickerReq) return ''
-  if (pickerReq.mode === 'open') return pickSel.value?.path || ''
-  const n = pickName.value.trim()
-  return n && n !== '.' && n !== '..' ? path.value.replace(/\/$/, '') + '/' + n : ''
-})
-const pickExists = computed(() => {
-  if (pickerReq?.mode !== 'save' || !pickTarget.value) return false
-  return entries.value.some((f) => !f.isDir && f.path === pickTarget.value)
-})
-const canPick = computed(() => !!pickTarget.value)
-function confirmPick() {
-  if (!pickerReq || !pickTarget.value) return
-  // save 模式重名：第一次点变更为「替换」，再点才真正覆盖（macOS 行为）
-  if (pickerReq.mode === 'save' && pickExists.value && !pickOverwrite.value) { pickOverwrite.value = true; return }
-  resolveFileDialog(pickerReq.reqId, pickTarget.value)
-  windows.close(props.win.id)
-}
-function cancelPick() {
-  if (pickerReq) resolveFileDialog(pickerReq.reqId, null)
-  windows.close(props.win.id)
-}
 function openSelection() {
   for (const p of selPaths.value) {
     const f = entries.value.find((x) => x.path === p)
@@ -385,40 +356,9 @@ function openSelection() {
   }
 }
 
-const ql = ref<{ f: VFile; url?: string; html?: string; text?: string; loading: boolean } | null>(null)
-async function quickLook(f: VFile) {
-  closeQl()
-  ql.value = { f, loading: true }
-  const ext = extOf(f.path)
-  try {
-    if (IMAGE_EXTS.includes(ext) || ext === 'pdf') {
-      ql.value = { f, url: URL.createObjectURL(await fetchRawBlob(f.path)), loading: false }
-    } else if (ext === 'md' || ext === 'markdown') {
-      const d = await fsApi.read(f.path)
-      ql.value = { f, html: renderMarkdown(d.content), loading: false }
-    } else if (ext === 'csv' || ext === 'tsv') {
-      const d = await fsApi.read(f.path)
-      const rows = ext === 'tsv' ? d.content.split(/\r?\n/).map((l) => l.split('\t')) : parseCSV(d.content)
-      const body = rows.slice(0, 60).map((r) => '<tr>' + r.slice(0, 12).map((c) => `<td>${c.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</td>`).join('') + '</tr>').join('')
-      ql.value = { f, html: `<table class="ql-table">${body}</table>`, loading: false }
-    } else if (ext === 'html' || ext === 'htm') {
-      const d = await fsApi.read(f.path)
-      ql.value = { f, html: d.content, loading: false }
-    } else {
-      const d = await fsApi.read(f.path)
-      ql.value = { f, text: d.isBinary ? '（二进制文件，请下载查看）' : d.content, loading: false }
-    }
-  } catch {
-    ql.value = { f, text: '无法读取文件', loading: false }
-  }
-}
-function closeQl() {
-  if (ql.value?.url) URL.revokeObjectURL(ql.value.url)
-  ql.value = null
-}
-function onQlKey(e: KeyboardEvent) {
-  if (e.key === 'Escape' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); closeQl() }
-}
+// 快速预览（空格）：加载与渲染在 QuickLook.vue，这里只管开合
+const qlFile = ref<VFile | null>(null)
+function quickLook(f: VFile) { qlFile.value = f }
 
 // ---- 命名工具：冲突时生成「名称 副本」「名称 副本 2」 ----
 async function uniqueName(dir: string, wanted: string): Promise<string> {
@@ -532,19 +472,12 @@ async function newFile(kind: 'md' | 'csv' | 'html') {
   refreshAll()
 }
 
-// 原位重命名（Finder：回车或点选中名）
+// 原位重命名（Finder：回车或点选中名）——输入块见 FileRenameInput（挂载即聚焦全选）
 const renaming = ref('')
 const renameTo = ref('')
-const renameEl = ref<HTMLInputElement>()
 function startRename(p: string) {
   renaming.value = p
   renameTo.value = baseName(p)
-  nextTick(() => {
-    // v-for 内的模板 ref 是数组（三种视图共用一个名字，取实际挂载的那个）
-    const el = (Array.isArray(renameEl.value) ? renameEl.value[0] : renameEl.value) as HTMLInputElement | undefined
-    el?.focus()
-    el?.select()
-  })
 }
 async function commitRename() {
   const p = renaming.value
@@ -629,6 +562,24 @@ function onSideDrop(e: DragEvent, dir: string) {
     if (dir === trashPath) moveToTrash(paths)
     else transferTo(dir, paths, false)
   } catch { /* 忽略 */ }
+}
+
+// ---- 三视图共用条目绑定 ----
+// 图标/列表/分栏逐字重复的「id/选中态/七连事件束（点选/双击/拖拽×4/右键）」收敛一处；
+// 分栏差异经 opts 覆盖：active=子列目录高亮、click=目录单击进入（默认点选多选语义）。
+function itemRow(f: VFile, opts: { active?: boolean; click?: (e: MouseEvent) => void } = {}) {
+  return {
+    id: 'f-' + encodeURIComponent(f.path),
+    draggable: true,
+    class: { sel: !!opts.active || hasSel(f.path), drop: dragOverDir.value === f.path },
+    onClick: opts.click ?? ((e: MouseEvent) => onItemClick(e, f)),
+    onDblclick: () => openFile(f),
+    onDragstart: (e: DragEvent) => onDragStart(e, f),
+    onDragover: (e: DragEvent) => onItemDragOver(e, f),
+    onDragleave: () => onItemDragLeave(f),
+    onDrop: (e: DragEvent) => onItemDrop(e, f),
+    onContextmenu: (e: MouseEvent) => openCtx(e, 'item', f),
+  }
 }
 
 // ---- 键盘导航（Finder：方向键移动、⏎重命名、⌘O 打开、空格快速预览、⌫ 移到废纸篓） ----
@@ -922,19 +873,12 @@ watch(() => columnPaths.value.length, async () => {
         <!-- 图标视图 -->
         <template v-else-if="view === 'icon'">
           <div
-            v-for="f in shown" :id="'f-' + encodeURIComponent(f.path)" :key="f.path"
-            class="item" :class="{ sel: hasSel(f.path), drop: dragOverDir === f.path }" draggable="true"
-            @click="onItemClick($event, f)" @dblclick="openFile(f)"
-            @dragstart="onDragStart($event, f)"
-            @dragover="onItemDragOver($event, f)" @dragleave="onItemDragLeave(f)" @drop="onItemDrop($event, f)"
-            @contextmenu="openCtx($event, 'item', f)"
+            v-for="f in shown" :key="f.path" v-bind="itemRow(f)" class="item"
           >
             <div class="ic">
-              <img v-if="!f.isDir && isImage(f) && blobUrl(f.path)" class="thumb" :src="blobUrl(f.path)" alt="">
-              <template v-else>{{ f.isDir ? '📁' : fileEmoji(f.path) }}</template>
+              <FileGlyph :file="f" :url="blobUrl(f.path)" img-class="thumb" />
             </div>
-            <input v-if="renaming === f.path" ref="renameEl" v-model="renameTo" class="rn-input os-flat"
-              @keydown.enter.prevent="commitRename" @keydown.esc.stop.prevent="renaming = ''" @blur="commitRename" @click.stop />
+            <FileRenameInput v-if="renaming === f.path" v-model="renameTo" @commit="commitRename" @cancel="renaming = ''" />
             <div v-else class="name" :title="baseName(f.path)">{{ baseName(f.path) }}</div>
           </div>
         </template>
@@ -951,18 +895,11 @@ watch(() => columnPaths.value.length, async () => {
           </thead>
           <tbody>
             <tr
-              v-for="f in shown" :id="'f-' + encodeURIComponent(f.path)" :key="f.path"
-              :class="{ sel: hasSel(f.path), drop: dragOverDir === f.path }" draggable="true"
-              @click="onItemClick($event, f)" @dblclick="openFile(f)"
-              @dragstart="onDragStart($event, f)"
-              @dragover="onItemDragOver($event, f)" @dragleave="onItemDragLeave(f)" @drop="onItemDrop($event, f)"
-              @contextmenu="openCtx($event, 'item', f)"
+              v-for="f in shown" :key="f.path" v-bind="itemRow(f)"
             >
               <td class="tn">
-                <img v-if="!f.isDir && isImage(f) && blobUrl(f.path)" class="lt" :src="blobUrl(f.path)" alt="">
-                <template v-else>{{ f.isDir ? '📁' : fileEmoji(f.path) }}</template>
-                <input v-if="renaming === f.path" ref="renameEl" v-model="renameTo" class="rn-input os-flat"
-                  @keydown.enter.prevent="commitRename" @keydown.esc.stop.prevent="renaming = ''" @blur="commitRename" @click.stop />
+                <FileGlyph :file="f" :url="blobUrl(f.path)" img-class="lt" />
+                <FileRenameInput v-if="renaming === f.path" v-model="renameTo" @commit="commitRename" @cancel="renaming = ''" />
                 <template v-else>{{ baseName(f.path) }}</template>
               </td>
               <td class="dim">{{ f.updatedAt }}</td>
@@ -977,17 +914,12 @@ watch(() => columnPaths.value.length, async () => {
           <section v-for="(colPath, i) in columnPaths" :key="colPath" class="col">
             <template v-if="colCache.has(colPath)">
               <div
-                v-for="f in colShown(colPath)" :id="'f-' + encodeURIComponent(f.path)" :key="f.path"
-                class="col-item" :class="{ sel: columnPaths[i + 1] === f.path || hasSel(f.path), drop: dragOverDir === f.path }" draggable="true"
-                @click="f.isDir ? enter(f.path) : onItemClick($event, f)" @dblclick="openFile(f)"
-                @dragstart="onDragStart($event, f)"
-                @dragover="onItemDragOver($event, f)" @dragleave="onItemDragLeave(f)" @drop="onItemDrop($event, f)"
-                @contextmenu="openCtx($event, 'item', f)"
+                v-for="f in colShown(colPath)" :key="f.path"
+                v-bind="itemRow(f, { active: columnPaths[i + 1] === f.path, click: f.isDir ? () => enter(f.path) : undefined })"
+                class="col-item"
               >
-                <img v-if="!f.isDir && isImage(f) && blobUrl(f.path)" class="lt" :src="blobUrl(f.path)" alt="">
-                <span v-else class="ci">{{ f.isDir ? '📁' : fileEmoji(f.path) }}</span>
-                <input v-if="renaming === f.path" ref="renameEl" v-model="renameTo" class="rn-input os-flat"
-                  @keydown.enter.prevent="commitRename" @keydown.esc.stop.prevent="renaming = ''" @blur="commitRename" @click.stop />
+                <FileGlyph :file="f" :url="blobUrl(f.path)" img-class="lt" emoji-tag="span" emoji-class="ci" />
+                <FileRenameInput v-if="renaming === f.path" v-model="renameTo" @commit="commitRename" @cancel="renaming = ''" />
                 <span v-else class="cn">{{ baseName(f.path) }}</span>
                 <span class="ct">{{ f.isDir ? '' : fmtSize(f.size) }}</span>
                 <span v-if="f.isDir" class="chev">›</span>
@@ -1025,28 +957,17 @@ watch(() => columnPaths.value.length, async () => {
               @click="setSelection([f.path])" @dblclick="openFile(f)"
               @contextmenu="openCtx($event, 'item', f)"
             >
-              <img v-if="isImage(f) && blobUrl(f.path)" :src="blobUrl(f.path)" alt="">
-              <span v-else>{{ f.isDir ? '📁' : fileEmoji(f.path) }}</span>
+              <FileGlyph :file="f" :url="blobUrl(f.path)" emoji-tag="span" />
             </div>
           </div>
         </div>
       </main>
     </div>
 
-    <!-- 底部：选择模式=打开/存储栏；普通模式=路径栏（可点面包屑）+ 项目数与可用空间 -->
-    <footer v-if="pickerReq" class="status pick-foot">
-      <template v-if="pickerReq.mode === 'save'">
-        <label class="pk-lb">存储为：</label>
-        <OsInput v-model="pickName" placeholder="文件名" class="pk-name" @keydown.enter.prevent="confirmPick" />
-        <span v-if="pickExists" class="pk-warn">{{ pickOverwrite ? '再点一次「替换」覆盖同名文件' : '同名文件已存在' }}</span>
-      </template>
-      <span v-else class="pk-sel">{{ pickSel ? baseName(pickSel.path) : '' }}</span>
-      <span class="grow" />
-      <OsButton size="sm" @click="cancelPick">取消</OsButton>
-      <OsButton size="sm" variant="primary" :disabled="!canPick" @click="confirmPick">
-        {{ pickerReq.mode === 'open' ? '打开' : pickExists && !pickOverwrite ? '替换' : '存储' }}
-      </OsButton>
-    </footer>
+    <!-- 底部：选择模式=打开/存储栏（见 FilePickerBar）；普通模式=路径栏（可点面包屑）+ 项目数与可用空间 -->
+    <FilePickerBar v-if="pickerReq" :mode="pickerReq.mode" v-model:name="pickName"
+      :sel-name="pickSel ? baseName(pickSel.path) : ''" :exists="pickExists" :overwrite="pickOverwrite"
+      :can="canPick" @confirm="confirmPick" @cancel="cancelPick" />
     <footer v-else class="status">
       <nav class="pathbar">
         <template v-for="(c, i) in crumbs" :key="c.path">
@@ -1130,21 +1051,8 @@ watch(() => columnPaths.value.length, async () => {
       </dl>
     </OsModal>
 
-    <!-- 快速预览（空格） -->
-    <div v-if="ql" class="ql" tabindex="0" @keydown="onQlKey" @pointerdown.self="closeQl">
-      <header>
-        <span class="ql-name">{{ fileEmoji(ql.f.path) }} {{ baseName(ql.f.path) }}</span>
-        <button class="ql-close" title="关闭（空格）" @click="closeQl">✕</button>
-      </header>
-      <div class="ql-body">
-        <div v-if="ql.loading" class="ql-state">加载中…</div>
-        <img v-else-if="isImage(ql.f) && ql.url" :src="ql.url" :alt="baseName(ql.f.path)">
-        <iframe v-else-if="extOf(ql.f.path) === 'pdf' && ql.url" :src="ql.url" class="ql-frame" title="预览" />
-        <iframe v-else-if="ql.html && (extOf(ql.f.path) === 'html' || extOf(ql.f.path) === 'htm')" :srcdoc="ql.html" sandbox="allow-scripts" class="ql-frame" title="预览" />
-        <div v-else-if="ql.html" class="ql-md" v-html="ql.html" />
-        <pre v-else-if="ql.text" class="ql-text">{{ ql.text }}</pre>
-      </div>
-    </div>
+    <!-- 快速预览（空格）：渲染与加载在 QuickLook.vue -->
+    <QuickLook v-if="qlFile" :file="qlFile" @close="qlFile = null" />
   </div>
 </template>
 
@@ -1235,16 +1143,13 @@ watch(() => columnPaths.value.length, async () => {
 .item.sel { background: var(--os-selected); }
 .item.drop { outline: 2px solid var(--os-accent); outline-offset: -2px; }
 .item .ic { font-size: 40px; width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; }
-.item .ic .thumb { max-width: 48px; max-height: 48px; object-fit: cover; border-radius: 6px; box-shadow: var(--os-shadow-sm); }
+/* 缩略 <img> 在 FileGlyph 子组件内，经 :deep 按视图上下文命中（类名不变） */
+.item .ic :deep(.thumb) { max-width: 48px; max-height: 48px; object-fit: cover; border-radius: 6px; box-shadow: var(--os-shadow-sm); }
 .item .name {
   font-size: 12px; word-break: break-all; line-height: 1.3; border-radius: 4px; padding: 0 2px;
   max-height: 2.6em; overflow: hidden;
 }
 .item.sel .name { background: var(--os-accent); color: #fff; }
-.rn-input {
-  font-size: 12px; width: 92px; border: 1.5px solid var(--os-accent); border-radius: 5px;
-  background: var(--os-panel-solid); color: var(--os-text); padding: 1px 4px; text-align: center;
-}
 
 /* 列表视图 */
 .list-table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -1262,7 +1167,7 @@ watch(() => columnPaths.value.length, async () => {
 .list-table tr.sel { background: var(--os-selected); }
 .list-table tr.drop { outline: 2px solid var(--os-accent); outline-offset: -2px; }
 .list-table .tn { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; gap: 7px; }
-.list-table .lt { width: 20px; height: 20px; object-fit: cover; border-radius: 4px; flex: none; }
+.list-table :deep(.lt) { width: 20px; height: 20px; object-fit: cover; border-radius: 4px; flex: none; }
 .dim { color: var(--os-text-secondary); font-size: 12px; }
 
 /* 分栏视图 */
@@ -1275,8 +1180,8 @@ watch(() => columnPaths.value.length, async () => {
   display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 6px;
   font-size: 13px; cursor: default;
 }
-.col-item .lt { width: 18px; height: 18px; object-fit: cover; border-radius: 3px; flex: none; }
-.col-item .ci { flex: none; }
+.col-item :deep(.lt) { width: 18px; height: 18px; object-fit: cover; border-radius: 3px; flex: none; }
+.col-item :deep(.ci) { flex: none; }
 .col-item .cn { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .col-item .ct { flex: none; font-size: 11px; color: var(--os-text-secondary); }
 .col-item .chev { flex: none; color: var(--os-text-secondary); }
@@ -1317,7 +1222,7 @@ watch(() => columnPaths.value.length, async () => {
   display: flex; align-items: center; justify-content: center; font-size: 24px;
   background: var(--os-active); border: 2px solid transparent;
 }
-.thumb img { width: 100%; height: 100%; object-fit: cover; }
+.thumb :deep(img) { width: 100%; height: 100%; object-fit: cover; }
 .thumb:hover { background: var(--os-hover); }
 .thumb.sel { border-color: var(--os-accent); }
 
@@ -1332,56 +1237,6 @@ watch(() => columnPaths.value.length, async () => {
 .pathbar button:hover { background: var(--os-hover); color: var(--os-text); }
 .pathbar button.cur { color: var(--os-text); font-weight: 600; }
 .psep { opacity: .5; }
-
-/* 选择模式底部栏（打开/存储对话框形态） */
-.pick-foot { gap: 8px; }
-.pk-lb { font-size: 12.5px; color: var(--os-text-secondary); white-space: nowrap; }
-.pk-name { width: 240px; }
-.pk-sel { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.pk-warn { font-size: 11.5px; color: #e5a00d; white-space: nowrap; }
-
-/* 快速预览 */
-.ql {
-  position: absolute; inset: 0; z-index: 70; background: rgba(24, 24, 28, .62);
-  backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
-  display: flex; flex-direction: column; animation: os-fade-in .14s; outline: none;
-}
-.ql header {
-  display: flex; justify-content: space-between; align-items: center; padding: 12px 18px;
-  color: #fff; font-size: 13.5px; font-weight: 600;
-}
-.ql-close {
-  border: none; background: rgba(255, 255, 255, .16); color: #fff; border-radius: 50%;
-  width: 26px; height: 26px; cursor: pointer;
-}
-.ql-close:hover { background: rgba(255, 255, 255, .28); }
-.ql-body { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 0 24px 24px; }
-.ql-body img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 8px; }
-.ql-state { color: rgba(255, 255, 255, .7); }
-.ql-frame { width: 100%; height: 100%; border: none; border-radius: 10px; background: #fff; }
-.ql-md {
-  max-width: 760px; max-height: 100%; overflow-y: auto; background: var(--os-panel-solid);
-  color: var(--os-text); border-radius: 12px; padding: 40px 48px; font-size: 14px; line-height: 1.8;
-}
-.ql-md :deep(h1) { font-size: 1.7em; margin: .6em 0 .4em; }
-.ql-md :deep(h2) { font-size: 1.4em; margin: .6em 0 .35em; }
-.ql-md :deep(h3) { font-size: 1.2em; margin: .6em 0 .3em; }
-.ql-md :deep(p) { margin: .45em 0; }
-.ql-md :deep(pre) { background: var(--os-active); padding: 12px 14px; border-radius: 8px; font-family: var(--os-mono); font-size: 12.5px; overflow-x: auto; }
-.ql-md :deep(code) { font-family: var(--os-mono); background: var(--os-active); border-radius: 4px; padding: 1px 5px; font-size: .92em; }
-.ql-md :deep(pre code) { background: none; padding: 0; }
-.ql-md :deep(blockquote) { border-left: 3px solid var(--os-accent); padding-left: 14px; color: var(--os-text-secondary); margin: .6em 0; }
-.ql-md :deep(table) { border-collapse: collapse; margin: .6em 0; }
-.ql-md :deep(th), .ql-md :deep(td) { border: 1px solid var(--os-border-strong); padding: 5px 12px; font-size: .92em; }
-.ql-md :deep(a) { color: var(--os-accent); }
-.ql-md :deep(img) { max-width: 100%; border-radius: 8px; }
-.ql-table { border-collapse: collapse; background: var(--os-panel-solid); color: var(--os-text); border-radius: 12px; overflow: hidden; font-size: 13px; }
-.ql-table td { border: 1px solid var(--os-border); padding: 5px 12px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ql-text {
-  max-width: 760px; width: 100%; max-height: 100%; overflow: auto; background: var(--os-panel-solid);
-  color: var(--os-text); border-radius: 12px; padding: 24px 28px; font-family: var(--os-mono);
-  font-size: 12.5px; line-height: 1.7; white-space: pre-wrap; user-select: text;
-}
 
 /* 简介弹窗 */
 .info { text-align: left; }

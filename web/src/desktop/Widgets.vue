@@ -14,6 +14,7 @@ import { useWindows } from '../stores/windows'
 import { useNotes, NOTE_COLORS } from '../stores/notes'
 import { bus } from '../bus/bus'
 import { api } from '../api/client'
+import { createUserSetting } from '../composables/useUserSetting'
 import { GRID, cellAt, findFree, gridMetrics, isFree, posOf, registerItem, unregisterItem, type GridRect } from './grid'
 import { widgetDef } from './widgetRegistry'
 import { shortDate } from '../i18n'
@@ -37,14 +38,24 @@ const windows = useWindows()
 const notes = useNotes()
 /** v2：网格坐标（c/r 格子）。旧版为像素（x/y），首次加载时迁移。
  *  权威存储在服务端 user_settings 的 desktop.widgets 键（同一账号换设备布局一致），
- *  localStorage 仅作即时缓存与离线兜底；服务端无数据时把本地布局一次性迁移上云。 */
+ *  localStorage 仅作即时缓存与离线兜底；服务端无数据时把本地布局一次性迁移上云。
+ *  同步管线走 composables/useUserSetting（共享 GET + 防抖回写 + 基线去重）。 */
 const SETTINGS_KEY = 'desktop.widgets'
 const KEY = () => `openos_widgets_v2_${session.user!.username}`
 const OLD_KEY = () => `openos_widgets_${session.user!.username}`
 const NOTE_KEY = () => `openos_note_${session.user!.username}`
-let serverReady = false // 服务端数据已就位（就位后的变更才回写服务端）
-let saveTimer = 0 // 服务端写回防抖
-let lastSynced = '' // 最近一次已知服务端内容（无变化不回写，防访问即改库）
+/** 解析服务端数据（损坏/非数组返回 undefined：保留本地缓存并回写覆盖）。 */
+function parseWidgets(raw: string): Widget[] | undefined {
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? (parsed as Widget[]) : undefined
+  } catch { return undefined }
+}
+const setting = createUserSetting<Widget[]>(SETTINGS_KEY, {
+  cacheKey: KEY,
+  parse: parseWidgets,
+  serialize: (l) => JSON.stringify(l),
+})
 
 const list = ref<Widget[]>([])
 /** 时钟/监控/自定义小组件按实际尺寸换算的格子数（挂载后测量）；便签用自身 sc/sr。 */
@@ -78,34 +89,23 @@ function unregisterAll() {
 }
 
 /** 服务端同步：本地缓存先上屏（含旧格式迁移），服务端数据到达后校正；无数据时迁移上云。 */
-async function syncServer() {
-  try {
-    const s = await api.get<Record<string, string>>('/api/settings')
-    serverReady = true // 同步判定已定，后续变更可回写
-    if (s[SETTINGS_KEY] !== undefined) {
-      let next: Widget[] | null = null
-      try {
-        const parsed = JSON.parse(s[SETTINGS_KEY])
-        if (Array.isArray(parsed)) next = parsed
-      } catch { /* 数据损坏：保留本地缓存并回写覆盖 */ }
-      if (next === null) {
-        persistServer()
-      } else {
-        if (JSON.stringify(next) !== JSON.stringify(list.value)) {
-          unregisterAll()
-          list.value = next
-          registerAll()
-          localStorage.setItem(KEY(), JSON.stringify(list.value)) // 刷新本地缓存
-          void measure() // 服务端布局可能带本页未测量的组件类型
-        }
-        lastSynced = JSON.stringify(next)
-        pruneOrphans()
-      }
-    } else if (list.value.length) {
-      persistServer() // 旧版本布局只在 localStorage：一次性迁移到服务端
+function syncServer() {
+  void setting.sync((next, has) => {
+    if (!(has && next)) {
+      // 服务端无该键（或数据损坏）：本地有布局 → 一次性迁移上云（损坏时以本地覆盖）
+      if (list.value.length) setting.commit(list.value)
+      return
     }
-  } catch { /* 离线容忍：继续用本地缓存 */ }
-  serverReady = true
+    if (JSON.stringify(next) !== JSON.stringify(list.value)) {
+      unregisterAll()
+      list.value = next
+      registerAll()
+      setting.writeCache(next) // 刷新本地缓存
+      void measure() // 服务端布局可能带本页未测量的组件类型
+    }
+    pruneOrphans()
+    return next // 记为回写基线（内容未变不回写）
+  })
 }
 
 onMounted(() => {
@@ -219,20 +219,10 @@ async function refreshMonitor() {
   } catch { /* ignore */ }
 }
 
+/** 保存：localStorage 即时写（缓存）+ 服务端 400ms 防抖回写（权威；内容与最近
+ *  已知服务端一致时跳过，防 measure 重排造成无谓回写）。 */
 function save() {
-  localStorage.setItem(KEY(), JSON.stringify(list.value))
-  persistServer()
-}
-/** 服务端写回（400ms 防抖；内容与最近已知服务端一致时跳过，防 measure 重排造成无谓回写）。 */
-function persistServer() {
-  if (!serverReady) return
-  const v = JSON.stringify(list.value)
-  if (v === lastSynced) return
-  clearTimeout(saveTimer)
-  saveTimer = window.setTimeout(() => {
-    lastSynced = v
-    api.put('/api/settings', { key: SETTINGS_KEY, value: v }).catch(() => { lastSynced = '' })
-  }, 400)
+  setting.commit(list.value)
 }
 
 /** 向本页便签应用广播当前钉到桌面的便签 id 集合。 */

@@ -7,13 +7,13 @@
 // （localStorage 仅缓存，与 Dock 同一模式）；应用卸载后成员自动失效隐藏，
 // 文件夹空了不显示（下次保存时落盘清理）。搜索/类目视图忽略文件夹结构直接
 // 命中应用本体（视图内建文件夹前先从既有文件夹摘除，防重复收纳）。
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useApps } from '../stores/apps'
 import type { AppDef } from '../api/client'
 import { useWindows } from '../stores/windows'
 import { useDock } from '../stores/dock'
 import { useSession } from '../stores/session'
-import { api } from '../api/client'
+import { useUserSetting } from '../composables/useUserSetting'
 import { toast } from '../ui/toast'
 import { osConfirm } from '../ui/confirm'
 import { useMenu, menuPos } from '../ui/menu'
@@ -38,15 +38,6 @@ const cat = ref('')
 const SETTINGS_KEY = 'launchpadFolders'
 const CACHE_KEY = () => `openos_launchpad_folders_${session.user!.username}`
 
-const folders = ref<LpFolder[]>([])
-/** 拖动中的源（同组件内判定即可，无需跨 dataTransfer）：id + 来源文件夹 id（空 = 平铺）。 */
-let dragSrc = { id: '', from: '' }
-/** 合并目标高亮（dragover 持续续期，离开后短延时自灭）。 */
-const hoverKey = ref('')
-let hoverClr = 0
-/** 展开面板的文件夹 id。 */
-const openId = ref('')
-
 /** 结构清洗：只信合法字段，appIds 去重。 */
 function sanitize(raw: any): LpFolder[] {
   if (!Array.isArray(raw)) return []
@@ -59,18 +50,35 @@ function sanitize(raw: any): LpFolder[] {
     }))
 }
 
-onMounted(async () => {
-  // 本地缓存先行，避免已建文件夹的用户先看到平铺闪烁
-  try { folders.value = sanitize(JSON.parse(localStorage.getItem(CACHE_KEY()) || '[]')) } catch { /* ignore */ }
-  try {
-    const s = await api.get<Record<string, string>>('/api/settings')
-    folders.value = sanitize(s[SETTINGS_KEY] ? JSON.parse(s[SETTINGS_KEY]) : [])
-  } catch { /* 离线容忍：保留本地缓存 */ }
+/** 文件夹持久化：值由 useUserSetting 持有（缓存先行回显 → 服务端校正 → save 提交）。
+ *  服务端无记录 = 从未自定义过文件夹：以服务端为准清回默认（与 Dock 同语义）。 */
+const lpSetting = useUserSetting<LpFolder[]>(SETTINGS_KEY, {
+  cacheKey: CACHE_KEY,
+  parse: (raw) => {
+    try { return sanitize(JSON.parse(raw)) } catch { return undefined } // 损坏：保留缓存
+  },
+  serialize: (v) => JSON.stringify(v),
+  readCache: () => {
+    try { return sanitize(JSON.parse(localStorage.getItem(CACHE_KEY()) || '[]')) } catch { return [] }
+  },
+  absent: () => [],
+})
+const folders = computed({
+  get: (): LpFolder[] => lpSetting.value.value ?? [],
+  set: (v: LpFolder[]) => { lpSetting.value.value = v },
 })
 
+/** 拖动中的源（同组件内判定即可，无需跨 dataTransfer）：id + 来源文件夹 id（空 = 平铺）。 */
+let dragSrc = { id: '', from: '' }
+/** 合并目标高亮（dragover 持续续期，离开后短延时自灭）。 */
+const hoverKey = ref('')
+let hoverClr = 0
+/** 展开面板的文件夹 id。 */
+const openId = ref('')
+
+/** 保存：localStorage 即时写（缓存）+ 服务端 400ms 防抖回写（权威；内容未变不回写）。 */
 function save() {
-  try { localStorage.setItem(CACHE_KEY(), JSON.stringify(folders.value)) } catch { /* 存储满静默 */ }
-  api.put('/api/settings', { key: SETTINGS_KEY, value: JSON.stringify(folders.value) }).catch(() => {})
+  lpSetting.save()
 }
 
 const inFolder = computed(() => new Set(folders.value.flatMap((f) => f.appIds)))

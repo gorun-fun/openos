@@ -10,7 +10,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useWindows } from '../stores/windows'
 import { useApps } from '../stores/apps'
 import { useSession } from '../stores/session'
-import { api } from '../api/client'
+import { createUserSetting } from '../composables/useUserSetting'
 import { openPath, fileEmoji } from '../apps/openWith'
 import AppIcon from '../ui/AppIcon.vue'
 import FolderIcon from '../ui/FolderIcon.vue'
@@ -34,13 +34,16 @@ const apps = useApps()
 const session = useSession()
 /** v2：全桌面网格（左上角锚定）。旧版以右上角为原点、仅右侧 5 列，首次加载时迁移。
  *  权威存储在服务端 user_settings 的 desktop.shortcuts 键（同一账号换设备布局一致），
- *  localStorage 仅作即时缓存与离线兜底；服务端无数据时把本地布局一次性迁移上云。 */
+ *  localStorage 仅作即时缓存与离线兜底；服务端无数据时把本地布局一次性迁移上云。
+ *  同步管线走 composables/useUserSetting（共享 GET + 防抖回写 + 基线去重）。 */
 const SETTINGS_KEY = 'desktop.shortcuts'
 const KEY = () => `openos_desktop_v2_${session.user!.username}`
 const OLD_KEY = () => `openos_desktop_${session.user!.username}`
-let serverReady = false // 服务端数据已就位（就位后的变更才回写服务端）
-let saveTimer = 0 // 服务端写回防抖
-let lastSynced = '' // 最近一次已知服务端内容（无变化不回写，防访问即改库）
+const setting = createUserSetting<Shortcut[]>(SETTINGS_KEY, {
+  cacheKey: KEY,
+  parse: parseList,
+  serialize: (l) => JSON.stringify(l),
+})
 
 const list = ref<Shortcut[]>([])
 const selected = ref('')
@@ -62,15 +65,15 @@ const peekNameRef = ref<HTMLInputElement>()
 const keyOf = (s: { kind: string; id: string }) => `s:${s.kind}:${s.id}`
 
 /** 解析布局数据（folder 项兜底 items，旧数据不含文件夹，防手改数据缺键）；
- *  解析失败返回 null（服务端数据损坏时保留本地缓存并回写覆盖）。 */
-function parseList(raw: string | null): Shortcut[] | null {
-  if (raw === null) return null
+ *  解析失败返回 undefined（服务端数据损坏时保留本地缓存并回写覆盖）。 */
+function parseList(raw: string | null): Shortcut[] | undefined {
+  if (raw === null) return undefined
   try {
     const arr = JSON.parse(raw)
-    if (!Array.isArray(arr)) return null
+    if (!Array.isArray(arr)) return undefined
     return arr.map((s: Shortcut) =>
       s.kind === 'folder' ? { ...s, items: s.items || [] } : s)
-  } catch { return null }
+  } catch { return undefined }
 }
 
 /** 全量重建网格占位注册（服务端数据替换本地缓存后调用）。 */
@@ -81,37 +84,31 @@ function unregisterAll() {
   for (const s of list.value) unregisterItem(keyOf(s))
 }
 
-/** 服务端同步：本地缓存先上屏，服务端数据到达后校正；服务端无数据时迁移上云。 */
-async function syncServer() {
-  try {
-    const s = await api.get<Record<string, string>>('/api/settings')
-    serverReady = true // 同步判定已定，后续变更可回写
-    if (s[SETTINGS_KEY] !== undefined) {
-      const next = parseList(s[SETTINGS_KEY])
-      if (next === null) {
-        persistServer() // 服务端数据损坏：保留本地缓存并回写覆盖
-      } else {
-        lastSynced = JSON.stringify(next)
-        if (lastSynced !== JSON.stringify(list.value)) {
+/** 服务端同步：本地缓存先上屏，服务端数据到达后校正；服务端无数据时迁移上云。
+ *  落定（无论成败）后放行 goder 种入决策的等待信号。 */
+function syncServer() {
+  void setting
+    .sync((next, has) => {
+      if (has && next) {
+        if (JSON.stringify(next) !== JSON.stringify(list.value)) {
           unregisterAll()
           list.value = next
           registerAll()
-          localStorage.setItem(KEY(), JSON.stringify(list.value)) // 刷新本地缓存
+          setting.writeCache(next) // 刷新本地缓存
         }
         // 其他设备已用过的桌面不再种 goder 快捷方式（用户可能主动移除过）
         localStorage.setItem(SEEDED_KEY(), '1')
+        return next // 记为回写基线（内容未变不回写）
       }
-    } else if (list.value.length) {
-      persistServer() // 旧版本布局只在 localStorage：一次性迁移到服务端
-    }
-  } catch { /* 离线容忍：继续用本地缓存 */ }
-  serverReady = true
-  syncResolve()
+      // 服务端无该键（或数据损坏）：本地有布局 → 一次性迁移上云（损坏时以本地覆盖）
+      if (list.value.length) setting.commit(list.value)
+    })
+    .then(() => syncResolve())
 }
 
 onMounted(() => {
-  const parsed = parseList(localStorage.getItem(KEY()))
-  if (parsed !== null) {
+  const parsed = setting.readCache()
+  if (parsed !== undefined) {
     list.value = parsed
   } else {
     // 旧格式（右上角锚定）→ 左上角锚定列
@@ -155,20 +152,10 @@ stopSeed = watch(() => apps.apps.length, (n) => {
   })()
 }, { immediate: true })
 
+/** 保存：localStorage 即时写（缓存）+ 服务端 400ms 防抖回写（权威；服务端数据
+ *  就位前只写缓存，防本地空态覆盖云端布局）。 */
 function save() {
-  localStorage.setItem(KEY(), JSON.stringify(list.value))
-  persistServer()
-}
-/** 服务端写回（400ms 防抖；服务端数据就位前不写，防本地空态覆盖云端布局）。 */
-function persistServer() {
-  if (!serverReady) return
-  const v = JSON.stringify(list.value)
-  if (v === lastSynced) return
-  clearTimeout(saveTimer)
-  saveTimer = window.setTimeout(() => {
-    lastSynced = v
-    api.put('/api/settings', { key: SETTINGS_KEY, value: v }).catch(() => { lastSynced = '' })
-  }, 400)
+  setting.commit(list.value)
 }
 
 function place(s: Shortcut, c: number, r: number) {
@@ -190,7 +177,7 @@ function addAt(kind: Shortcut['kind'], id: string, name: string, x: number, y: n
 }
 
 /** 供外部（桌面拖放 / 右键菜单）调用。 */
-defineExpose({ addAt, addAppShortcut, dropShortcut, dragOver, endPreview, openByKey, removeByKey, relayout, renameFolder })
+defineExpose({ addAt, dropShortcut, dragOver, endPreview, openByKey, removeByKey, relayout, renameFolder })
 
 function style(s: Shortcut) {
   const p = posOf({ c: s.col, r: s.row })
@@ -251,17 +238,6 @@ function renameFolder(key: string) {
   if (s?.kind !== 'folder') return
   peekId.value = s.id
   void nextTick(() => { peekNameRef.value?.focus(); peekNameRef.value?.select() })
-}
-
-/** 放到第一个空位（从左上角扫描）。 */
-function addAppShortcut(appId: string) {
-  const app = apps.byId(appId)
-  if (!app) return
-  if (list.value.some((s) => s.kind === 'app' && s.id === appId)) return
-  const s: Shortcut = { kind: 'app', id: appId, name: app.name, col: 0, row: 0 }
-  list.value.push(s)
-  place(s, 0, 0)
-  save()
 }
 
 /** 视口变化后重排：把越界的项收回网格内，并解决持久化数据可能的重叠。 */

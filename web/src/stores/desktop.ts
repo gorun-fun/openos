@@ -1,7 +1,9 @@
 // 桌面外观仓库：壁纸 / 深浅色，持久化到服务端（按用户）。
 // 壁纸列表可由宿主经 createOpenOS({ wallpapers }) 注入覆盖（shell 单例）。
+// 三个键（wallpaper/dark/dockAutoHide）各自走 composables/useUserSetting 通道，
+// 同刻装载共享一次 GET；写入获得防抖回写（原为即时 PUT）。
 import { defineStore } from 'pinia'
-import { api } from '../api/client'
+import { createUserSetting } from '../composables/useUserSetting'
 import { shell } from '../shell'
 
 /** 内置默认壁纸（宿主未注入时使用）。 */
@@ -24,6 +26,29 @@ export const DEFAULT_WALLPAPERS: string[] = [
  *  WelcomeApp 标题栏「不再显示」按钮写入，Desktop 登录后自动打开前读取。 */
 export const WELCOME_HIDDEN_KEY = 'welcome.hidden'
 
+/** '1'/'0' 文本开关的解析（非合法值返回 undefined = 保持现状）。 */
+function parseFlag(raw: string): boolean | undefined {
+  return raw === '1' ? true : raw === '0' ? false : undefined
+}
+
+const wallpaperSetting = createUserSetting<number>('wallpaper', {
+  parse: (raw) => {
+    const n = Number(raw)
+    return raw !== '' && Number.isFinite(n) ? n : undefined
+  },
+  serialize: (v) => String(v), // 壁纸不做本地缓存（无 cacheKey），仅服务端权威
+})
+const darkSetting = createUserSetting<boolean>('dark', {
+  cacheKey: 'openos_dark',
+  parse: parseFlag,
+  serialize: (v) => (v ? '1' : '0'),
+})
+const dockHideSetting = createUserSetting<boolean>('dockAutoHide', {
+  cacheKey: 'openos_dockhide',
+  parse: parseFlag,
+  serialize: (v) => (v ? '1' : '0'),
+})
+
 interface State {
   wallpaper: number
   dark: boolean
@@ -44,32 +69,31 @@ export const useDesktop = defineStore('desktop', {
     },
     async load() {
       if (this.loaded) return
-      try {
-        const s = await api.get<Record<string, string>>('/api/settings')
-        if (s['wallpaper']) this.wallpaper = (Number(s['wallpaper']) || 0) % this.wallpapers.length
-        if (s['dark']) this.dark = s['dark'] === '1'
-        if (s['dockAutoHide']) this.dockAutoHide = s['dockAutoHide'] === '1'
-      } catch { /* 离线容忍 */ }
-      localStorage.setItem('openos_dark', this.dark ? '1' : '0')
-      localStorage.setItem('openos_dockhide', this.dockAutoHide ? '1' : '0')
-      this.apply()
       this.loaded = true
+      // 三个键同刻同步：共享一次 GET /api/settings（模块级 in-flight 去重）
+      await Promise.all([
+        wallpaperSetting.sync((v) => { if (v !== undefined) this.wallpaper = v % this.wallpapers.length }),
+        darkSetting.sync((v) => { if (v !== undefined) this.dark = v }),
+        dockHideSetting.sync((v) => { if (v !== undefined) this.dockAutoHide = v }),
+      ])
+      // 回写本地缓存（服务端值优先合并后的当前态）并应用外观；离线时同样落缓存
+      darkSetting.writeCache(this.dark)
+      dockHideSetting.writeCache(this.dockAutoHide)
+      this.apply()
     },
     setWallpaper(i: number) {
       this.wallpaper = ((i % this.wallpapers.length) + this.wallpapers.length) % this.wallpapers.length
-      api.put('/api/settings', { key: 'wallpaper', value: String(this.wallpaper) }).catch(() => {})
+      wallpaperSetting.commit(this.wallpaper)
     },
     setDark(v: boolean) {
       this.dark = v
-      localStorage.setItem('openos_dark', v ? '1' : '0')
       this.apply()
-      api.put('/api/settings', { key: 'dark', value: v ? '1' : '0' }).catch(() => {})
+      darkSetting.commit(v)
     },
     /** 最大化窗口时自动隐藏 Dock（鼠标移到屏幕底部边缘滑出）。 */
     setDockAutoHide(v: boolean) {
       this.dockAutoHide = v
-      localStorage.setItem('openos_dockhide', v ? '1' : '0')
-      api.put('/api/settings', { key: 'dockAutoHide', value: v ? '1' : '0' }).catch(() => {})
+      dockHideSetting.commit(v)
     },
   },
 })

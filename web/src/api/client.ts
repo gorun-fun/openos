@@ -181,6 +181,18 @@ export interface AppDef {
   width: number
   height: number
 }
+/** 解析 AppDef.config 的「字符串/对象」二态：旧数据可能双重编码为字符串
+ *  （JSON.parse 还原，解析失败返回 undefined），种子/新数据为嵌套对象（原样返回）；
+ *  config 缺省/为空返回 undefined。消费方按需兜底（如 `parseAppConfig(def) ?? {}`），
+ *  解析结果（含 null 等原始值）原样透传，不做形状假设。 */
+export function parseAppConfig(def: AppDef): any {
+  const raw: any = def.config
+  if (!raw) return undefined
+  if (typeof raw === 'string') {
+    try { return JSON.parse(raw) } catch { return undefined }
+  }
+  return raw
+}
 export interface VFile { path: string; isDir: boolean; isBinary?: boolean; size: number; updatedAt: string }
 /** 我创建的分享（GET /api/fs/shares） */
 export interface ShareDef { id: string; path: string; name: string; size: number; createdAt: string; expiresAt: string }

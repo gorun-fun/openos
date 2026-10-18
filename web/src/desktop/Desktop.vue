@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { AUTH_NOTICE_KEY, api } from '../api/client'
+import { AUTH_NOTICE_KEY } from '../api/client'
+import { createUserSetting, fetchUserSettings } from '../composables/useUserSetting'
 import { consumeShareHash, openShareDialog } from '../ui/shareDialog'
 import { setLocale, locale, LOCALE_SETTINGS_KEY } from '../i18n'
 import { useSession } from '../stores/session'
@@ -54,34 +55,39 @@ const offs: (() => void)[] = []
 onMounted(async () => {
   // 成功进入桌面即清除会话失效提示（防 SSO 往返后残留到下一次登出）
   try { sessionStorage.removeItem(AUTH_NOTICE_KEY) } catch { /* ignore */ }
+  // ---- user_settings 装载：集中在本 onMounted 的首个 await 之前 ----
+  // 外观/通知/日历/窗口会话与子组件（快捷方式/小组件/Dock）的同步全部经
+  // composables/useUserSetting 的共享 GET 挂接，桌面挂载期对 /api/settings
+  // 只发一次请求（模块级 in-flight 去重，挂接跨 await 会错过共享窗口）。
   desktop.load()
-  await apps.refresh()
-  bus.connect(session.user!.username)
-  // 分享链接接收：/#share=<id> 片段（未登录时先过登录，SPA 内登录片段保留）
-  const shareId = consumeShareHash()
-  if (shareId) void openShareDialog(shareId)
-
-  // 语言同步：服务端 user_settings 的 locale 优先（多端一致），未设置则保持本地；
-  // 顺带读取「使用指南不再自动打开」偏好（WelcomeApp「不再显示」按钮写入）
-  // 与上次会话窗口（session.windows，换设备登录恢复同一组窗口）
-  let welcomeHidden = false
-  let savedWins: { appId: string; props?: any; title?: string }[] | null = localWins()
-  try {
-    const kv = await api.get<Record<string, string>>('/api/settings')
-    const saved = kv?.[LOCALE_SETTINGS_KEY]
-    if ((saved === 'zh-CN' || saved === 'en-US') && saved !== locale()) setLocale(saved)
-    welcomeHidden = kv?.[WELCOME_HIDDEN_KEY] === '1'
-    const sw = kv?.[WIN_SETTINGS_KEY]
-    if (sw !== undefined) {
-      try { savedWins = JSON.parse(sw) } catch { /* 损坏退回本地缓存 */ }
-    }
-  } catch { /* ignore */ }
-
   // 通知中心：加载历史/偏好 + 订阅总线 sys:notify（服务端定向与其他端广播）
   offs.push(notifications.install())
   // 日历：日程与节假日加载 + 提醒引擎（到期经通知中心横幅提醒）
   cal.load()
   cal.startReminders()
+
+  // 语言同步：服务端 user_settings 的 locale 优先（多端一致），未设置则保持本地；
+  // 顺带读取「使用指南不再自动打开」偏好（WelcomeApp「不再显示」按钮写入）
+  // 与上次会话窗口（session.windows，换设备登录恢复同一组窗口）
+  let welcomeHidden = false
+  let savedWins: SavedWin[] | null = winSetting.readCache() ?? null
+  // 窗口会话通道挂接共享 GET（回调先于下面的 await 续体执行，同一次请求内完成）：
+  // 服务端窗口列表落进 savedWins，并记为回写基线（恢复后内容未变不回写）
+  void winSetting.sync((v) => {
+    if (v) { savedWins = v; return v }
+  })
+  try {
+    const kv = await fetchUserSettings()
+    const saved = kv?.[LOCALE_SETTINGS_KEY]
+    if ((saved === 'zh-CN' || saved === 'en-US') && saved !== locale()) setLocale(saved)
+    welcomeHidden = kv?.[WELCOME_HIDDEN_KEY] === '1'
+  } catch { /* ignore */ }
+
+  await apps.refresh()
+  bus.connect(session.user!.username)
+  // 分享链接接收：/#share=<id> 片段（未登录时先过登录，SPA 内登录片段保留）
+  const shareId = consumeShareHash()
+  if (shareId) void openShareDialog(shareId)
 
   offs.push(
     bus.on('sys:open', (p: any) => { if (p?.app) windows.open(p.app) }),
@@ -326,33 +332,25 @@ function onSystemKeyUp({ info }: KeyCtx) {
 
 // ---- 窗口状态持久化（同一账号刷新/换设备后恢复一致） ----
 // 服务端 user_settings 的 session.windows 键为权威，localStorage 作离线兜底缓存。
-const STATE_KEY = () => `openos_wins_${session.user!.username}`
-const WIN_SETTINGS_KEY = 'session.windows'
-let saveTimer = 0
-let lastSynced = '' // 最近一次写往服务端的内容（无变化不回写）
-/** 读本地缓存的窗口列表（服务端数据到达前的兜底）。 */
-function localWins(): { appId: string; props?: any; title?: string }[] | null {
-  try {
-    const raw = localStorage.getItem(STATE_KEY())
-    return raw ? JSON.parse(raw) : null
-  } catch { return null }
-}
+// 同步管线走 composables/useUserSetting（共享 GET + 600ms 防抖回写 + 基线去重）。
+interface SavedWin { appId: string; props?: any; title?: string }
+const winSetting = createUserSetting<SavedWin[]>('session.windows', {
+  cacheKey: () => `openos_wins_${session.user!.username}`,
+  parse: (raw) => {
+    try {
+      const arr = JSON.parse(raw)
+      return Array.isArray(arr) ? (arr as SavedWin[]) : undefined
+    } catch { return undefined }
+  },
+  serialize: (v) => JSON.stringify(v),
+  debounce: 600, // 窗口布局变化密集（连开多窗），沿用 600ms 防抖
+})
 watch(
   () => windows.list.map((w) => `${w.appId}|${JSON.stringify(w.props)}|${w.title}`).join(';'),
-  () => {
-    clearTimeout(saveTimer)
-    saveTimer = window.setTimeout(() => {
-      const saved = windows.list.slice(0, 12).map((w) => ({ appId: w.appId, props: w.props, title: w.title }))
-      const v = JSON.stringify(saved)
-      localStorage.setItem(STATE_KEY(), v)
-      if (v === lastSynced) return
-      lastSynced = v
-      api.put('/api/settings', { key: WIN_SETTINGS_KEY, value: v }).catch(() => { lastSynced = '' })
-    }, 600)
-  },
+  () => winSetting.commit(windows.list.slice(0, 12).map((w) => ({ appId: w.appId, props: w.props, title: w.title }))),
 )
 
-function restoreWindows(saved: { appId: string; props?: any; title?: string }[] | null): boolean {
+function restoreWindows(saved: SavedWin[] | null): boolean {
   try {
     if (!Array.isArray(saved) || !saved.length) return false
     const allowed = new Set(apps.apps.map((a) => a.id))

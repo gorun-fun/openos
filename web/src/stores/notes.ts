@@ -2,9 +2,10 @@
 // 权威存储在服务端（user_settings 的 notes 键，跨设备一致），localStorage 作为
 // 即时缓存与离线兜底；首次遇到「服务端无数据」时从旧 localStorage 一次性迁移。
 // 登录/登出会整页刷新（401 全局登出），因此每次页面加载一次即可。
+// 同步管线走 composables/useUserSetting（共享 GET + 防抖回写 + 基线去重）。
 import { defineStore } from 'pinia'
 import { useSession } from './session'
-import { api } from '../api/client'
+import { createUserSetting } from '../composables/useUserSetting'
 
 export interface Note {
   id: string
@@ -23,8 +24,6 @@ export const NOTE_COLORS = [
 ]
 
 let loadedFor = '' // 已加载的用户名（幂等防重复加载）
-let serverReady = false // 服务端数据已就位（就位后的变更才回写服务端）
-let saveTimer = 0 // 服务端写回防抖
 const KEY = () => `openos_notes_${useSession().user?.username || 'default'}`
 
 function parse(raw: string | null | undefined): Note[] {
@@ -33,6 +32,12 @@ function parse(raw: string | null | undefined): Note[] {
     return Array.isArray(arr) ? arr.filter((n) => n && n.id) : []
   } catch { return [] }
 }
+
+const setting = createUserSetting<Note[]>('notes', {
+  cacheKey: KEY,
+  parse, // 损坏/无数据 → []（从不返回 undefined）
+  serialize: (v) => JSON.stringify(v),
+})
 
 export const useNotes = defineStore('notes', {
   state: (): { notes: Note[] } => ({ notes: [] }),
@@ -46,25 +51,15 @@ export const useNotes = defineStore('notes', {
       if (!user || loadedFor === user) return
       loadedFor = user
       // 先用本地缓存即时上屏，再以服务端数据校正
-      this.notes = parse(localStorage.getItem(KEY()))
-      void api.get<Record<string, string>>('/api/settings').then((s) => {
-        if (s['notes']) {
-          this.notes = parse(s['notes'])
-        } else if (this.notes.length) {
-          // 旧版本数据只在 localStorage：一次性迁移到服务端
-          this.save()
-        }
-        serverReady = true
-      }).catch(() => { /* 离线容忍：继续用本地缓存 */ })
+      this.notes = setting.readCache() ?? []
+      void setting.sync((v, has) => {
+        if (has && v) this.notes = v
+        else if (!has && this.notes.length) setting.commit(this.notes) // 旧版本数据只在 localStorage：一次性迁移到服务端
+      })
     },
     /** 保存：localStorage 即时写（缓存），服务端 400ms 防抖回写（权威）。 */
     save() {
-      try { localStorage.setItem(KEY(), JSON.stringify(this.notes)) } catch { /* 存储满时静默 */ }
-      if (!serverReady) return
-      clearTimeout(saveTimer)
-      saveTimer = window.setTimeout(() => {
-        api.put('/api/settings', { key: 'notes', value: JSON.stringify(this.notes) }).catch(() => {})
-      }, 400)
+      setting.commit(this.notes)
     },
     create(text = '', color = Math.floor(Math.random() * NOTE_COLORS.length)): Note {
       const n: Note = {
