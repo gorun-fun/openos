@@ -1,10 +1,11 @@
 // Package store 管理 SQLite 数据库的初始化、迁移与种子数据。
+// 领域代码按文件拆分：apps.go（应用注册/授权）、chat.go（对话历史/聊天室）、
+// feedback.go、attachments.go、settings.go（用户设置/系统 KV）、roles.go（角色目录）、
+// aiproviders.go（AI 配置）；本文件保留建库/迁移/种子、审计、用户认证支撑与系统统计。
 package store
 
 import (
 	"database/sql"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,22 +28,6 @@ type DB struct {
 	externalIdentity bool
 }
 
-// AppDef 应用注册信息（内置与第三方统一对待）。
-type AppDef struct {
-	ID       string          `json:"id"`
-	Name     string          `json:"name"`
-	Icon     string          `json:"icon"`
-	Category string          `json:"category"`
-	Builtin  bool            `json:"builtin"`
-	Locked   bool            `json:"locked,omitempty"` // 宿主锁定应用：宿主经交换密钥注册，管理界面不可编辑/删除
-	Hidden   bool            `json:"hidden,omitempty"` // 隐藏应用：可编程打开，不出现在启动台/Dock（详情窗口类）
-	Config   json.RawMessage `json:"config,omitempty"`
-	Version  string          `json:"version,omitempty"` // 应用版本（应用商店安装时写入，管理接口编辑不动它）
-	Source   string          `json:"source,omitempty"`  // 安装来源（"market" = 应用商店；空 = 管理员手工注册）
-	Width    int             `json:"width"`
-	Height   int             `json:"height"`
-}
-
 // User 用户记录。
 type User struct {
 	ID          int64  `json:"id"`
@@ -57,16 +42,6 @@ type User struct {
 	CreatedAt    string   `json:"createdAt"`
 }
 
-// File 虚拟文件系统中的条目。
-type File struct {
-	Path      string `json:"path"`
-	IsDir     bool   `json:"isDir"`
-	IsBinary  bool   `json:"isBinary"`
-	Content   string `json:"content,omitempty"`
-	Size      int    `json:"size"`
-	UpdatedAt string `json:"updatedAt"`
-}
-
 // AuditEntry 审计日志。
 type AuditEntry struct {
 	ID        int64  `json:"id"`
@@ -75,20 +50,6 @@ type AuditEntry struct {
 	Detail    string `json:"detail"`
 	IP        string `json:"ip"`
 	CreatedAt string `json:"createdAt"`
-}
-
-// ChatMsg goder 对话历史。
-type ChatMsg struct {
-	Role      string `json:"role"`
-	Content   string `json:"content"`
-	CreatedAt string `json:"createdAt"`
-}
-
-// AIConfig AI 服务配置（单例行）。
-type AIConfig struct {
-	BaseURL string `json:"baseUrl"`
-	APIKey  string `json:"apiKey"`
-	Model   string `json:"model"`
 }
 
 const schema = `
@@ -240,6 +201,9 @@ CREATE TABLE IF NOT EXISTS feedback (
 );
 CREATE INDEX IF NOT EXISTS idx_feedback_user ON feedback(username, id DESC);
 `
+
+// files 表已随 VFS 磁盘化弃用（统一 home 落在 <data>/homes/<user>）：schema 仅为
+// 存量库 migrateFromDB 一次性迁移保留，业务代码一律不读写。
 
 // builtinApps 内置应用清单。icon 为前端渲染标识。
 var builtinApps = []AppDef{
@@ -510,62 +474,6 @@ func (db *DB) ListAudit(n int) ([]AuditEntry, error) {
 	return out, rows.Err()
 }
 
-// ---- AI 配置 ----
-
-// GetAIConfig 读取 AI 配置；空配置返回 ok=false。
-func (db *DB) GetAIConfig() (AIConfig, bool, error) {
-	var c AIConfig
-	var has int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM ai_config WHERE id=1`).Scan(&has); err != nil {
-		return c, false, err
-	}
-	if has == 0 {
-		return c, false, nil
-	}
-	err := db.QueryRow(`SELECT base_url,api_key,model FROM ai_config WHERE id=1`).Scan(&c.BaseURL, &c.APIKey, &c.Model)
-	return c, err == nil, err
-}
-
-// SetAIConfig 保存 AI 配置。
-func (db *DB) SetAIConfig(c AIConfig) error {
-	_, err := db.Exec(`INSERT INTO ai_config(id,base_url,api_key,model,updated_at) VALUES(1,?,?,?,datetime('now'))
-		ON CONFLICT(id) DO UPDATE SET base_url=excluded.base_url, api_key=excluded.api_key, model=excluded.model, updated_at=datetime('now')`,
-		c.BaseURL, c.APIKey, c.Model)
-	return err
-}
-
-// ---- goder 对话历史 ----
-
-// AddChatMsg 追加一条对话消息。
-func (db *DB) AddChatMsg(username, role, content string) {
-	db.Exec(`INSERT INTO chat_messages(username,role,content) VALUES(?,?,?)`, username, role, content)
-}
-
-// ListChatMsgs 用户最近 n 条消息（时间正序）。
-func (db *DB) ListChatMsgs(username string, n int) ([]ChatMsg, error) {
-	rows, err := db.Query(`SELECT role,content,created_at FROM (
-		SELECT id,role,content,created_at FROM chat_messages WHERE username=? ORDER BY id DESC LIMIT ?)
-		ORDER BY id ASC`, username, n)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []ChatMsg{}
-	for rows.Next() {
-		var m ChatMsg
-		if err := rows.Scan(&m.Role, &m.Content, &m.CreatedAt); err != nil {
-			continue
-		}
-		out = append(out, m)
-	}
-	return out, rows.Err()
-}
-
-// ClearChatMsgs 清空用户对话历史。
-func (db *DB) ClearChatMsgs(username string) {
-	db.Exec(`DELETE FROM chat_messages WHERE username=?`, username)
-}
-
 // ---- 用户 / 认证支撑 ----
 
 // UserAuthInfo 供 JWT 校验的用户态。
@@ -605,248 +513,12 @@ func (db *DB) BumpTokenVersion(username string) {
 	db.Exec(`UPDATE users SET token_version = token_version + 1 WHERE username=?`, username)
 }
 
-// ---- 系统级键值（与用户设置分离：清理用户设置不应波及系统配置） ----
-
-// GetSystemKV 读取系统级键值，不存在返回空串。
-func (db *DB) GetSystemKV(key string) (string, error) {
-	var v string
-	err := db.QueryRow(`SELECT value FROM system_kv WHERE key=?`, key).Scan(&v)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	return v, err
-}
-
-// SetSystemKV 写入系统级键值。
-func (db *DB) SetSystemKV(key, value string) error {
-	_, err := db.Exec(`INSERT INTO system_kv(key,value) VALUES(?,?)
-		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
-	return err
-}
-
 // ---- 数据保留期（防无限增长） ----
 
 // PruneAuditBefore 删除 cutoff 之前的审计日志，返回删除行数。
 // login.fail 是最大来源（公开接口 + 限流），无保留期时单日可膨胀数十万行。
 func (db *DB) PruneAuditBefore(cutoff time.Time) (int64, error) {
 	return db.pruneBefore("audit_log", cutoff)
-}
-
-// PruneChatBefore 删除 cutoff 之前的 AI 对话历史（含终端伪用户 __term__ 的孤儿数据），返回删除行数。
-func (db *DB) PruneChatBefore(cutoff time.Time) (int64, error) {
-	return db.pruneBefore("chat_messages", cutoff)
-}
-
-// ---- 聊天室消息历史（总线 chat:room 主题持久化） ----
-
-// ChatRoomMessage 聊天室历史消息行（正序返回给前端）。
-type ChatRoomMessage struct {
-	ID     int64          `json:"id"`
-	From   string         `json:"from"`
-	Text   string         `json:"text"`
-	Attach *AttachmentRef `json:"attach,omitempty"`
-	TS     int64          `json:"ts"`
-}
-
-// AttachmentRef 消息内嵌的附件快照（附件本体可能先于消息被保留期清理，
-// 按快照渲染、点击时 404 由前端兜底提示）。
-type AttachmentRef struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	MIME string `json:"mime"`
-	Size int64  `json:"size"`
-}
-
-// InsertChatRoomMessage 聊天消息落库（from/ts 由服务端总线注入，调用方已校验）。
-func (db *DB) InsertChatRoomMessage(m ChatRoomMessage) error {
-	var aID, aName, aMIME string
-	var aSize int64
-	if m.Attach != nil {
-		aID, aName, aMIME, aSize = m.Attach.ID, m.Attach.Name, m.Attach.MIME, m.Attach.Size
-	}
-	_, err := db.Exec(`INSERT INTO chat_room_messages(sender,text,attach_id,attach_name,attach_mime,attach_size,ts)
-		VALUES(?,?,?,?,?,?,?)`, m.From, m.Text, aID, aName, aMIME, aSize, m.TS)
-	return err
-}
-
-// ChatRoomHistory 分页查询历史：before=0 取最新一页，否则取 id < before 的更早一页；
-// 倒序取 limit 行后反转为正序返回。
-func (db *DB) ChatRoomHistory(before int64, limit int) ([]ChatRoomMessage, error) {
-	rows, err := db.Query(`SELECT id,sender,text,attach_id,attach_name,attach_mime,attach_size,ts
-		FROM chat_room_messages WHERE (? = 0 OR id < ?) ORDER BY id DESC LIMIT ?`, before, before, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []ChatRoomMessage{}
-	for rows.Next() {
-		var m ChatRoomMessage
-		var aID, aName, aMIME string
-		var aSize int64
-		if err := rows.Scan(&m.ID, &m.From, &m.Text, &aID, &aName, &aMIME, &aSize, &m.TS); err != nil {
-			return nil, err
-		}
-		if aID != "" {
-			m.Attach = &AttachmentRef{ID: aID, Name: aName, MIME: aMIME, Size: aSize}
-		}
-		out = append(out, m)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	// 反转为正序（旧 → 新）
-	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
-		out[i], out[j] = out[j], out[i]
-	}
-	return out, nil
-}
-
-// PruneChatRoomBefore 删除截止时间前的聊天室消息。
-func (db *DB) PruneChatRoomBefore(cutoff time.Time) (int64, error) {
-	return db.pruneBefore("chat_room_messages", cutoff)
-}
-
-// ---- 用户反馈（反馈应用：全员可提交，管理员处理） ----
-
-// Feedback 反馈行（category/status 白名单校验在 main 路由层）。
-type Feedback struct {
-	ID        int64  `json:"id"`
-	Username  string `json:"username"`
-	Category  string `json:"category"`
-	Content   string `json:"content"`
-	Status    string `json:"status"`
-	Reply     string `json:"reply"`
-	CreatedAt string `json:"createdAt"`
-	UpdatedAt string `json:"updatedAt"`
-}
-
-// InsertFeedback 提交反馈（状态恒为 pending，入库时间由默认值生成）。
-func (db *DB) InsertFeedback(username, category, content string) (int64, error) {
-	res, err := db.Exec(`INSERT INTO feedback(username,category,content) VALUES(?,?,?)`,
-		username, category, content)
-	if err != nil {
-		return 0, err
-	}
-	return res.LastInsertId()
-}
-
-// ListFeedback 反馈列表（倒序）：all=false 只看本人，all=true 全部（admin 视角）。
-func (db *DB) ListFeedback(username string, all bool, limit int) ([]Feedback, error) {
-	q := `SELECT id,username,category,content,status,reply,created_at,updated_at FROM feedback`
-	args := []any{}
-	if !all {
-		q += ` WHERE username=?`
-		args = append(args, username)
-	}
-	q += ` ORDER BY id DESC LIMIT ?`
-	args = append(args, limit)
-	rows, err := db.Query(q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []Feedback{}
-	for rows.Next() {
-		var f Feedback
-		if err := rows.Scan(&f.ID, &f.Username, &f.Category, &f.Content, &f.Status, &f.Reply, &f.CreatedAt, &f.UpdatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, f)
-	}
-	return out, rows.Err()
-}
-
-// FeedbackByID 按 id 取反馈（管理员处理时回读提交者，用于定向通知）。
-func (db *DB) FeedbackByID(id int64) (Feedback, bool) {
-	var f Feedback
-	err := db.QueryRow(`SELECT id,username,category,content,status,reply,created_at,updated_at
-		FROM feedback WHERE id=?`, id).
-		Scan(&f.ID, &f.Username, &f.Category, &f.Content, &f.Status, &f.Reply, &f.CreatedAt, &f.UpdatedAt)
-	return f, err == nil
-}
-
-// UpdateFeedback 管理员处理反馈：更新状态与回复（updated_at 一并刷新）。
-func (db *DB) UpdateFeedback(id int64, status, reply string) (bool, error) {
-	res, err := db.Exec(`UPDATE feedback SET status=?, reply=?, updated_at=datetime('now') WHERE id=?`,
-		status, reply, id)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n > 0, err
-}
-
-// AdminUsernames 全部管理员用户名（新反馈通知接收方；不含禁用账号）。
-func (db *DB) AdminUsernames() []string {
-	rows, err := db.Query(`SELECT username FROM users WHERE role='admin' AND disabled=0`)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	out := []string{}
-	for rows.Next() {
-		var u string
-		if err := rows.Scan(&u); err == nil {
-			out = append(out, u)
-		}
-	}
-	return out
-}
-
-// InsertAttachment 附件元数据入库（文件已落盘；入库失败由调用方清理文件）。
-func (db *DB) InsertAttachment(id, name, mime string, size int64, uploader string) error {
-	_, err := db.Exec(`INSERT INTO attachments(id,name,mime,size,uploader) VALUES(?,?,?,?,?)`,
-		id, name, mime, size, uploader)
-	return err
-}
-
-// Attachment 附件元数据行（attach 包以 Meta 别名复用）。
-type Attachment struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	MIME      string `json:"mime"`
-	Size      int64  `json:"size"`
-	Uploader  string `json:"uploader"`
-	CreatedAt string `json:"createdAt"`
-}
-
-// AttachmentByID 按 id 查附件元数据。
-func (db *DB) AttachmentByID(id string) (Attachment, bool) {
-	var m Attachment
-	var created string
-	err := db.QueryRow(`SELECT id,name,mime,size,uploader,created_at FROM attachments WHERE id=?`, id).
-		Scan(&m.ID, &m.Name, &m.MIME, &m.Size, &m.Uploader, &created)
-	if err != nil {
-		return m, false
-	}
-	m.CreatedAt = created
-	return m, true
-}
-
-// PruneAttachmentsBefore 删除截止时间前的附件行，返回被删 id（文件删除由 attach 层完成）。
-func (db *DB) PruneAttachmentsBefore(cutoff time.Time) ([]string, error) {
-	rows, err := db.Query(`SELECT id FROM attachments WHERE created_at < ?`, cutoff.UTC().Format("2006-01-02 15:04:05"))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	for _, id := range ids {
-		if _, err := db.Exec(`DELETE FROM attachments WHERE id=?`, id); err != nil {
-			return ids, err // 已收集的照常返回，文件层尽力删
-		}
-	}
-	return ids, nil
 }
 
 func (db *DB) pruneBefore(table string, cutoff time.Time) (int64, error) {
@@ -856,6 +528,8 @@ func (db *DB) pruneBefore(table string, cutoff time.Time) (int64, error) {
 	}
 	return res.RowsAffected()
 }
+
+// ---- 系统统计 ----
 
 // SystemStats 系统信息。
 type SystemStats struct {
@@ -868,280 +542,11 @@ type SystemStats struct {
 	StartedAt    string `json:"startedAt"`
 }
 
-// Stats 汇总系统统计。
+// Stats 汇总系统统计。文件统计（FileCount/StorageUsed）由调用方以统一 home 磁盘
+// 遍历（fs.DiskStats）填入——files 表已弃用不读写（VFS 关闭的裁剪部署该两项为 0）。
 func (db *DB) Stats(startedAt time.Time) SystemStats {
 	s := SystemStats{Version: Version, StartedAt: startedAt.Format(time.RFC3339), QuotaPerUser: StorageQuota}
 	db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&s.UserCount)
 	db.QueryRow(`SELECT COUNT(*) FROM apps`).Scan(&s.AppCount)
-	db.QueryRow(`SELECT COUNT(*) FROM files WHERE is_dir=0`).Scan(&s.FileCount)
-	db.QueryRow(`SELECT COALESCE(SUM(LENGTH(content)),0) FROM files`).Scan(&s.StorageUsed)
 	return s
-}
-
-// ---- 应用注册表 ----
-
-// ListApps 返回全部已注册应用。
-func (db *DB) ListApps() ([]AppDef, error) {
-	rows, err := db.Query(`SELECT id,name,icon,category,builtin,locked,hidden,config,version,source,width,height FROM apps ORDER BY builtin DESC, category, id`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []AppDef{} // 恒返回数组（空授权角色的前端按数组消费，null 会崩）
-	for rows.Next() {
-		var a AppDef
-		var cfg string
-		var locked, hidden int
-		if err := rows.Scan(&a.ID, &a.Name, &a.Icon, &a.Category, &a.Builtin, &locked, &hidden, &cfg, &a.Version, &a.Source, &a.Width, &a.Height); err != nil {
-			return nil, err
-		}
-		a.Locked = locked != 0
-		a.Hidden = hidden != 0
-		if cfg != "" {
-			a.Config = json.RawMessage(cfg)
-		}
-		out = append(out, a)
-	}
-	return out, rows.Err()
-}
-
-// ListAppsForRole 返回某角色可访问的应用。
-func (db *DB) ListAppsForRole(role string) ([]AppDef, error) {
-	rows, err := db.Query(`SELECT a.id,a.name,a.icon,a.category,a.builtin,a.locked,a.hidden,a.config,a.version,a.source,a.width,a.height
-		FROM apps a JOIN role_apps r ON r.app_id=a.id WHERE r.role=? ORDER BY a.builtin DESC, a.category, a.id`, role)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []AppDef{}
-	for rows.Next() {
-		var a AppDef
-		var cfg string
-		var locked, hidden int
-		if err := rows.Scan(&a.ID, &a.Name, &a.Icon, &a.Category, &a.Builtin, &locked, &hidden, &cfg, &a.Version, &a.Source, &a.Width, &a.Height); err != nil {
-			return nil, err
-		}
-		a.Locked = locked != 0
-		a.Hidden = hidden != 0
-		if cfg != "" {
-			a.Config = json.RawMessage(cfg)
-		}
-		out = append(out, a)
-	}
-	return out, rows.Err()
-}
-
-// AppByID 按 ID 查询单个应用（应用代理路由逐请求加载配置）。
-func (db *DB) AppByID(id string) (AppDef, bool) {
-	var a AppDef
-	var cfg string
-	var locked, hidden int
-	err := db.QueryRow(`SELECT id,name,icon,category,builtin,locked,hidden,config,version,source,width,height FROM apps WHERE id=?`, id).
-		Scan(&a.ID, &a.Name, &a.Icon, &a.Category, &a.Builtin, &locked, &hidden, &cfg, &a.Version, &a.Source, &a.Width, &a.Height)
-	if err != nil {
-		return a, false
-	}
-	a.Locked = locked != 0
-	a.Hidden = hidden != 0
-	if cfg != "" {
-		a.Config = json.RawMessage(cfg)
-	}
-	return a, true
-}
-
-// RoleCanAccessApp 角色是否被授权访问某应用（与 ListAppsForRole 同一张 role_apps）。
-func (db *DB) RoleCanAccessApp(role, appID string) bool {
-	var n int
-	if err := db.QueryRow(`SELECT 1 FROM role_apps WHERE role=? AND app_id=?`, role, appID).Scan(&n); err != nil {
-		return false
-	}
-	return true
-}
-
-// UpsertApp 注册或更新第三方应用。
-func (db *DB) UpsertApp(a AppDef) error {
-	cfg := ""
-	if len(a.Config) > 0 {
-		cfg = string(a.Config)
-		// 客户端曾以 JSON.stringify 提交（config 字段是带引号的 JSON 字符串），
-		// 落库前剥一层编码，保证库内统一为裸 JSON 文本
-		var inner string
-		if a.Config[0] == '"' && json.Unmarshal(a.Config, &inner) == nil {
-			cfg = inner
-		}
-	}
-	if a.Width <= 0 {
-		a.Width = 800
-	}
-	if a.Height <= 0 {
-		a.Height = 560
-	}
-	_, err := db.Exec(`INSERT INTO apps(id,name,icon,category,builtin,locked,hidden,config,version,source,width,height) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(id) DO UPDATE SET name=excluded.name, icon=excluded.icon, category=excluded.category,
-		hidden=excluded.hidden, config=excluded.config, width=excluded.width, height=excluded.height,
-		version=CASE WHEN excluded.version<>'' THEN excluded.version ELSE apps.version END,
-		source=CASE WHEN excluded.source<>'' THEN excluded.source ELSE apps.source END,
-		locked=MAX(apps.locked, excluded.locked)`,
-		a.ID, a.Name, a.Icon, a.Category, boolInt(a.Builtin), boolInt(a.Locked), boolInt(a.Hidden), cfg, a.Version, a.Source, a.Width, a.Height)
-	return err
-}
-
-// DeleteApp 删除应用及其授权。内置（builtin）与宿主锁定（locked）应用不可删；
-// 仅当应用行确实被删除时才回收授权，避免受保护应用的 role_apps 被误清空。
-func (db *DB) DeleteApp(id string) error {
-	return db.deleteApp(id, false)
-}
-
-// DeleteAppForced 宿主服务专用（交换密钥调用）：允许删除宿主锁定（locked）应用
-// ——宿主清退自己注册的应用属正当管理操作；内置（builtin）应用仍不可删。
-func (db *DB) DeleteAppForced(id string) error {
-	return db.deleteApp(id, true)
-}
-
-func (db *DB) deleteApp(id string, allowLocked bool) error {
-	sql := `DELETE FROM apps WHERE id=? AND builtin=0 AND locked=0`
-	if allowLocked {
-		sql = `DELETE FROM apps WHERE id=? AND builtin=0`
-	}
-	res, err := db.Exec(sql, id)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrAppProtected
-	}
-	_, err = db.Exec(`DELETE FROM role_apps WHERE app_id=?`, id)
-	return err
-}
-
-// ErrAppProtected 删除目标为内置或宿主锁定的受保护应用。
-var ErrAppProtected = errors.New("app is builtin or locked")
-
-// RoleAccessMap 返回全部角色 → 应用授权矩阵。
-func (db *DB) RoleAccessMap() (map[string][]string, error) {
-	rows, err := db.Query(`SELECT role, app_id FROM role_apps`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	m := map[string][]string{}
-	for rows.Next() {
-		var r, id string
-		if err := rows.Scan(&r, &id); err != nil {
-			return nil, err
-		}
-		m[r] = append(m[r], id)
-	}
-	return m, rows.Err()
-}
-
-// SetRoleApps 覆盖某角色的应用授权。
-func (db *DB) SetRoleApps(role string, ids []string) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM role_apps WHERE role=?`, role); err != nil {
-		return err
-	}
-	for _, id := range ids {
-		if _, err := tx.Exec(`INSERT OR IGNORE INTO role_apps(role,app_id) VALUES(?,?)`, role, id); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
-}
-
-// SetAppRoles 覆盖某应用被授权的角色集合（应用商店安装用：安装时一次性选定角色，
-// 与按角色覆盖的 SetRoleApps 互为转置，不动其他应用的授权）。
-func (db *DB) SetAppRoles(appID string, roles []string) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM role_apps WHERE app_id=?`, appID); err != nil {
-		return err
-	}
-	for _, r := range roles {
-		if _, err := tx.Exec(`INSERT OR IGNORE INTO role_apps(role,app_id) VALUES(?,?)`, r, appID); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
-}
-
-// ListRoles 返回系统中出现过的全部角色（用户表与授权矩阵的并集，含宿主应用注入的自定义角色）。
-// 外部身份模式下 user/guest 是宿主机制角色，不进清单（见 DB.externalIdentity）。
-func (db *DB) ListRoles() ([]string, error) {
-	rows, err := db.Query(`SELECT role FROM users UNION SELECT role FROM role_apps`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	seen := map[string]bool{}
-	// 三基础角色恒占 seen（可能尚无用户/授权记录，也防 UNION 同名重复）；
-	// 外部身份模式下 user/guest 是宿主机制角色，只占位不进清单
-	seen["admin"], seen["user"], seen["guest"] = true, true, true
-	out := []string{"admin"}
-	if !db.externalIdentity {
-		out = append(out, "user", "guest")
-	}
-	for rows.Next() {
-		var r string
-		if err := rows.Scan(&r); err != nil {
-			return nil, err
-		}
-		if r != "" && !seen[r] {
-			seen[r] = true
-			out = append(out, r)
-		}
-	}
-	return out, rows.Err()
-}
-
-// roleLabelsKV 角色显示名在 system_kv 中的存储键（宿主注入，见 RoleLabels）。
-const roleLabelsKV = "role_labels"
-
-// RoleLabels 读取角色显示名映射（宿主注入：键为角色 key，值为展示名，如
-// boss → 老板/业主）。未注入或数据损坏时返回空映射，调用方回落内置文案。
-func (db *DB) RoleLabels() map[string]string {
-	raw, err := db.GetSystemKV(roleLabelsKV)
-	if raw == "" || err != nil {
-		return map[string]string{}
-	}
-	var m map[string]string
-	if json.Unmarshal([]byte(raw), &m) != nil {
-		return map[string]string{}
-	}
-	return m
-}
-
-// SetRoleLabels 全量覆盖角色显示名（传空映射即清除）。
-func (db *DB) SetRoleLabels(m map[string]string) error {
-	b, err := json.Marshal(m)
-	if err != nil {
-		return err
-	}
-	return db.SetSystemKV(roleLabelsKV, string(b))
-}
-
-// ---- 用户设置 ----
-
-// GetUserSetting 读取用户级设置，不存在返回空串。
-func (db *DB) GetUserSetting(username, key string) (string, error) {
-	var v string
-	err := db.QueryRow(`SELECT value FROM user_settings WHERE username=? AND key=?`, username, key).Scan(&v)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	return v, err
-}
-
-// SetUserSetting 写入用户级设置。
-func (db *DB) SetUserSetting(username, key, value string) error {
-	_, err := db.Exec(`INSERT INTO user_settings(username,key,value) VALUES(?,?,?)
-		ON CONFLICT(username,key) DO UPDATE SET value=excluded.value`, username, key, value)
-	return err
 }

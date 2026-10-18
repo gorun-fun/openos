@@ -122,7 +122,13 @@ func (s *Store) Save(uploader string, r *http.Request) (Meta, error) {
 		return Meta{}, err
 	}
 
-	// 单次流式读：前 512B 嗅探 mime，边写边计大小，超限即中止清理
+	// 单次流式读：前 512B 嗅探 mime，边写边计大小，超限即中止清理。
+	// fail 收敛「关文件 + 删临时文件 + 返回错」五处清理路径（漏一处即留 .tmp 垃圾）。
+	fail := func(err error) (Meta, error) {
+		dst.Close()
+		os.Remove(tmp)
+		return Meta{}, err
+	}
 	var head []byte
 	var size int64
 	buf := make([]byte, 64<<10)
@@ -137,24 +143,18 @@ func (s *Store) Save(uploader string, r *http.Request) (Meta, error) {
 				head = append(head, buf[:take]...)
 			}
 			if _, werr := dst.Write(buf[:n]); werr != nil {
-				dst.Close()
-				os.Remove(tmp)
-				return Meta{}, werr
+				return fail(werr)
 			}
 			size += int64(n)
 			if size > MaxSize {
-				dst.Close()
-				os.Remove(tmp)
-				return Meta{}, fmt.Errorf("文件超过 %dMB 限制", MaxSize>>20)
+				return fail(fmt.Errorf("文件超过 %dMB 限制", MaxSize>>20))
 			}
 		}
 		if rerr == io.EOF {
 			break
 		}
 		if rerr != nil {
-			dst.Close()
-			os.Remove(tmp)
-			return Meta{}, rerr
+			return fail(rerr)
 		}
 	}
 	if err := dst.Close(); err != nil {

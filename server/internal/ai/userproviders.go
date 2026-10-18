@@ -16,6 +16,7 @@ import (
 	"openos/server/internal/auth"
 	"openos/server/internal/goder"
 	"openos/server/internal/store"
+	"openos/server/internal/webres"
 )
 
 // UserProviderInput 宿主声明的单条供应商（uid 以 goder 用户目录名规范入库，
@@ -92,7 +93,7 @@ func (s *Service) SaveUserProviders(w http.ResponseWriter, r *http.Request) {
 	}
 	s.db.Audit(auth.FromContext(r).Username, "ai.user-providers",
 		strings.Join(mapKeys(names), ","), "")
-	writeJSON(w, map[string]any{"ok": "1", "count": len(items)})
+	webres.WriteJSON(w, map[string]any{"ok": "1", "count": len(items)})
 	// 联动钩子：刷新声明名缓存并全量重渲染 goder 用户（main 注入）
 	if s.AfterUserProvidersSave != nil {
 		s.AfterUserProvidersSave()
@@ -118,7 +119,7 @@ func (s *Service) GetUserProviders(w http.ResponseWriter, r *http.Request) {
 			Models: it.Models, Default: it.IsDefault,
 		})
 	}
-	writeJSON(w, map[string]any{"items": out})
+	webres.WriteJSON(w, map[string]any{"items": out})
 }
 
 func mapKeys(m map[string]bool) []string {

@@ -62,6 +62,25 @@ func escapeTarget(db *store.DB, r *http.Request) string {
 	return loc
 }
 
+// parseAppReferrer 解析代理页面 Referer 的紧凑前缀形态 /app/<id>/<scheme>/<host>/…，
+// 只做段切分（scheme 归一为小写），不做 scheme 白名单、id 字符集与应用存在性
+// 校验——各调用方按自身语义附加（serveHook 热路径不查库、回捕 refererOrigin 查库、
+// Referer 还原 rewriteReferer 按已知 id 比对），避免三处手抄切分再分叉。
+// rest 为 host 之后的路径段（无前导 /，无则空串）；非前缀形态 ok=false。
+// 标记形态（__os_px）不在本函数，见 parsePxMark。
+func parseAppReferrer(u *url.URL) (id, scheme, host, rest string, ok bool) {
+	if !strings.HasPrefix(u.Path, "/app/") {
+		return "", "", "", "", false
+	}
+	id, tail, _ := strings.Cut(strings.TrimPrefix(u.Path, "/app/"), "/")
+	if id == "" || tail == "" {
+		return "", "", "", "", false
+	}
+	scheme, hostPath, _ := strings.Cut(tail, "/")
+	host, rest, _ = strings.Cut(hostPath, "/")
+	return id, strings.ToLower(scheme), host, rest, true
+}
+
 // refererTargetHost 从代理页面的 Referer 中解析目标主机（两种形态见 parsePxMark /
 // 紧凑前缀形态），不校验应用存在性（调用方按需自行核实）。
 // serveHook 用它选站点适配器的追加注入片段。
@@ -73,14 +92,7 @@ func refererTargetHost(ref string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	if strings.HasPrefix(u.Path, "/app/") {
-		_, tail, _ := strings.Cut(strings.TrimPrefix(u.Path, "/app/"), "/")
-		scheme, hostPath, ok := strings.Cut(tail, "/")
-		if !ok || tail == "" {
-			return "", false
-		}
-		host, _, _ := strings.Cut(hostPath, "/")
-		scheme = strings.ToLower(scheme)
+	if _, scheme, host, _, ok := parseAppReferrer(u); ok {
 		if (scheme != "http" && scheme != "https") || host == "" {
 			return "", false
 		}
@@ -98,16 +110,9 @@ func refererTargetHost(ref string) (string, bool) {
 // Referer 也无增益：回捕目标仍是本源 /app/ 路由（同受登录态与角色校验），且
 // 请求本可直接发起。
 func refererOrigin(db *store.DB, u *url.URL) (id, scheme, host string, ok bool) {
-	if strings.HasPrefix(u.Path, "/app/") {
-		var tail, hostPath string
-		id, tail, _ = strings.Cut(strings.TrimPrefix(u.Path, "/app/"), "/")
-		if !validAppID(id) || tail == "" {
-			return "", "", "", false
-		}
-		scheme, hostPath, _ = strings.Cut(tail, "/")
-		host, _, _ = strings.Cut(hostPath, "/")
-		scheme = strings.ToLower(scheme)
-		if (scheme != "http" && scheme != "https") || host == "" {
+	if pid, pscheme, phost, _, pok := parseAppReferrer(u); pok {
+		id, scheme, host = pid, pscheme, phost
+		if !validAppID(id) || (scheme != "http" && scheme != "https") || host == "" {
 			return "", "", "", false
 		}
 	} else if id, scheme, host, ok = parsePxMark(u.Query()); !ok {

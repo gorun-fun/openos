@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -26,6 +27,7 @@ import (
 	"openos/server/internal/bus"
 	"openos/server/internal/safeenv"
 	"openos/server/internal/store"
+	"openos/server/internal/webres"
 )
 
 // 单文件上限（上传与写入统一校验）。
@@ -56,16 +58,28 @@ func isTextExt(p string) bool {
 // 前端对 updatedAt 只做字符串展示与字典序排序，字典序与该格式的时间序一致。
 func vtime(t time.Time) string { return t.UTC().Format(sqliteTime) }
 
+// File 虚拟文件系统中的条目（REST 展示结构）。存储已在统一 home 磁盘上，
+// 此 DTO 仅服务 JSON 契约——原住 store 包，VFS 磁盘化后随语义迁入本包。
+type File struct {
+	Path      string `json:"path"`
+	IsDir     bool   `json:"isDir"`
+	IsBinary  bool   `json:"isBinary"`
+	Content   string `json:"content,omitempty"`
+	Size      int    `json:"size"`
+	UpdatedAt string `json:"updatedAt"`
+}
+
 // FS 文件系统服务。
 type FS struct {
 	db  *store.DB
 	hub *bus.Hub
 
 	// 真实终端（受控执行：sh -c，10s 超时，输出截断，工作目录限定个人沙箱）
-	realShell bool
-	realMu    sync.Mutex
-	realCwd   map[string]string
-	homesDir  string
+	realShell     bool
+	realShellFull bool // OPENOS_REAL_SHELL=full：解除目录限制（New 时一次算好，勿在命令路径重读环境变量）
+	realMu        sync.Mutex
+	realCwd       map[string]string
+	homesDir      string
 
 	// disabled：OPENOS_VFS=off 时整体关闭（宿主模式——业务文件交由集成方管理，
 	// OpenOS 只保留演示数据与界面设置）；seedDemo：OPENOS_SEED_DEMO=0 时不种示例文件
@@ -83,8 +97,9 @@ func New(dataDir string, db *store.DB, hub *bus.Hub) *FS {
 	realShell := v == "on" || v == "full"
 	fs := &FS{
 		db: db, hub: hub,
-		realCwd:   map[string]string{},
-		realShell: realShell, homesDir: filepath.Join(dataDir, "homes"),
+		realCwd: map[string]string{},
+		realShell: realShell, realShellFull: v == "full",
+		homesDir: filepath.Join(dataDir, "homes"),
 		disabled: os.Getenv("OPENOS_VFS") == "off",
 		seedDemo: os.Getenv("OPENOS_SEED_DEMO") != "0",
 	}
@@ -231,7 +246,8 @@ func (f *FS) rowBudget(user string) bool {
 	return files < maxFileRows
 }
 
-// DiskStats 系统统计：全部用户 home 的文件总数与字节总量（管理端 /api/stats 用）。
+// DiskStats 系统统计：全部用户 home 的文件总数与字节总量（管理端 /api/stats 用，
+// 与配额同源的 duOf 口径——同一遍历实现，避免统计与配额两套算法漂移）。
 func (f *FS) DiskStats() (int, int64) {
 	users, err := os.ReadDir(f.homesDir)
 	if err != nil {
@@ -243,26 +259,11 @@ func (f *FS) DiskStats() (int, int64) {
 		if !u.IsDir() {
 			continue
 		}
-		du(func(p string, d fs.DirEntry) {
-			if d.IsDir() {
-				return
-			}
-			files++
-			if info, e := d.Info(); e == nil {
-				size += info.Size()
-			}
-		}, filepath.Join(f.homesDir, u.Name()))
+		s, n := f.duOf(u.Name())
+		files += n
+		size += s
 	}
 	return files, size
-}
-
-func du(fn func(string, fs.DirEntry), root string) {
-	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err == nil {
-			fn(p, d)
-		}
-		return nil
-	})
 }
 
 // ---- 存量迁移（SQLite files 表 → 磁盘 home，一次性） ----
@@ -388,7 +389,7 @@ func (f *FS) SaveToDocs(user, name string, data []byte) (string, error) {
 	}
 
 	if f.quotaUsed(user)+int64(len(data)) > store.StorageQuota {
-		return "", fmt.Errorf("个人空间已满（配额 %dMB），请清理后重试", store.StorageQuota>>20)
+		return "", errors.New(quotaFullMsg())
 	}
 	real, err := f.resolveReal(user, target)
 	if err != nil {
@@ -478,7 +479,7 @@ func (f *FS) List(w http.ResponseWriter, r *http.Request) {
 	}
 	if p == "/" {
 		// 虚拟根只含 /home 占位（旧 SQLite 行为保持；/home 本身不可进入）
-		writeJSON(w, []store.File{{Path: "/home", IsDir: true, Size: 0, UpdatedAt: ""}})
+		webres.WriteJSON(w, []File{{Path: "/home", IsDir: true, Size: 0, UpdatedAt: ""}})
 		return
 	}
 	real, err := f.resolveReal(user, p)
@@ -495,7 +496,7 @@ func (f *FS) List(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	out := []store.File{}
+	out := []File{}
 	for _, e := range entries {
 		var size int
 		updated := ""
@@ -503,7 +504,7 @@ func (f *FS) List(w http.ResponseWriter, r *http.Request) {
 			size = int(info.Size())
 			updated = vtime(info.ModTime())
 		}
-		out = append(out, store.File{
+		out = append(out, File{
 			Path:      path.Join(p, e.Name()),
 			IsDir:     e.IsDir(),
 			IsBinary:  !e.IsDir() && !isTextExt(e.Name()),
@@ -517,7 +518,7 @@ func (f *FS) List(w http.ResponseWriter, r *http.Request) {
 		}
 		return out[i].Path < out[j].Path
 	})
-	writeJSON(w, out)
+	webres.WriteJSON(w, out)
 }
 
 // Read GET /api/fs/read?path=
@@ -546,7 +547,7 @@ func (f *FS) Read(w http.ResponseWriter, r *http.Request) {
 	if !isTextExt(p) {
 		content = base64.StdEncoding.EncodeToString(data)
 	}
-	writeJSON(w, map[string]any{"path": p, "content": content, "isBinary": !isTextExt(p)})
+	webres.WriteJSON(w, map[string]any{"path": p, "content": content, "isBinary": !isTextExt(p)})
 }
 
 // Raw GET /api/fs/raw?path= 返回文件原始字节（下载 / 图片 / PDF 预览）。
@@ -577,7 +578,7 @@ func (f *FS) Raw(w http.ResponseWriter, r *http.Request) {
 // Usage GET /api/fs/usage 个人空间用量。
 func (f *FS) Usage(w http.ResponseWriter, r *http.Request) {
 	user := auth.FromContext(r).Username
-	writeJSON(w, map[string]any{"used": f.quotaUsed(user), "quota": store.StorageQuota})
+	webres.WriteJSON(w, map[string]any{"used": f.quotaUsed(user), "quota": store.StorageQuota})
 }
 
 // Upload POST /api/fs/upload（multipart：dir + 一个或多个 file）
@@ -619,7 +620,7 @@ func (f *FS) Upload(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if used+int64(len(data)) > store.StorageQuota {
-			http.Error(w, "个人空间已满（配额 100MB），请清理后重试", 400)
+			http.Error(w, quotaFullMsg(), 400)
 			return
 		}
 		used += int64(len(data))
@@ -637,7 +638,7 @@ func (f *FS) Upload(w http.ResponseWriter, r *http.Request) {
 		f.db.Audit(user, "fs.upload", cp, "")
 		f.hub.PublishTo(user, "fs:changed", map[string]any{"path": cp, "kind": "upload"})
 	}
-	writeJSON(w, map[string]any{"ok": "1", "saved": saved})
+	webres.WriteJSON(w, map[string]any{"ok": "1", "saved": saved})
 }
 
 // Write PUT /api/fs/write {path, content}
@@ -664,7 +665,7 @@ func (f *FS) Write(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if f.quotaUsed(user)-oldLen+int64(len(req.Content)) > store.StorageQuota {
-		http.Error(w, "个人空间已满（配额 100MB）", 400)
+		http.Error(w, quotaFullMsg(), 400)
 		return
 	}
 	real, err := f.resolveReal(user, p)
@@ -682,14 +683,17 @@ func (f *FS) Write(w http.ResponseWriter, r *http.Request) {
 	}
 	f.db.Audit(user, "fs.write", p, "")
 	f.hub.PublishTo(user, "fs:changed", map[string]any{"path": p, "kind": "write"})
-	writeJSON(w, ok())
+	webres.WriteJSON(w, ok())
 }
 
 // Mkdir POST /api/fs/mkdir {path}
 func (f *FS) Mkdir(w http.ResponseWriter, r *http.Request) {
 	user := auth.FromContext(r).Username
 	var req struct{ Path string }
-	jsonDecode(r, &req)
+	if err := jsonDecode(r, &req); err != nil {
+		http.Error(w, "参数错误", 400)
+		return
+	}
 	p, err := clean(user, req.Path)
 	if err != nil {
 		http.Error(w, err.Error(), 403)
@@ -706,7 +710,7 @@ func (f *FS) Mkdir(w http.ResponseWriter, r *http.Request) {
 	}
 	if st, err := os.Lstat(real); err == nil {
 		if st.IsDir() {
-			writeJSON(w, ok()) // 幂等：已存在目录视为成功
+			webres.WriteJSON(w, ok()) // 幂等：已存在目录视为成功
 			return
 		}
 		http.Error(w, "同名文件已存在", 400)
@@ -718,14 +722,17 @@ func (f *FS) Mkdir(w http.ResponseWriter, r *http.Request) {
 	}
 	f.db.Audit(user, "fs.mkdir", p, "")
 	f.hub.PublishTo(user, "fs:changed", map[string]any{"path": p, "kind": "mkdir"})
-	writeJSON(w, ok())
+	webres.WriteJSON(w, ok())
 }
 
 // Touch POST /api/fs/touch {path}
 func (f *FS) Touch(w http.ResponseWriter, r *http.Request) {
 	user := auth.FromContext(r).Username
 	var req struct{ Path, Content string }
-	jsonDecode(r, &req)
+	if err := jsonDecode(r, &req); err != nil {
+		http.Error(w, "参数错误", 400)
+		return
+	}
 	p, err := clean(user, req.Path)
 	if err != nil {
 		http.Error(w, err.Error(), 403)
@@ -744,11 +751,11 @@ func (f *FS) Touch(w http.ResponseWriter, r *http.Request) {
 	if _, err := os.Lstat(real); err == nil {
 		f.db.Audit(user, "fs.touch", p, "")
 		f.hub.PublishTo(user, "fs:changed", map[string]any{"path": p, "kind": "create"})
-		writeJSON(w, ok())
+		webres.WriteJSON(w, ok())
 		return
 	}
 	if f.quotaUsed(user)+int64(len(req.Content)) > store.StorageQuota {
-		http.Error(w, "个人空间已满（配额 100MB）", 400)
+		http.Error(w, quotaFullMsg(), 400)
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(real), 0o755); err != nil {
@@ -761,7 +768,7 @@ func (f *FS) Touch(w http.ResponseWriter, r *http.Request) {
 	}
 	f.db.Audit(user, "fs.touch", p, "")
 	f.hub.PublishTo(user, "fs:changed", map[string]any{"path": p, "kind": "create"})
-	writeJSON(w, ok())
+	webres.WriteJSON(w, ok())
 }
 
 // Remove DELETE /api/fs/remove?path= （递归）
@@ -783,14 +790,17 @@ func (f *FS) Remove(w http.ResponseWriter, r *http.Request) {
 	}
 	f.db.Audit(user, "fs.remove", p, "")
 	f.hub.PublishTo(user, "fs:changed", map[string]any{"path": p, "kind": "remove"})
-	writeJSON(w, ok())
+	webres.WriteJSON(w, ok())
 }
 
 // Rename POST /api/fs/rename {from,to}
 func (f *FS) Rename(w http.ResponseWriter, r *http.Request) {
 	user := auth.FromContext(r).Username
 	var req struct{ From, To string }
-	jsonDecode(r, &req)
+	if err := jsonDecode(r, &req); err != nil {
+		http.Error(w, "参数错误", 400)
+		return
+	}
 	from, err1 := clean(user, req.From)
 	to, err2 := clean(user, req.To)
 	if err1 != nil || err2 != nil {
@@ -821,7 +831,7 @@ func (f *FS) Rename(w http.ResponseWriter, r *http.Request) {
 	}
 	f.db.Audit(user, "fs.rename", from+" → "+to, "")
 	f.hub.PublishTo(user, "fs:changed", map[string]any{"path": to, "kind": "rename"})
-	writeJSON(w, ok())
+	webres.WriteJSON(w, ok())
 }
 
 // Search GET /api/fs/search?q=&limit= 按名称子串递归搜索用户全部文件（聚焦搜索用）。
@@ -836,12 +846,12 @@ func (f *FS) Search(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if q == "" {
-		writeJSON(w, []store.File{})
+		webres.WriteJSON(w, []File{})
 		return
 	}
 	lq := strings.ToLower(q)
 	type hit struct {
-		f    store.File
+		f    File
 		rank int
 	}
 	hits := []hit{}
@@ -866,7 +876,7 @@ func (f *FS) Search(w http.ResponseWriter, r *http.Request) {
 			size = int(info.Size())
 			updated = vtime(info.ModTime())
 		}
-		e := store.File{
+		e := File{
 			Path:      homeOf(user) + filepath.ToSlash(strings.TrimPrefix(p, f.realHome(user))),
 			IsDir:     d.IsDir(),
 			IsBinary:  !d.IsDir() && !isTextExt(name),
@@ -895,21 +905,24 @@ func (f *FS) Search(w http.ResponseWriter, r *http.Request) {
 		}
 		return hits[i].f.Path < hits[j].f.Path
 	})
-	out := []store.File{}
+	out := []File{}
 	for _, h := range hits {
 		out = append(out, h.f)
 		if len(out) >= limit {
 			break
 		}
 	}
-	writeJSON(w, out)
+	webres.WriteJSON(w, out)
 }
 
 // Copy POST /api/fs/copy {from,to} 复制文件或目录（含子树）；目标已存在时返回 409。
 func (f *FS) Copy(w http.ResponseWriter, r *http.Request) {
 	user := auth.FromContext(r).Username
 	var req struct{ From, To string }
-	jsonDecode(r, &req)
+	if err := jsonDecode(r, &req); err != nil {
+		http.Error(w, "参数错误", 400)
+		return
+	}
 	from, err1 := clean(user, req.From)
 	to, err2 := clean(user, req.To)
 	if err1 != nil || err2 != nil || from == to {
@@ -945,7 +958,7 @@ func (f *FS) Copy(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if f.quotaUsed(user)+total > store.StorageQuota {
-		http.Error(w, "个人空间不足（配额 100MB）", 400)
+		http.Error(w, quotaFullMsg(), 400)
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
@@ -957,7 +970,7 @@ func (f *FS) Copy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.hub.PublishTo(user, "fs:changed", map[string]any{"path": to, "kind": "copy"})
-	writeJSON(w, ok())
+	webres.WriteJSON(w, ok())
 }
 
 // copyTree 递归复制文件/目录（符号链接条目直接跳过——复制链接目标有越界风险）。
@@ -1021,6 +1034,35 @@ func (f *FS) ensureRealHome(user string) string {
 	return home
 }
 
+// realCD 解析 cd 单命令的目标目录并做沙箱校验：成功返回新 cwd，不允许时返回
+// 错误文案（cwd 原样退回）。与 resolveReal 的边界校验是两套独立实现，不合并：
+// cd 面向 shell 会话语义（符号链接解析后按前缀校验），resolveReal 面向 REST
+// 读写（最深存在父链逐级解析），两者的失败语义与调用时机都不同。
+func (f *FS) realCD(home, cwd, arg string) (string, string) {
+	var target string
+	switch {
+	case arg == "" || arg == "~":
+		target = home
+	case strings.HasPrefix(arg, "~/"):
+		target = filepath.Join(home, strings.TrimPrefix(arg, "~/"))
+	case filepath.IsAbs(arg):
+		target = filepath.Clean(arg)
+	default:
+		target = filepath.Join(cwd, arg)
+	}
+	// 解析符号链接后校验仍在沙箱内
+	if resolved, err := filepath.EvalSymlinks(target); err == nil {
+		target = resolved
+	}
+	if !strings.HasPrefix(target, home) {
+		return cwd, "cd: 受限模式仅允许在个人沙箱内移动：~（OPENOS_REAL_SHELL=full 可解除）"
+	}
+	if st, err := os.Stat(target); err != nil || !st.IsDir() {
+		return cwd, "cd: 目录不存在: " + target
+	}
+	return target, ""
+}
+
 func (f *FS) execReal(user, line string, reply func(string, any)) {
 	if !f.realShell {
 		reply("term:"+user+":out", map[string]any{"cwd": "", "text": "真实终端未启用（OPENOS_REAL_SHELL=on 受限沙箱 / =full 解除目录限制）"})
@@ -1033,8 +1075,6 @@ func (f *FS) execReal(user, line string, reply func(string, any)) {
 	if cwd == "" || !strings.HasPrefix(cwd, home) {
 		cwd = home
 	}
-	homeName := "~"
-
 	line = strings.TrimSpace(line)
 	if line == "" {
 		reply("term:"+user+":out", map[string]any{"cwd": cwd, "home": home, "text": ""})
@@ -1047,27 +1087,9 @@ func (f *FS) execReal(user, line string, reply func(string, any)) {
 	// cd 单命令：服务端跟踪工作目录（受限在个人沙箱内）
 	if strings.HasPrefix(line, "cd ") || line == "cd" {
 		arg := strings.TrimSpace(strings.TrimPrefix(line, "cd"))
-		var target string
-		switch {
-		case arg == "" || arg == "~":
-			target = home
-		case strings.HasPrefix(arg, "~/"):
-			target = filepath.Join(home, strings.TrimPrefix(arg, "~/"))
-		case filepath.IsAbs(arg):
-			target = filepath.Clean(arg)
-		default:
-			target = filepath.Join(cwd, arg)
-		}
-		// 解析符号链接后校验仍在沙箱内
-		if resolved, err := filepath.EvalSymlinks(target); err == nil {
-			target = resolved
-		}
-		if !strings.HasPrefix(target, home) {
-			reply("term:"+user+":out", map[string]any{"cwd": cwd, "home": home, "text": "cd: 受限模式仅允许在个人沙箱内移动：" + homeName + "（OPENOS_REAL_SHELL=full 可解除）"})
-			return
-		}
-		if st, err := os.Stat(target); err != nil || !st.IsDir() {
-			reply("term:"+user+":out", map[string]any{"cwd": cwd, "home": home, "text": "cd: 目录不存在: " + target})
+		target, errText := f.realCD(home, cwd, arg)
+		if errText != "" {
+			reply("term:"+user+":out", map[string]any{"cwd": cwd, "home": home, "text": errText})
 			return
 		}
 		f.realMu.Lock()
@@ -1078,7 +1100,7 @@ func (f *FS) execReal(user, line string, reply func(string, any)) {
 	}
 
 	// 沙箱护栏：工作目录不在沙箱时拉回（full 模式除外）
-	full := os.Getenv("OPENOS_REAL_SHELL") == "full"
+	full := f.realShellFull
 	if !full && !strings.HasPrefix(cwd, home) {
 		cwd = home
 	}
@@ -1145,14 +1167,14 @@ func (l *limitedBuf) String() string {
 	return l.b.String()
 }
 
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	json.NewEncoder(w).Encode(v)
-}
-
 func jsonDecode(r *http.Request, v any) error {
 	defer r.Body.Close()
 	return json.NewDecoder(r.Body).Decode(v)
 }
 
 func ok() map[string]string { return map[string]string{"ok": "1"} }
+
+// quotaFullMsg 配额超限的统一提示（动态跟随 StorageQuota 常量，改配额勿手抄文案）。
+func quotaFullMsg() string {
+	return fmt.Sprintf("个人空间已满（配额 %dMB），请清理后重试", store.StorageQuota>>20)
+}

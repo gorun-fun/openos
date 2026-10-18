@@ -43,8 +43,8 @@ func pubAllowed(user, topic string) bool {
 	case "fs:changed", "agent:resp":
 		return true
 	}
-	base := strings.TrimSuffix(topic, "*")
-	if ownsTopic(user, base, "term:") || ownsTopic(user, base, "user:") {
+	// topic 走到这里必不含 "*"（上方已拒绝通配），直接按原串判自有主题
+	if ownsTopic(user, topic, "term:") || ownsTopic(user, topic, "user:") {
 		return true
 	}
 	// 其余（sys:cmd / sys:agent / sys:apps-changed / sys:presence / 他人 term:* 等）

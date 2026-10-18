@@ -80,7 +80,8 @@ func sanitizeOutRequest(out, orig *http.Request, id string, cfg *proxyConfig, tu
 }
 
 // rewriteReferer 把代理页面的 Referer 还原为目标站自身的绝对地址，两种形态：
-//  1. 路径携带代理前缀：/app/<id>/<scheme>/<host>/…
+//  1. 路径携带代理前缀：/app/<id>/<scheme>/<host>/…（前缀段切分见 parseAppReferrer，
+//     完整目标重建走 decodeTarget）
 //  2. hook 还原模式（SPA 客户端路由）：查询串携带 __os_px=<id>~<scheme>~<host>
 //     标记（见 parsePxMark），pathname 即目标站路径
 //
@@ -90,8 +91,8 @@ func rewriteReferer(ref, id string) string {
 	if err != nil {
 		return ""
 	}
-	if strings.HasPrefix(u.Path, "/app/"+id+"/") {
-		tu, err := decodeTarget(strings.TrimPrefix(u.Path, "/app/"+id+"/"))
+	if pid, scheme, host, rest, pok := parseAppReferrer(u); pok && pid == id {
+		tu, err := decodeTarget(scheme + "/" + host + "/" + rest)
 		if err != nil {
 			return ""
 		}

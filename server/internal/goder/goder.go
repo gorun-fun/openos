@@ -55,11 +55,11 @@ type Manager struct {
 
 	proxy *httputil.ReverseProxy
 
-	// AI 联动（见 aisync.go）：配置来源回调 + 逐用户写盘指纹 + 最近同步计数
-	aiSource      func() (ProviderConfig, bool)
-	aiMu          sync.Mutex
-	aiMarks       map[string]aiMark
-	aiSyncedUsers int
+	// AI 联动（见 aisync.go）。锁归属单一：本组全部字段只由 aiMu 保护
+	//（历史上曾横跨 mu/aiMu 两把锁，读者无从判断该用哪把，已统一收敛）；
+	// mu 只管子进程生命周期（cmd/started/ready）。
+	aiMu    sync.Mutex
+	aiMarks map[string]aiMark
 	// AI 代理（安全审计 2026-10）：非空时托管供应商写「代理地址 + 每用户代理密钥」
 	// 而非直连平台 Key——平台 Key 不再落任何 goder 用户家目录
 	aiProxyBase string
@@ -67,8 +67,10 @@ type Manager struct {
 	// providerDB / managedNames：宿主声明的每用户供应商（见 aisync.go）。
 	// managedNames 为名字全集常驻缓存（Replace 后经 RefreshManagedNames 失效）；
 	// nil = 未接库（仅平台托管条目）。
-	providerDB   *store.DB
-	managedNames []string
+	providerDB    *store.DB
+	managedNames  []string
+	aiSource      func() (ProviderConfig, bool)
+	aiSyncedUsers int
 }
 
 // New 创建管理器；二进制不存在时 available=false（前端显示引导）。
@@ -147,13 +149,13 @@ func (m *Manager) launch() {
 	// webhook GRF_TURN_WEBHOOK_URL/_SECRET）经 GhEnvOverrides 单独收集，
 	// 不进共享白名单（真实终端子进程不应看到）。
 	overrides := append([]string{
-		"ADDR="+m.addr,
-		"GODER_DATA="+filepath.Join(goderData, "serve-data"),
-		"GODER_STATIC_DIR="+static,
+		"ADDR=" + m.addr,
+		"GODER_DATA=" + filepath.Join(goderData, "serve-data"),
+		"GODER_STATIC_DIR=" + static,
 		"GODER_IDENTITY=header",
 		"GODER_CORS=0",          // 同源反代，无需 CORS
 		"GODER_SETTINGS_SEED=1", // 新用户种子宿主 ~/.grf 模型配置，开箱即用
-		"GODER_BIN="+m.ghBin,
+		"GODER_BIN=" + m.ghBin,
 		"GODER_ACCESS_LOG=0",
 	}, safeenv.GhEnvOverrides()...)
 	// goder-serve 网关自身的可调项（存在才透传）：空闲回收 TTL、进程生命
@@ -221,6 +223,24 @@ func (m *Manager) Ready() bool {
 	return m.ready
 }
 
+// ensureReady 惰性拉起并等待 goder-serve 就绪（ProxyHandler 首请求与
+// hosttasks 的 ready 共用同一份等待循环）：未运行则 Start 并以 150ms 轮询，
+// 至多等 wait；disabled 或二进制缺失时直接 false，不开等待循环。
+func (m *Manager) ensureReady(wait time.Duration) bool {
+	if m.disabled || !m.Available() {
+		return false
+	}
+	if m.Ready() {
+		return true
+	}
+	m.Start()
+	deadline := time.Now().Add(wait)
+	for !m.Ready() && time.Now().Before(deadline) {
+		time.Sleep(150 * time.Millisecond)
+	}
+	return m.Ready()
+}
+
 // Status 状态汇总（前端引导用）。
 func (m *Manager) Status() map[string]any {
 	return map[string]any{
@@ -270,25 +290,16 @@ func (m *Manager) ProxyHandler(identity func(r *http.Request) (uid, name string,
 		http.Error(w, `{"error":"goder 服务不可达（可能正在启动）"}`, http.StatusBadGateway)
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !m.Ready() {
-			// 惰性拉起：首个请求到达时若未运行则启动（等待至多 5s）
-			m.Start()
-			deadline := time.Now().Add(5 * time.Second)
-			for !m.Ready() && time.Now().Before(deadline) {
-				time.Sleep(150 * time.Millisecond)
-			}
-			if !m.Ready() {
-				http.Error(w, `{"error":"goder 服务未就绪，请稍后重试或检查部署"}`, http.StatusServiceUnavailable)
-				return
-			}
+		// 惰性拉起：首个请求到达时若未运行则启动（等待至多 5s）
+		if !m.ensureReady(5 * time.Second) {
+			http.Error(w, `{"error":"goder 服务未就绪，请稍后重试或检查部署"}`, http.StatusServiceUnavailable)
+			return
 		}
-		uid, name, ok := identity(r)
-		if !ok {
+		// identity 在此仅做 401 判定（身份头由 Director 里的 identity 注入）
+		if _, _, ok := identity(r); !ok {
 			http.Error(w, `{"error":"未认证"}`, http.StatusUnauthorized)
 			return
 		}
-		_ = uid
-		_ = name
 		rp.ServeHTTP(w, r)
 	})
 }

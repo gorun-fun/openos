@@ -1,4 +1,5 @@
-// aiproviders.go — 宿主声明的每用户 AI 供应商（goder 联动，v0.0.42）。
+// aiproviders.go — AI 配置：系统级单例行（系统设置 → AI 服务）与宿主声明的
+// 每用户 AI 供应商（goder 联动，v0.0.42）。
 //
 // 业务宿主（grf-os / grf-hotel 等）经 PUT /api/ai/user-providers 以服务身份
 // 声明式全量写入：每个用户可有一条或多条外部模型供应商（如 token-hub 套餐
@@ -103,4 +104,35 @@ func (db *DB) CountAIUserProviders() int {
 	var n int
 	db.QueryRow(`SELECT COUNT(*) FROM ai_user_providers`).Scan(&n)
 	return n
+}
+
+// ---- 系统级 AI 配置（单例行，系统设置 → AI 服务） ----
+
+// AIConfig AI 服务配置（单例行）。
+type AIConfig struct {
+	BaseURL string `json:"baseUrl"`
+	APIKey  string `json:"apiKey"`
+	Model   string `json:"model"`
+}
+
+// GetAIConfig 读取 AI 配置；空配置返回 ok=false。
+func (db *DB) GetAIConfig() (AIConfig, bool, error) {
+	var c AIConfig
+	var has int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM ai_config WHERE id=1`).Scan(&has); err != nil {
+		return c, false, err
+	}
+	if has == 0 {
+		return c, false, nil
+	}
+	err := db.QueryRow(`SELECT base_url,api_key,model FROM ai_config WHERE id=1`).Scan(&c.BaseURL, &c.APIKey, &c.Model)
+	return c, err == nil, err
+}
+
+// SetAIConfig 保存 AI 配置。
+func (db *DB) SetAIConfig(c AIConfig) error {
+	_, err := db.Exec(`INSERT INTO ai_config(id,base_url,api_key,model,updated_at) VALUES(1,?,?,?,datetime('now'))
+		ON CONFLICT(id) DO UPDATE SET base_url=excluded.base_url, api_key=excluded.api_key, model=excluded.model, updated_at=datetime('now')`,
+		c.BaseURL, c.APIKey, c.Model)
+	return err
 }

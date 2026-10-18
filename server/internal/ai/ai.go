@@ -8,7 +8,7 @@ package ai
 import (
 	"bufio"
 	"bytes"
-	"crypto/subtle"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,6 +20,7 @@ import (
 
 	"openos/server/internal/auth"
 	"openos/server/internal/store"
+	"openos/server/internal/webres"
 )
 
 // Message 聊天消息。
@@ -143,7 +144,7 @@ func (s *Service) Chat(w http.ResponseWriter, r *http.Request) {
 		if req.Stream {
 			s.streamDemo(w, reply)
 		} else {
-			writeJSON(w, map[string]any{"content": reply})
+			webres.WriteJSON(w, map[string]any{"content": reply})
 		}
 		return
 	}
@@ -154,21 +155,21 @@ func (s *Service) Chat(w http.ResponseWriter, r *http.Request) {
 	}
 	_, out := s.call(all)
 	s.db.AddChatMsg(id.Username, "assistant", out)
-	writeJSON(w, map[string]any{"content": out})
+	webres.WriteJSON(w, map[string]any{"content": out})
 }
 
 // History GET /api/ai/history
 func (s *Service) History(w http.ResponseWriter, r *http.Request) {
 	id := auth.FromContext(r)
 	msgs, _ := s.db.ListChatMsgs(id.Username, 200)
-	writeJSON(w, msgs)
+	webres.WriteJSON(w, msgs)
 }
 
 // ClearHistory DELETE /api/ai/history
 func (s *Service) ClearHistory(w http.ResponseWriter, r *http.Request) {
 	id := auth.FromContext(r)
 	s.db.ClearChatMsgs(id.Username)
-	writeJSON(w, map[string]string{"ok": "1"})
+	webres.WriteJSON(w, map[string]string{"ok": "1"})
 }
 
 // GetConfig GET /api/ai/config （admin，密钥脱敏）
@@ -184,7 +185,7 @@ func (s *Service) GetConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		masked = s.apiKey[:show] + strings.Repeat("*", 8)
 	}
-	writeJSON(w, map[string]any{
+	webres.WriteJSON(w, map[string]any{
 		"baseUrl": s.baseURL, "apiKey": masked, "model": s.model,
 		"configured": s.apiKey != "" && s.baseURL != "",
 		"demo":       s.apiKey == "" || s.baseURL == "",
@@ -213,7 +214,7 @@ func (s *Service) SaveConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	s.apply(req.BaseURL, req.APIKey, req.Model)
 	s.db.Audit(auth.FromContext(r).Username, "ai.config", "model="+req.Model, "")
-	writeJSON(w, map[string]string{"ok": "1"})
+	webres.WriteJSON(w, map[string]string{"ok": "1"})
 	// 联动钩子：同步为 goder 各用户的托管模型供应商（OpenOS 唯一的 AI 应用）
 	if s.AfterSave != nil {
 		base, key, model, _ := s.Provider()
@@ -224,34 +225,26 @@ func (s *Service) SaveConfig(w http.ResponseWriter, r *http.Request) {
 // Test POST /api/ai/test （admin）连通性测试。
 func (s *Service) Test(w http.ResponseWriter, r *http.Request) {
 	if !s.Configured() {
-		writeJSON(w, map[string]any{"ok": false, "error": "尚未配置 AI 服务"})
+		webres.WriteJSON(w, map[string]any{"ok": false, "error": "尚未配置 AI 服务"})
 		return
 	}
 	start := time.Now()
 	msgs := []Message{{Role: "system", Content: "You are a health probe. Reply with the single word: pong."}, {Role: "user", Content: "ping"}}
-	client := &http.Client{Timeout: 20 * time.Second}
 	body, _ := json.Marshal(map[string]any{"model": s.Model(), "messages": msgs, "max_tokens": 8})
-	s.mu.RLock()
-	url := s.baseURL + "/chat/completions"
-	key := s.apiKey
-	s.mu.RUnlock()
-	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	url, key, _ := s.snapshot()
+	client, up, err := upstreamRequest(context.Background(), url, key, body, false, 20*time.Second)
 	if err != nil {
-		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+		webres.WriteJSON(w, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+key)
-	resp, err := client.Do(req)
+	resp, err := client.Do(up)
 	if err != nil {
-		writeJSON(w, map[string]any{"ok": false, "error": "连接失败：" + err.Error()})
+		webres.WriteJSON(w, map[string]any{"ok": false, "error": "连接失败：" + err.Error()})
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		var buf bytes.Buffer
-		buf.ReadFrom(resp.Body)
-		writeJSON(w, map[string]any{"ok": false, "error": fmt.Sprintf("服务返回 %d：%s", resp.StatusCode, truncate(buf.String(), 200))})
+		webres.WriteJSON(w, map[string]any{"ok": false, "error": upstreamError(resp)})
 		return
 	}
 	var out struct {
@@ -260,13 +253,43 @@ func (s *Service) Test(w http.ResponseWriter, r *http.Request) {
 		} `json:"choices"`
 	}
 	json.NewDecoder(resp.Body).Decode(&out)
-	writeJSON(w, map[string]any{
+	webres.WriteJSON(w, map[string]any{
 		"ok": true, "latencyMs": time.Since(start).Milliseconds(),
 		"model": s.Model(), "reply": out.Choices[0].Message.Content,
 	})
 }
 
 // ---- 上游调用 ----
+
+// snapshot 上游调用配置快照（读锁内一次取齐：完整的 chat/completions 地址、
+// 密钥与模型名）。Test / Proxy / call / streamReal 四条上游通道共用。
+func (s *Service) snapshot() (url, key, model string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.baseURL + "/chat/completions", s.apiKey, s.model
+}
+
+// upstreamRequest 构造对上游的 POST（Bearer 鉴权；流式另带 Accept 头），
+// 连同带超时的 client 一并返回。
+func upstreamRequest(ctx context.Context, url, key string, payload []byte, stream bool, timeout time.Duration) (*http.Client, *http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(payload))
+	if err != nil {
+		return nil, nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+key)
+	if stream {
+		req.Header.Set("Accept", "text/event-stream")
+	}
+	return &http.Client{Timeout: timeout}, req, nil
+}
+
+// upstreamError 非 200 应答的可读错误信息（响应体限 4MB 读入、截断 300 字符）。
+func upstreamError(resp *http.Response) string {
+	var buf bytes.Buffer
+	buf.ReadFrom(io.LimitReader(resp.Body, 4<<20))
+	return fmt.Sprintf("AI 服务返回 %d: %s", resp.StatusCode, truncate(buf.String(), 300))
+}
 
 // ProxyChatCompletions POST /api/ai/v1/chat/completions —— OpenAI 兼容代理端点，
 // 供 goder 托管供应商（名为 AIProviderName）接入：平台 API Key 只存服务端，
@@ -298,33 +321,21 @@ func (s *Service) ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "消息数超过上限（200）", http.StatusBadRequest)
 		return
 	}
-	s.mu.RLock()
-	url := s.baseURL + "/chat/completions"
-	key := s.apiKey
-	model := s.model
-	s.mu.RUnlock()
-
+	url, key, model := s.snapshot()
 	payload, _ := json.Marshal(map[string]any{"model": model, "messages": req.Messages, "stream": req.Stream})
-	up, err := http.NewRequestWithContext(r.Context(), "POST", url, bytes.NewReader(payload))
+	client, up, err := upstreamRequest(r.Context(), url, key, payload, req.Stream, 120*time.Second)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	up.Header.Set("Content-Type", "application/json")
-	up.Header.Set("Authorization", "Bearer "+key)
-	if req.Stream {
-		up.Header.Set("Accept", "text/event-stream")
-	}
-	resp, err := (&http.Client{Timeout: 120 * time.Second}).Do(up)
+	resp, err := client.Do(up)
 	if err != nil {
 		http.Error(w, "AI 服务不可达: "+err.Error(), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		var buf bytes.Buffer
-		buf.ReadFrom(io.LimitReader(resp.Body, 4<<20))
-		http.Error(w, fmt.Sprintf("AI 服务返回 %d: %s", resp.StatusCode, truncate(buf.String(), 300)), http.StatusBadGateway)
+		http.Error(w, upstreamError(resp), http.StatusBadGateway)
 		return
 	}
 	if req.Stream {
@@ -353,28 +364,19 @@ func (s *Service) ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) call(msgs []Message) (int, string) {
-	s.mu.RLock()
-	url := s.baseURL + "/chat/completions"
-	key := s.apiKey
-	model := s.model
-	s.mu.RUnlock()
-
+	url, key, model := s.snapshot()
 	body, _ := json.Marshal(map[string]any{"model": model, "messages": msgs})
-	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	client, req, err := upstreamRequest(context.Background(), url, key, body, false, 60*time.Second)
 	if err != nil {
 		return 500, "请求构建失败: " + err.Error()
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+key)
-	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return 502, "AI 服务不可达: " + err.Error()
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		var buf bytes.Buffer
-		buf.ReadFrom(resp.Body)
-		return resp.StatusCode, fmt.Sprintf("AI 服务返回 %d: %s", resp.StatusCode, truncate(buf.String(), 300))
+		return resp.StatusCode, upstreamError(resp)
 	}
 	var out struct {
 		Choices []struct {
@@ -390,22 +392,14 @@ func (s *Service) call(msgs []Message) (int, string) {
 
 // streamReal 流式转发上游 SSE，结束后累积落库。
 func (s *Service) streamReal(w http.ResponseWriter, r *http.Request, username string, msgs []Message) {
-	s.mu.RLock()
-	url := s.baseURL + "/chat/completions"
-	key := s.apiKey
-	model := s.model
-	s.mu.RUnlock()
-
+	url, key, model := s.snapshot()
 	body, _ := json.Marshal(map[string]any{"model": model, "messages": msgs, "stream": true})
-	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	client, req, err := upstreamRequest(r.Context(), url, key, body, true, 120*time.Second)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+key)
-	req.Header.Set("Accept", "text/event-stream")
-	resp, err := (&http.Client{Timeout: 120 * time.Second}).Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		http.Error(w, "AI 服务不可达: "+err.Error(), 502)
 		return
@@ -413,9 +407,7 @@ func (s *Service) streamReal(w http.ResponseWriter, r *http.Request, username st
 	defer resp.Body.Close()
 	flusher, ok := w.(http.Flusher)
 	if !ok || resp.StatusCode != 200 {
-		var buf bytes.Buffer
-		buf.ReadFrom(resp.Body)
-		http.Error(w, fmt.Sprintf("AI 服务返回 %d: %s", resp.StatusCode, truncate(buf.String(), 300)), 502)
+		http.Error(w, upstreamError(resp), 502)
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
@@ -487,7 +479,7 @@ func demoReply(ctx, prompt string) string {
 func (s *Service) streamDemo(w http.ResponseWriter, reply string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		writeJSON(w, map[string]any{"content": reply})
+		webres.WriteJSON(w, map[string]any{"content": reply})
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
@@ -499,11 +491,6 @@ func (s *Service) streamDemo(w http.ResponseWriter, reply string) {
 	}
 	fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher.Flush()
-}
-
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	json.NewEncoder(w).Encode(v)
 }
 
 func mustJSON(v any) []byte {
@@ -518,5 +505,3 @@ func truncate(s string, n int) string {
 	}
 	return s
 }
-
-var _ = subtle.ConstantTimeCompare // 保留提示：密钥比较请用常数时间比较

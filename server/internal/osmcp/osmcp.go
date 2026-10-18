@@ -167,15 +167,10 @@ func (m *Manager) OnBridgeResp(env bus.Envelope, reply func(string, any)) {
 func loadConfig(path string) Config {
 	cfg := Config{Addr: defaultAddr}
 	if raw, err := os.ReadFile(path); err == nil {
-		_ = json.Unmarshal(raw, &cfg)
+		_ = json.Unmarshal(raw, &cfg) // Token 字段仅兼容读取旧文件，校验只认 UserTokens
 	}
 	if cfg.Addr == "" {
 		cfg.Addr = defaultAddr
-	}
-	if cfg.Token == "" {
-		b := make([]byte, 24)
-		_, _ = rand.Read(b)
-		cfg.Token = hex.EncodeToString(b)
 	}
 	return cfg
 }
@@ -186,14 +181,6 @@ func saveConfig(path string, cfg Config) {
 		return
 	}
 	_ = os.WriteFile(path, append(data, '\n'), 0o600) // 令牌等同本地凭据
-}
-
-// checkToken Bearer 令牌常量时间比对。
-func checkToken(got, want string) bool {
-	if want == "" {
-		return true
-	}
-	return got != "" && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
 // userToken 取某用户的专属 MCP 令牌（无则生成并持久化，跨启动稳定）。

@@ -41,7 +41,7 @@ type Client struct {
 	send  chan []byte
 	User  string
 	Role  string
-	token string // 原始 JWT：供周期复核（吊销 / 过期检测）
+	token string // 原始 JWT 或 "ticket:"+user 短票标记：供周期复核（吊销 / 禁用 / 过期检测）
 	subs  map[string]struct{}
 	mu    sync.Mutex
 	// aclWarned：ACL 拒绝只告警一次（恶意客户端高频试探不刷爆日志）
@@ -75,7 +75,8 @@ func New() *Hub {
 	}
 }
 
-// revalidateInterval 周期复核间隔。令牌吊销（改角色/改密/删用户）在此窗口内踢下线。
+// revalidateInterval 周期复核间隔。吊销（改密/重置）、禁用与删号在此窗口内踢下线；
+// 角色/权限变化不参与复核——授权实时生效不掉线（身份与授权分离，2026-10）。
 const revalidateInterval = 30 * time.Second
 
 // SetRevalidator 注册连接周期复核函数（仅允许设置一次，注册后启动后台复核）。
@@ -141,16 +142,27 @@ func (h *Hub) Publish(topic string, payload any) {
 
 // PublishTo 向指定用户发布事件。
 func (h *Hub) PublishTo(user, topic string, payload any) {
+	env := Envelope{Topic: topic, Payload: mustJSON(payload), From: "system", TS: time.Now().Unix()}
+	data, err := json.Marshal(env)
+	if err != nil {
+		return
+	}
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for c := range h.clients {
 		if c.User == user {
-			c.deliver(Envelope{Topic: topic, Payload: mustJSON(payload), From: "system", TS: time.Now().Unix()})
+			c.deliver(data)
 		}
 	}
 }
 
 func (h *Hub) dispatch(from *Client, env Envelope) {
+	// 同一条消息按订阅者数只序列化一次（全员广播主题下 N 次重复 marshal 是纯浪费，
+	// 且原先发生在 hub 读锁临界区内、拉长锁持有时间）
+	data, err := json.Marshal(env)
+	if err != nil {
+		return
+	}
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for c := range h.clients {
@@ -158,7 +170,7 @@ func (h *Hub) dispatch(from *Client, env Envelope) {
 			continue // 不回声给发布者，前端本地总线已做即时分发
 		}
 		if c.matches(env.Topic) {
-			c.deliver(env)
+			c.deliver(data)
 		}
 	}
 }
@@ -204,11 +216,7 @@ func (c *Client) matches(topic string) bool {
 	return false
 }
 
-func (c *Client) deliver(env Envelope) {
-	data, err := json.Marshal(env)
-	if err != nil {
-		return
-	}
+func (c *Client) deliver(data []byte) {
 	select {
 	case c.send <- data:
 	default: // 发送缓冲满则丢弃，避免拖死

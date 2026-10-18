@@ -153,30 +153,29 @@ func (s *Server) serveMCP(w http.ResponseWriter, r *http.Request) {
 				"annotations": map[string]any{"readOnlyHint": t.ReadOnly},
 			})
 		}
-		// P6：合并桌面在线的宿主/应用自定义工具（短超时尽力而为，桌面离线静默跳过）
-		if user := strings.TrimSpace(r.Header.Get("X-OS-User")); user != "" {
-			if raw, err := s.bridge.callWait(user, "tools_list", nil, 2*time.Second); err == nil {
-				var res struct {
-					Tools []struct {
-						Name        string         `json:"name"`
-						AppID       string         `json:"appId"`
-						Description string         `json:"description"`
-						Params      map[string]any `json:"params"`
-					} `json:"tools"`
-				}
-				if json.Unmarshal(raw, &res) == nil {
-					for _, t := range res.Tools {
-						schema := t.Params
-						if schema == nil {
-							schema = map[string]any{"type": "object", "properties": map[string]any{}}
-						}
-						tools = append(tools, map[string]any{
-							"name":        t.Name,
-							"description": "[宿主应用 " + t.AppID + "] " + t.Description,
-							"inputSchema": schema,
-							"annotations": map[string]any{"readOnlyHint": false},
-						})
+		// P6：合并桌面在线的宿主/应用自定义工具（短超时尽力而为，桌面离线静默跳过；
+		// user 已在 serveMCP 顶部校验非空，无需重读 header）
+		if raw, err := s.bridge.callWait(user, "tools_list", nil, 2*time.Second); err == nil {
+			var res struct {
+				Tools []struct {
+					Name        string         `json:"name"`
+					AppID       string         `json:"appId"`
+					Description string         `json:"description"`
+					Params      map[string]any `json:"params"`
+				} `json:"tools"`
+			}
+			if json.Unmarshal(raw, &res) == nil {
+				for _, t := range res.Tools {
+					schema := t.Params
+					if schema == nil {
+						schema = map[string]any{"type": "object", "properties": map[string]any{}}
 					}
+					tools = append(tools, map[string]any{
+						"name":        t.Name,
+						"description": "[宿主应用 " + t.AppID + "] " + t.Description,
+						"inputSchema": schema,
+						"annotations": map[string]any{"readOnlyHint": false},
+					})
 				}
 			}
 		}

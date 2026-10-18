@@ -208,31 +208,21 @@ func (m *Manager) installUser(uid string) {
 }
 
 // healAll 扫描存量用户目录自愈安装（启动时调用一次：可执行路径/端点可能变化）。
+// 目录扫描收敛在 goder.ForEachGrfHome（与 goder aisync 的全量同步同一份，
+// 顺序与过滤口径一致）。
 func (m *Manager) healAll() {
 	if m.disabled || m.exe == "" {
 		return
 	}
-	usersDir := filepath.Join(m.deps.DataDir, "goder", "serve-data", "users")
-	entries, err := os.ReadDir(usersDir)
-	if err != nil {
-		return // 目录尚不存在 = 还没有 goder 用户
-	}
 	n := 0
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		grfHome := filepath.Join(usersDir, e.Name(), "grf-home")
-		if st, err := os.Stat(grfHome); err != nil || !st.IsDir() {
-			continue
-		}
+	goder.ForEachGrfHome(m.deps.DataDir, func(_, grfHome string) {
 		uid := readWrapperUID(filepath.Join(grfHome, "plugins", wrapperFileName()))
 		if uid == "" {
-			continue // 无法识别用户名，等该用户下次走 /goder-api 时 EnsureUser 兜底
+			return // 无法识别用户名，等该用户下次走 /goder-api 时 EnsureUser 兜底
 		}
 		m.installUser(uid)
 		n++
-	}
+	})
 	if n > 0 {
 		log.Printf("osmcp: 已自愈 %d 个存量用户的桌面控制插件", n)
 	}

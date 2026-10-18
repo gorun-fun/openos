@@ -52,14 +52,10 @@ func (s *Server) registerCAPTools() {
 		}),
 		Handler: func(c *ToolCall) ([]Content, bool) {
 			var a struct {
-				AppID string `json:"appId"`
+				AppID string `json:"appId,omitempty"`
 			}
 			_ = decodeArgs(c, &a)
-			args := map[string]any{}
-			if a.AppID != "" {
-				args["appId"] = a.AppID
-			}
-			return s.bridgeCall(c, "caps_list", args)
+			return s.bridgeCall(c, "caps_list", argsOf(&a))
 		},
 	})
 
@@ -123,28 +119,15 @@ func (s *Server) registerCAPTools() {
 		Handler: func(c *ToolCall) ([]Content, bool) {
 			var a struct {
 				AppID  string          `json:"appId"`
-				View   string          `json:"view"`
-				Props  json.RawMessage `json:"props"`
-				Anchor string          `json:"anchor"`
-				Title  string          `json:"title"`
+				View   string          `json:"view,omitempty"`
+				Props  json.RawMessage `json:"props,omitempty"`
+				Anchor string          `json:"anchor,omitempty"`
+				Title  string          `json:"title,omitempty"`
 			}
 			if err := decodeArgs(c, &a); err != nil || a.AppID == "" {
 				return textErr("参数错误：需要 appId")
 			}
-			args := map[string]any{"appId": a.AppID}
-			if a.View != "" {
-				args["view"] = a.View
-			}
-			if len(a.Props) > 0 {
-				args["props"] = a.Props
-			}
-			if a.Anchor != "" {
-				args["anchor"] = a.Anchor
-			}
-			if a.Title != "" {
-				args["title"] = a.Title
-			}
-			return s.bridgeCall(c, "app_ui", args)
+			return s.bridgeCall(c, "app_ui", argsOf(&a))
 		},
 	})
 }
@@ -358,7 +341,7 @@ func (s *Server) registerP6Tools() {
 
 // fsShareCall 进程内调用 vfs 分享 handler（owner/过期/审计语义与 REST 完全一致）。
 func (s *Server) fsShareCall(c *ToolCall, method, urlPath string, body any) ([]Content, bool) {
-	if s.deps.FS == nil || s.deps.FS.Disabled() {
+	if s.fsDisabled() { // 与 fsTool 同一检查与文案（此前两处手抄已现文案分叉）
 		return textErr("文件系统未启用（OPENOS_VFS=off）")
 	}
 	var h http.HandlerFunc
@@ -383,6 +366,26 @@ func (s *Server) bridgePass(c *ToolCall, action string) ([]Content, bool) {
 		return textErr("参数解析失败: %v", err)
 	}
 	return s.bridgeCall(c, action, args)
+}
+
+// argsOf 把带 omitempty tag 的参数结构体转成桥调用 map——取代逐字段 if 拷贝的
+// 手抄样板（漏抄一个字段就是静默丢参）。字段语义与原手写条件一一对应：
+// string ""、json.RawMessage 空切片、指针 nil 均不入 map；经 RawMessage 中转，
+// 值字节保真（不做解码再编码）。恒含键（如必填 appId）不加 omitempty 即可。
+func argsOf(v any) map[string]any {
+	out := map[string]any{}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return out
+	}
+	var raw map[string]json.RawMessage
+	if json.Unmarshal(b, &raw) != nil {
+		return out
+	}
+	for k, rv := range raw {
+		out[k] = rv
+	}
+	return out
 }
 
 // ---- 系统与设置（服务端直答） ----
@@ -639,20 +642,13 @@ func (s *Server) registerBridgeTools() {
 		Handler: func(c *ToolCall) ([]Content, bool) {
 			var a struct {
 				AppID string          `json:"appId"`
-				Props json.RawMessage `json:"props"`
-				Title string          `json:"title"`
+				Props json.RawMessage `json:"props,omitempty"`
+				Title string          `json:"title,omitempty"`
 			}
 			if err := decodeArgs(c, &a); err != nil || a.AppID == "" {
 				return textErr("参数错误：需要 appId")
 			}
-			args := map[string]any{"appId": a.AppID}
-			if len(a.Props) > 0 {
-				args["props"] = a.Props
-			}
-			if a.Title != "" {
-				args["title"] = a.Title
-			}
-			return s.bridgeCall(c, "window_open", args)
+			return s.bridgeCall(c, "window_open", argsOf(&a))
 		},
 	})
 
@@ -665,20 +661,13 @@ func (s *Server) registerBridgeTools() {
 		}),
 		Handler: func(c *ToolCall) ([]Content, bool) {
 			var a struct {
-				WindowID string `json:"windowId"`
-				AppID    string `json:"appId"`
+				WindowID string `json:"windowId,omitempty"`
+				AppID    string `json:"appId,omitempty"`
 			}
 			if err := decodeArgs(c, &a); err != nil || (a.WindowID == "" && a.AppID == "") {
 				return textErr("参数错误：需要 windowId 或 appId")
 			}
-			args := map[string]any{}
-			if a.WindowID != "" {
-				args["windowId"] = a.WindowID
-			}
-			if a.AppID != "" {
-				args["appId"] = a.AppID
-			}
-			return s.bridgeCall(c, "window_close", args)
+			return s.bridgeCall(c, "window_close", argsOf(&a))
 		},
 	})
 
@@ -695,28 +684,15 @@ func (s *Server) registerBridgeTools() {
 		Handler: func(c *ToolCall) ([]Content, bool) {
 			var a struct {
 				Action   string          `json:"action"`
-				WindowID string          `json:"windowId"`
-				Zone     string          `json:"zone"`
-				Bounds   json.RawMessage `json:"bounds"`
-				Title    string          `json:"title"`
+				WindowID string          `json:"windowId,omitempty"`
+				Zone     string          `json:"zone,omitempty"`
+				Bounds   json.RawMessage `json:"bounds,omitempty"`
+				Title    string          `json:"title,omitempty"`
 			}
 			if err := decodeArgs(c, &a); err != nil || a.Action == "" {
 				return textErr("参数错误：需要 action")
 			}
-			args := map[string]any{"action": a.Action}
-			if a.WindowID != "" {
-				args["windowId"] = a.WindowID
-			}
-			if a.Zone != "" {
-				args["zone"] = a.Zone
-			}
-			if len(a.Bounds) > 0 {
-				args["bounds"] = a.Bounds
-			}
-			if a.Title != "" {
-				args["title"] = a.Title
-			}
-			return s.bridgeCall(c, "window_do", args)
+			return s.bridgeCall(c, "window_do", argsOf(&a))
 		},
 	})
 
@@ -747,16 +723,12 @@ func (s *Server) registerBridgeTools() {
 		Handler: func(c *ToolCall) ([]Content, bool) {
 			var a struct {
 				Action string          `json:"action"`
-				Arg    json.RawMessage `json:"arg"`
+				Arg    json.RawMessage `json:"arg,omitempty"`
 			}
 			if err := decodeArgs(c, &a); err != nil || a.Action == "" {
 				return textErr("参数错误：需要 action")
 			}
-			args := map[string]any{"action": a.Action}
-			if len(a.Arg) > 0 {
-				args["arg"] = a.Arg
-			}
-			return s.bridgeCall(c, "desktop_do", args)
+			return s.bridgeCall(c, "desktop_do", argsOf(&a))
 		},
 	})
 
@@ -772,24 +744,14 @@ func (s *Server) registerBridgeTools() {
 		Handler: func(c *ToolCall) ([]Content, bool) {
 			var a struct {
 				Action string   `json:"action"`
-				ID     string   `json:"id"`
-				Text   *string  `json:"text"`
-				Color  *float64 `json:"color"`
+				ID     string   `json:"id,omitempty"`
+				Text   *string  `json:"text,omitempty"`
+				Color  *float64 `json:"color,omitempty"`
 			}
 			if err := decodeArgs(c, &a); err != nil || a.Action == "" {
 				return textErr("参数错误：需要 action")
 			}
-			args := map[string]any{"action": a.Action}
-			if a.ID != "" {
-				args["id"] = a.ID
-			}
-			if a.Text != nil {
-				args["text"] = *a.Text
-			}
-			if a.Color != nil {
-				args["color"] = *a.Color
-			}
-			return s.bridgeCall(c, "notes_do", args)
+			return s.bridgeCall(c, "notes_do", argsOf(&a))
 		},
 	})
 
@@ -803,16 +765,12 @@ func (s *Server) registerBridgeTools() {
 		Handler: func(c *ToolCall) ([]Content, bool) {
 			var a struct {
 				Text string `json:"text"`
-				Type string `json:"type"`
+				Type string `json:"type,omitempty"`
 			}
 			if err := decodeArgs(c, &a); err != nil || a.Text == "" {
 				return textErr("参数错误：需要 text")
 			}
-			args := map[string]any{"text": a.Text}
-			if a.Type != "" {
-				args["type"] = a.Type
-			}
-			return s.bridgeCall(c, "notify", args)
+			return s.bridgeCall(c, "notify", argsOf(&a))
 		},
 	})
 }

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"openos/server/internal/auth"
+	"openos/server/internal/webres"
 )
 
 const (
@@ -82,7 +83,7 @@ func (f *FS) CreateShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.db.Audit(user, "fs.share", p, "")
-	writeJSON(w, map[string]any{"id": id, "url": "/#share=" + id, "expiresAt": expires, "days": req.Days})
+	webres.WriteJSON(w, map[string]any{"id": id, "url": "/#share=" + id, "expiresAt": expires, "days": req.Days})
 }
 
 // ListShares GET /api/fs/shares —— 我创建的、仍在有效期内的分享。
@@ -103,7 +104,7 @@ func (f *FS) ListShares(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, map[string]any{"id": id, "path": p, "name": name, "size": size, "createdAt": created, "expiresAt": expires})
 	}
-	writeJSON(w, out) // 恒为数组（前端按数组消费）
+	webres.WriteJSON(w, out) // 恒为数组（前端按数组消费）
 }
 
 // RevokeShare DELETE /api/fs/shares/{id} —— 撤销自己的分享（仅 owner）。
@@ -121,7 +122,7 @@ func (f *FS) RevokeShare(w http.ResponseWriter, r *http.Request) {
 	}
 	f.db.Exec(`DELETE FROM shares WHERE id=?`, id)
 	f.db.Audit(user, "fs.share-revoke", id, "")
-	writeJSON(w, ok())
+	webres.WriteJSON(w, ok())
 }
 
 // loadShare 取有效期内的分享并核对底稿文件仍在（被删/改名即失效）。
@@ -152,7 +153,7 @@ func (f *FS) ShareInfo(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 404)
 		return
 	}
-	writeJSON(w, map[string]any{"path": p, "name": path.Base(p), "owner": owner, "size": size})
+	webres.WriteJSON(w, map[string]any{"path": p, "name": path.Base(p), "owner": owner, "size": size})
 }
 
 // ShareDownload GET /api/share/{id} —— 下载内容。恒 attachment + nosniff：
@@ -193,7 +194,7 @@ func (f *FS) ShareSave(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 400)
 		return
 	}
-	writeJSON(w, map[string]any{"path": target})
+	webres.WriteJSON(w, map[string]any{"path": target})
 }
 
 // readShareFile 读底稿文件原始字节（统一 home 磁盘读取）。

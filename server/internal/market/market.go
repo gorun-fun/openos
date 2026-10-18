@@ -461,9 +461,11 @@ func RefreshNow() (okCount, total int) {
 	return okCount, total
 }
 
-// fetchRemote 拉取并解析远程清单：仅 https、限 2MB、15s 超时，非 200 视为失败。
+// fetchLimited 限长拉取共用内核（目录清单与 bundle 组件同一套限额）：仅 https、
+// 15s 超时、非 200 视为失败、限 2MB 且恰在限额处截断即拒绝——半截 JSON/JS
+// 静默入库比显式报错更糟（此前仅 bundle 通道查截断，目录通道吞成解析失败）。
 // 拨号防线见 marketGet（SSRF：非配置源主机拒绝内网 IP，安全审计 2026-10）。
-func fetchRemote(u string) ([]Entry, error) {
+func fetchLimited(u string) ([]byte, error) {
 	resp, err := marketGet(u)
 	if err != nil {
 		return nil, err
@@ -473,6 +475,18 @@ func fetchRemote(u string) ([]Entry, error) {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) >= 2<<20 {
+		return nil, fmt.Errorf("响应超过 2MB 限制")
+	}
+	return raw, nil
+}
+
+// fetchRemote 拉取并解析远程清单（限额与拨号防线见 fetchLimited）。
+func fetchRemote(u string) ([]Entry, error) {
+	raw, err := fetchLimited(u)
 	if err != nil {
 		return nil, err
 	}
@@ -759,9 +773,6 @@ func Install(db *store.DB, id string, roles []string) (Entry, error) {
 		setSkipVersion(db, e.ID, "")
 		return e, nil
 	}
-	if cur, ok := db.AppByID(e.ID); ok && (cur.Builtin || cur.Locked) {
-		return e, ErrProtected
-	}
 	ver := e.Version
 	url := bundleURL(e)
 	if err := installEntry(db, e, roles, ver, url); err != nil {
@@ -782,9 +793,7 @@ func SwitchVersion(db *store.DB, id, version string) (Entry, error) {
 	if err != nil {
 		return e, err
 	}
-	if cur, ok := db.AppByID(e.ID); ok && (cur.Builtin || cur.Locked) {
-		return e, ErrProtected
-	}
+	// 保护检查（内置/宿主锁定）在 installEntry 开头统一做（Install 同源）
 	if _, ok := db.AppByID(e.ID); !ok {
 		return e, ErrNotInstalled
 	}
@@ -824,9 +833,15 @@ func SwitchVersion(db *store.DB, id, version string) (Entry, error) {
 	return e, nil
 }
 
-// installEntry 安装内核（Install/SwitchVersion 共用）：按目标版本下载组件（bundle）、
-// 角色校验过滤、UpsertApp 落库（version 标记目标版本）+ 整组写授权。
+// installEntry 安装内核（Install/SwitchVersion 共用）：内置/宿主锁定应用保护检查、
+// 按目标版本下载组件（bundle）、角色校验过滤、UpsertApp 落库（version 标记目标
+// 版本）+ 整组写授权。
 func installEntry(db *store.DB, e Entry, roles []string, version, bundleAddr string) error {
+	// 保护检查：内置与宿主锁定应用不可经商店覆盖（此前 Install/SwitchVersion
+	// 各写一份，收敛于此）
+	if cur, ok := db.AppByID(e.ID); ok && (cur.Builtin || cur.Locked) {
+		return ErrProtected
+	}
 	if e.Type == "bundle" {
 		if err := fetchBundle(e.ID, version, bundleAddr); err != nil {
 			return fmt.Errorf("组件下载失败: %w", err)
@@ -932,23 +947,12 @@ func fetchBundle(id, version, addr string) error {
 		log.Printf("market: bundle %s@%s 复用本地文件", id, version)
 		return nil
 	}
-	resp, err := marketGet(addr)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	raw, err := fetchLimited(addr)
 	if err != nil {
 		return err
 	}
 	if len(raw) == 0 {
 		return fmt.Errorf("组件文件为空")
-	}
-	if len(raw) >= 2<<20 {
-		return fmt.Errorf("组件文件超过 2MB 限制")
 	}
 	tmp := dst + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o644); err != nil {

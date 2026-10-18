@@ -61,6 +61,29 @@ var uidSan = regexp.MustCompile(`[^a-zA-Z0-9_.-]`)
 // 供应商以清洗后的 uid 入库，与 serve-data/users/<目录名> 及代理密钥派生对齐。
 func SanUID(uid string) string { return uidSan.ReplaceAllString(uid, "_") }
 
+// ForEachGrfHome 遍历 serve-data 下所有已存在的 goder 用户 grf-home 目录
+// （本包 SyncAIProvider 与 osmcp healAll 共用同一份扫描：ReadDir 按目录名
+// 有序，跳过非目录项与缺 grf-home 子目录的项）。回调收到的目录名即清洗后
+// 的 uid（SanUID 口径）；users 目录不存在或不可读时不回调直接返回
+// （= 还没有任何 goder 用户）。
+func ForEachGrfHome(dataDir string, fn func(sanUID, grfHome string)) {
+	usersDir := filepath.Join(dataDir, "goder", "serve-data", "users")
+	entries, err := os.ReadDir(usersDir)
+	if err != nil {
+		return // 目录尚不存在 = 还没有任何 goder 用户
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		grfHome := filepath.Join(usersDir, e.Name(), "grf-home")
+		if st, err := os.Stat(grfHome); err != nil || !st.IsDir() {
+			continue
+		}
+		fn(e.Name(), grfHome)
+	}
+}
+
 // aiMark settings.json 的 (mtime, size) 指纹，EnsureAIUser 幂等跳过用。
 type aiMark struct{ mtime, size int64 }
 
@@ -216,16 +239,16 @@ func mustMarshalRaw(m map[string]json.RawMessage) json.RawMessage {
 // SetAIProviderSource 注入当前 AI 配置的读取回调（托管标记注入与逐用户
 // 确保用；由 main 在 ai/goder 两个管理器都就绪后接线）。
 func (m *Manager) SetAIProviderSource(src func() (ProviderConfig, bool)) {
-	m.mu.Lock()
+	m.aiMu.Lock()
 	m.aiSource = src
-	m.mu.Unlock()
+	m.aiMu.Unlock()
 }
 
 // AISource 当前 AI 配置（未注入回调或未配置时 ok=false）。
 func (m *Manager) AISource() (ProviderConfig, bool) {
-	m.mu.Lock()
+	m.aiMu.Lock()
 	src := m.aiSource
-	m.mu.Unlock()
+	m.aiMu.Unlock()
 	if src == nil {
 		return ProviderConfig{}, false
 	}
@@ -237,9 +260,9 @@ func (m *Manager) AISource() (ProviderConfig, bool) {
 // 平台 API Key 只留服务端（安全审计 2026-10：此前明文 Key 写进每个 goder
 // 用户的 settings.json，用户家目录人人可读自己的 Key）。
 func (m *Manager) SetAIProxy(base string, keyFor func(uid string) string) {
-	m.mu.Lock()
+	m.aiMu.Lock()
 	m.aiProxyBase, m.aiProxyKey = base, keyFor
-	m.mu.Unlock()
+	m.aiMu.Unlock()
 }
 
 // SetProviderDB 注入宿主声明供应商的存储（main 启动时调用；未注入则只渲染
@@ -282,9 +305,9 @@ func (m *Manager) managedNamesSnapshot() []string {
 // 密钥派生统一用清洗后的 uid（SyncAIProvider 只能拿到目录名，两路派生必须一致，
 // 否则每次全量同步都会改写 settings.json 触发指纹抖动）。
 func (m *Manager) managedProvider(cfg ProviderConfig, uid string) ProviderConfig {
-	m.mu.Lock()
+	m.aiMu.Lock()
 	base, kf := m.aiProxyBase, m.aiProxyKey
-	m.mu.Unlock()
+	m.aiMu.Unlock()
 	if base == "" || kf == nil || !cfg.valid() {
 		return cfg
 	}
@@ -311,36 +334,24 @@ func (m *Manager) SyncAIProvider(cfg ProviderConfig, forceDefault bool) int {
 	if m.disabled {
 		return 0
 	}
-	usersDir := filepath.Join(m.dataDir, "goder", "serve-data", "users")
-	entries, err := os.ReadDir(usersDir)
-	if err != nil {
-		return 0 // 还没有任何 goder 用户
-	}
 	n := 0
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		grfHome := filepath.Join(usersDir, e.Name(), "grf-home")
-		if st, err := os.Stat(grfHome); err != nil || !st.IsDir() {
-			continue
-		}
+	ForEachGrfHome(m.dataDir, func(san, grfHome string) {
 		sp := filepath.Join(grfHome, "settings.json")
 		// 目录名即清洗后的 uid，与声明表（原 uid）与代理密钥派生对齐
-		extras, names := m.userProviderView(e.Name())
-		wrote, err := upsertAIProviders(sp, m.managedProvider(cfg, e.Name()), extras, names, forceDefault)
+		extras, names := m.userProviderView(san)
+		wrote, err := upsertAIProviders(sp, m.managedProvider(cfg, san), extras, names, forceDefault)
 		if err != nil {
-			log.Printf("goder: 同步 AI 供应商失败(%s): %v", e.Name(), err)
-			continue
+			log.Printf("goder: 同步 AI 供应商失败(%s): %v", san, err)
+			return
 		}
 		if wrote {
 			n++
 		}
-		m.rememberAIMark(e.Name(), sp)
-	}
-	m.mu.Lock()
+		m.rememberAIMark(san, sp)
+	})
+	m.aiMu.Lock()
 	m.aiSyncedUsers = n
-	m.mu.Unlock()
+	m.aiMu.Unlock()
 	return n
 }
 
@@ -388,7 +399,7 @@ func statAIMark(p string) (int64, int64) {
 
 // LastSyncUsers 最近一次全量同步写盘的用户数（状态展示用）。
 func (m *Manager) LastSyncUsers() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.aiMu.Lock()
+	defer m.aiMu.Unlock()
 	return m.aiSyncedUsers
 }

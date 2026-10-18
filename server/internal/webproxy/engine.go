@@ -48,8 +48,10 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request, tu *url.URL
 		applyCfgHeaders(outReq.Header, opts.cfg.Headers)
 	}
 	// 站点适配器（按目标主机命中的特殊处理，见 adapter.go）：请求侧钩子在
-	// 通用清洗与配置头之后叠加，站点规则可以对最终请求头做最后修正
-	for _, a := range matchAdapters(tu.Host) {
+	// 通用清洗与配置头之后叠加，站点规则可以对最终请求头做最后修正；
+	// 本请求命中的适配器一次算出（下方请求/响应/JS 改写多处消费）
+	adapters := matchAdapters(tu.Host)
+	for _, a := range adapters {
 		if a.OnRequest != nil {
 			a.OnRequest(outReq, r)
 		}
@@ -58,7 +60,7 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request, tu *url.URL
 	// Last-Modified 对改写后的体不再成立——放行条件请求会拿到 304 透传，
 	// 浏览器继续用改写前的缓存体（QA 域字面量永远清不掉），必须强制全量取回
 	if opts.rewrite {
-		for _, a := range matchAdapters(tu.Host) {
+		for _, a := range adapters {
 			if a.RewriteJS != nil {
 				outReq.Header.Del("If-None-Match")
 				outReq.Header.Del("If-Modified-Since")
@@ -77,7 +79,7 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request, tu *url.URL
 	secure := r.TLS != nil
 	copyRespHeaders(w, resp, opts.prefix, tu, secure, r.Host)
 	// 响应侧适配器钩子：对最终下发给浏览器的响应头做站点修正
-	for _, a := range matchAdapters(tu.Host) {
+	for _, a := range adapters {
 		if a.OnResponse != nil {
 			a.OnResponse(w.Header())
 		}
@@ -90,7 +92,7 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request, tu *url.URL
 	// 的 base 改写）：与 HTML/CSS 重写同一套读入/解压/限长语义
 	var jsRewrite func([]byte) []byte
 	if opts.rewrite && !isHTML {
-		for _, a := range matchAdapters(tu.Host) {
+		for _, a := range adapters {
 			if a.RewriteJS != nil {
 				fn, prefix := a.RewriteJS, opts.prefix
 				jsRewrite = func(b []byte) []byte { return fn(b, prefix) }

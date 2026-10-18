@@ -38,14 +38,7 @@ import (
 	"openos/server/internal/store"
 )
 
-// goder.index 镜像键与自动修复分组（字段名与 goder.js persistence.ts 的
-// ProjectsIndex 严格一致，未知键（automation 等）原样保真）。
-const (
-	hostIndexKey     = "goder.index"
-	fixerProjectID   = "fixer"
-	fixerGroupName   = "自动修复"
-	defaultFixModels = 200
-)
+// goder.index 镜像键与自动修复分组的常量见 index.go（分组编排整体拆出）。
 
 // HostTasks 宿主机对机 goder 任务端点（main 以 hostOnly 包装挂路由）。
 type HostTasks struct {
@@ -184,50 +177,54 @@ func (h *HostTasks) Create(w http.ResponseWriter, r *http.Request) {
 
 // Get GET /api/host/goder/tasks/{uid}/{id} — 轮询任务终态。
 func (h *HostTasks) Get(w http.ResponseWriter, r *http.Request) {
-	uid, id := r.PathValue("uid"), r.PathValue("id")
-	if uid == "" || id == "" {
-		hostErr(w, 400, "uid / id 必填")
-		return
-	}
-	if !h.ready() {
-		hostErr(w, 503, "goder 服务未就绪")
-		return
-	}
-	h.m.EnsureAIUser(uid)
-	var res ghResponse
-	if err := h.loopback(r.Context(), http.MethodGet, "/goder-api/v1/responses/"+id, nil, uid, &res); err != nil {
-		if he, ok := err.(*hostHTTPError); ok {
-			writeHostJSON(w, he.status, he.body)
-			return
+	h.withTask(w, r, "查询 goder 任务失败", func(uid, id string) error {
+		h.m.EnsureAIUser(uid)
+		var res ghResponse
+		if err := h.loopback(r.Context(), http.MethodGet, "/goder-api/v1/responses/"+id, nil, uid, &res); err != nil {
+			return err
 		}
-		hostErr(w, 502, "查询 goder 任务失败: "+err.Error())
-		return
-	}
-	out := map[string]any{
-		"status":    res.Status,
-		"model":     res.Model,
-		"session_id": res.SessionID,
-	}
-	if res.Error != nil {
-		out["error"] = res.Error.Message
-	}
-	if res.IncompleteDetails != nil {
-		out["incomplete_reason"] = res.IncompleteDetails.Reason
-	}
-	if txt := res.assistantText(); txt != "" {
-		out["output_text"] = txt
-	}
-	if res.Usage != nil {
-		out["usage"] = map[string]int{
-			"input_tokens":  res.Usage.InputTokens,
-			"output_tokens": res.Usage.OutputTokens,
+		out := map[string]any{
+			"status":     res.Status,
+			"model":      res.Model,
+			"session_id": res.SessionID,
 		}
-	}
-	writeHostJSON(w, 200, out)
+		if res.Error != nil {
+			out["error"] = res.Error.Message
+		}
+		if res.IncompleteDetails != nil {
+			out["incomplete_reason"] = res.IncompleteDetails.Reason
+		}
+		if txt := res.assistantText(); txt != "" {
+			out["output_text"] = txt
+		}
+		if res.Usage != nil {
+			out["usage"] = map[string]int{
+				"input_tokens":  res.Usage.InputTokens,
+				"output_tokens": res.Usage.OutputTokens,
+			}
+		}
+		writeHostJSON(w, 200, out)
+		return nil
+	})
 }
 
 // Cancel POST /api/host/goder/tasks/{uid}/{id}/cancel — 取消在跑回合（幂等）。
 func (h *HostTasks) Cancel(w http.ResponseWriter, r *http.Request) {
+	h.withTask(w, r, "取消 goder 任务失败", func(uid, id string) error {
+		var res json.RawMessage
+		if err := h.loopback(r.Context(), http.MethodPost, "/goder-api/v1/responses/"+id+"/cancel", []byte("{}"), uid, &res); err != nil {
+			return err
+		}
+		writeHostJSON(w, 200, map[string]any{"ok": true})
+		return nil
+	})
+}
+
+// withTask Get/Cancel 的公共前言：uid/id 必填校验 + ready 检查后以 uid/id
+// 执行回调；回调返回的 error 统一按 hostHTTPError 解包——goder-serve 的
+// 非 200 原状态原体透传，其余错误 502 + failMsg（错误响应语义与抽取前
+// 两分支逐字一致）。回调写完各自的 200 响应后返回 nil。
+func (h *HostTasks) withTask(w http.ResponseWriter, r *http.Request, failMsg string, fn func(uid, id string) error) {
 	uid, id := r.PathValue("uid"), r.PathValue("id")
 	if uid == "" || id == "" {
 		hostErr(w, 400, "uid / id 必填")
@@ -237,34 +234,22 @@ func (h *HostTasks) Cancel(w http.ResponseWriter, r *http.Request) {
 		hostErr(w, 503, "goder 服务未就绪")
 		return
 	}
-	var res json.RawMessage
-	if err := h.loopback(r.Context(), http.MethodPost, "/goder-api/v1/responses/"+id+"/cancel", []byte("{}"), uid, &res); err != nil {
+	if err := fn(uid, id); err != nil {
 		if he, ok := err.(*hostHTTPError); ok {
 			writeHostJSON(w, he.status, he.body)
 			return
 		}
-		hostErr(w, 502, "取消 goder 任务失败: "+err.Error())
+		hostErr(w, 502, failMsg+": "+err.Error())
 		return
 	}
-	writeHostJSON(w, 200, map[string]any{"ok": true})
 }
 
 // ---- 内部 ----
 
-// ready 惰性拉起并等待 goder-serve 就绪（与 ProxyHandler 同款 5s 等待）。
+// ready 惰性拉起并等待 goder-serve 就绪（与 ProxyHandler 同款 5s 等待，
+// 收敛到 Manager.ensureReady）。
 func (h *HostTasks) ready() bool {
-	if h.m.disabled || !h.m.Available() {
-		return false
-	}
-	if h.m.Ready() {
-		return true
-	}
-	h.m.Start()
-	deadline := time.Now().Add(5 * time.Second)
-	for !h.m.Ready() && time.Now().Before(deadline) {
-		time.Sleep(150 * time.Millisecond)
-	}
-	return h.m.Ready()
+	return h.m.ensureReady(5 * time.Second)
 }
 
 type hostHTTPError struct {
@@ -419,97 +404,7 @@ func (h *HostTasks) resolveModel(uid, want string) (string, error) {
 	}
 }
 
-// indexSession 把会话写进用户的 goder.index（确保分组项目存在）。整体
-// map[string]json.RawMessage 保真未知键（automation / lastActiveSessionId 等）。
-func (h *HostTasks) indexSession(uid, sid, title, group, model, respID string) error {
-	raw, err := h.db.GetUserSetting(uid, hostIndexKey)
-	if err != nil {
-		return err
-	}
-	all := map[string]json.RawMessage{}
-	if raw != "" {
-		if err := json.Unmarshal([]byte(raw), &all); err != nil {
-			// 损坏镜像不整体覆盖（用户其余分组宝贵）：跳过归组，会话回落未分组
-			return fmt.Errorf("goder.index 损坏，跳过归组: %w", err)
-		}
-	}
-	var idx struct {
-		Projects []struct {
-			ID        string `json:"id"`
-			Name      string `json:"name"`
-			CreatedAt string `json:"createdAt"`
-		} `json:"projects"`
-		Sessions map[string]json.RawMessage `json:"sessions"`
-	}
-	_ = json.Unmarshal(all["projects"], &idx.Projects)
-	if idx.Sessions == nil {
-		if err := json.Unmarshal(all["sessions"], &idx.Sessions); err != nil {
-			idx.Sessions = map[string]json.RawMessage{}
-		}
-	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	found := false
-	for _, p := range idx.Projects {
-		if p.ID == fixerProjectID {
-			found = true
-			break
-		}
-	}
-	if !found {
-		idx.Projects = append(idx.Projects, struct {
-			ID        string `json:"id"`
-			Name      string `json:"name"`
-			CreatedAt string `json:"createdAt"`
-		}{ID: fixerProjectID, Name: group, CreatedAt: now})
-	}
-	rec, err := json.Marshal(map[string]any{
-		"projectId":      fixerProjectID,
-		"title":          title,
-		"createdAt":      now,
-		"lastResponseId": respID,
-		"model":          model,
-	})
-	if err != nil {
-		return err
-	}
-	if idx.Sessions == nil {
-		idx.Sessions = map[string]json.RawMessage{}
-	}
-	idx.Sessions[sid] = rec
-
-	projRaw, err := json.Marshal(idx.Projects)
-	if err != nil {
-		return err
-	}
-	sessRaw, err := json.Marshal(idx.Sessions)
-	if err != nil {
-		return err
-	}
-	if _, ok := all["version"]; !ok {
-		all["version"] = json.RawMessage("1")
-	}
-	all["projects"] = projRaw
-	all["sessions"] = sessRaw
-	out, err := json.Marshal(all)
-	if err != nil {
-		return err
-	}
-	return h.db.SetUserSetting(uid, hostIndexKey, string(out))
-}
-
-// deriveHostTitle 任务首行截断作会话标题（与 goder.js deriveTitle 的 42 字口径接近）。
-func deriveHostTitle(task string) string {
-	line := task
-	if i := strings.IndexAny(line, "\r\n"); i >= 0 {
-		line = line[:i]
-	}
-	line = strings.TrimSpace(line)
-	r := []rune(line)
-	if len(r) > 42 {
-		r = r[:42]
-	}
-	return string(r)
-}
+// indexSession / deriveHostTitle（goder.index 分组编排）见 index.go。
 
 func hostErr(w http.ResponseWriter, status int, msg string) {
 	writeHostJSON(w, status, map[string]any{"error": msg})
