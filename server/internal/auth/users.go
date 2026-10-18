@@ -20,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	"openos/server/internal/store"
+	"openos/server/internal/webres"
 )
 
 // userPatch 单用户字段级补丁（指针语义：nil=不改动；Perms nil=不改动，
@@ -41,6 +42,37 @@ type patchError struct {
 
 func (e *patchError) Error() string { return e.msg }
 
+// insertUser 统一开通内核（createUserCore / syncUsersCore / Exchange 自动开通 /
+// SeedDefaults 四条路径共用）：newSalt + hashPassword + initialTokenVersion + perms
+// 序列化一次写全——此前四份 INSERT 各自拼列集已分叉（create 无 disabled、
+// exchange/seed 无 perms），新增用户字段只改这里。
+func (s *Service) insertUser(username, password, role, displayName string, disabled bool, perms []string) error {
+	salt := newSalt()
+	permsVal := ""
+	if len(perms) > 0 {
+		b, _ := json.Marshal(perms)
+		permsVal = string(b)
+	}
+	_, err := s.db.Exec(`INSERT INTO users(username,password_hash,salt,role,display_name,token_version,disabled,perms) VALUES(?,?,?,?,?,?,?,?)`,
+		username, hashPassword(password, salt), salt, role, displayName, initialTokenVersion(), boolInt(disabled), permsVal)
+	return err
+}
+
+// setPassword 统一密码写入（新盐重哈希并失效缓存；bump=true 吊销该用户全部
+// 旧令牌——管理员重置/自助改密属身份级事件，登录透明升级的等参数重哈希
+// 不吊销）。patchUser / ChangePassword / Login 透明升级三处共用。
+func (s *Service) setPassword(username, password string, bump bool) error {
+	salt := newSalt()
+	if _, err := s.db.Exec(`UPDATE users SET password_hash=?, salt=? WHERE username=?`, hashPassword(password, salt), salt, username); err != nil {
+		return err
+	}
+	if bump {
+		s.db.BumpTokenVersion(username)
+	}
+	s.InvalidateCache(username)
+	return nil
+}
+
 func patchErr(code int, format string, a ...any) error {
 	return &patchError{code: code, msg: fmt.Sprintf(format, a...)}
 }
@@ -51,7 +83,7 @@ func writePatchErr(w http.ResponseWriter, err error) {
 	if pe, ok := err.(*patchError); ok && pe.code != 0 {
 		code = pe.code
 	}
-	jsonError(w, code, err.Error())
+	webres.Error(w, code, err.Error())
 }
 
 // patchUser 统一用户变更内核（UpdateUser / SyncUsers / Exchange / /api/host/* 共用）：
@@ -137,11 +169,10 @@ func (s *Service) patchUser(name string, p userPatch, operator, ip string, opera
 		if WeakPassword(*p.Password) {
 			return false, patchErr(400, "密码至少 8 位，且需同时包含字母与数字")
 		}
-		salt := newSalt()
-		if _, err := s.db.Exec(`UPDATE users SET password_hash=?, salt=? WHERE username=?`, hashPassword(*p.Password, salt), salt, name); err != nil {
+		// bump=true：密码重置是唯一身份级吊销（该用户全部旧令牌失效）
+		if err := s.setPassword(name, *p.Password, true); err != nil {
 			return false, patchErr(500, "保存密码失败")
 		}
-		s.db.BumpTokenVersion(name) // 密码重置：唯一身份级吊销（该用户全部旧令牌失效）
 		changed = true
 		s.db.Audit(operator, "user.password", name+" 密码重置", ip)
 	}
@@ -162,7 +193,7 @@ func (s *Service) ListUsers(w http.ResponseWriter, r *http.Request) {
 func (s *Service) listUsersCore(w http.ResponseWriter) {
 	rows, err := s.db.Query(`SELECT id,username,display_name,role,disabled,perms,token_version,created_at FROM users ORDER BY id`)
 	if err != nil {
-		jsonError(w, 500, err.Error())
+		webres.Error(w, 500, err.Error())
 		return
 	}
 	defer rows.Close()
@@ -183,7 +214,7 @@ func (s *Service) listUsersCore(w http.ResponseWriter) {
 		}
 		users = append(users, u)
 	}
-	writeJSON(w, users)
+	webres.WriteJSON(w, users)
 }
 
 // CreateUser POST /api/users —— hostMode=false（REST）；宿主通道见 hostapi.go。
@@ -197,7 +228,7 @@ func (s *Service) createUserCore(w http.ResponseWriter, r *http.Request, operato
 		Perms                                 []string // 可选：初始权限快照
 	}
 	if err := jsonDecode(r, &req); err != nil || req.Username == "" {
-		jsonError(w, 400, "参数错误")
+		webres.Error(w, 400, "参数错误")
 		return
 	}
 	// 宿主通道 / 外部身份模式：密码留空 → 随机值（本地登录通道不可用或交由宿主）
@@ -205,31 +236,22 @@ func (s *Service) createUserCore(w http.ResponseWriter, r *http.Request, operato
 		req.Password = randomHex(24)
 	}
 	if WeakPassword(req.Password) {
-		jsonError(w, 400, "密码至少 8 位，且需同时包含字母与数字")
+		webres.Error(w, 400, "密码至少 8 位，且需同时包含字母与数字")
 		return
 	}
 	if req.Role == "" {
 		req.Role = "user"
 	}
 	if !validRole(req.Role) {
-		jsonError(w, 400, "非法角色")
+		webres.Error(w, 400, "非法角色")
 		return
 	}
-	permsVal := ""
-	if len(req.Perms) > 0 {
-		b, _ := json.Marshal(req.Perms)
-		permsVal = string(b)
-	}
-	salt := newSalt()
-	_, err := s.db.Exec(`INSERT INTO users(username,password_hash,salt,role,display_name,token_version,perms) VALUES(?,?,?,?,?,?,?)`,
-		req.Username, hashPassword(req.Password, salt), salt, req.Role, req.DisplayName, initialTokenVersion(), permsVal)
-	if err != nil {
-		jsonError(w, 400, "创建失败（用户名可能已存在）")
+	if err := s.insertUser(req.Username, req.Password, req.Role, req.DisplayName, false, req.Perms); err != nil {
+		webres.Error(w, 400, "创建失败（用户名可能已存在）")
 		return
 	}
-	s.InvalidateCache(req.Username)
 	s.db.Audit(operator, "user.create", req.Username+" role="+req.Role, s.clientIP(r))
-	writeJSON(w, ok())
+	webres.WriteJSON(w, ok())
 }
 
 // SyncUsers POST /api/users/sync —— 宿主/管理员批量幂等同步用户。
@@ -252,7 +274,7 @@ func (s *Service) syncUsersCore(w http.ResponseWriter, r *http.Request, operator
 		} `json:"users"`
 	}
 	if err := jsonDecode(r, &req); err != nil || len(req.Users) == 0 {
-		jsonError(w, 400, "参数错误：需要 users 数组")
+		webres.Error(w, 400, "参数错误：需要 users 数组")
 		return
 	}
 	ip := s.clientIP(r)
@@ -276,19 +298,11 @@ func (s *Service) syncUsersCore(w http.ResponseWriter, r *http.Request, operator
 		}
 		if !info.Exists {
 			pw := randomHex(24)
-			salt := newSalt()
 			disabled := u.Disabled != nil && *u.Disabled
-			permsVal := ""
-			if len(u.Perms) > 0 {
-				b, _ := json.Marshal(u.Perms)
-				permsVal = string(b)
-			}
-			if _, err := s.db.Exec(`INSERT INTO users(username,password_hash,salt,role,display_name,token_version,disabled,perms) VALUES(?,?,?,?,?,?,?,?)`,
-				u.Username, hashPassword(pw, salt), salt, u.Role, u.DisplayName, initialTokenVersion(), boolInt(disabled), permsVal); err != nil {
+			if err := s.insertUser(u.Username, pw, u.Role, u.DisplayName, disabled, u.Perms); err != nil {
 				skipped = append(skipped, u.Username+"（开通失败）")
 				continue
 			}
-			s.InvalidateCache(u.Username)
 			s.db.Audit(operator, "user.sync-create", u.Username+" role="+u.Role, ip)
 			created++
 			continue
@@ -303,7 +317,7 @@ func (s *Service) syncUsersCore(w http.ResponseWriter, r *http.Request, operator
 			updated++
 		}
 	}
-	writeJSON(w, map[string]any{"created": created, "updated": updated, "skipped": skipped})
+	webres.WriteJSON(w, map[string]any{"created": created, "updated": updated, "skipped": skipped})
 }
 
 // UpdateUser PUT /api/users/{name} —— 改角色/显示名/重置密码/禁用/权限快照。
@@ -324,7 +338,7 @@ func (s *Service) updateUserCore(w http.ResponseWriter, r *http.Request, operato
 		Perms       *[]string `json:"perms"` // nil=不变，非 nil（含空数组）=覆盖
 	}
 	if err := jsonDecode(r, &req); err != nil {
-		jsonError(w, 400, "参数错误")
+		webres.Error(w, 400, "参数错误")
 		return
 	}
 	p := userPatch{Role: req.Role, DisplayName: req.DisplayName, Password: req.Password, Disabled: req.Disabled}
@@ -335,7 +349,7 @@ func (s *Service) updateUserCore(w http.ResponseWriter, r *http.Request, operato
 		writePatchErr(w, err)
 		return
 	}
-	writeJSON(w, ok())
+	webres.WriteJSON(w, ok())
 }
 
 // DeleteUser DELETE /api/users/{name} —— 级联清理该用户全部数据（行级 + 钩子）。
@@ -347,11 +361,11 @@ func (s *Service) deleteUserCore(w http.ResponseWriter, r *http.Request, operato
 	name := r.PathValue("name")
 	info, _ := s.db.GetUserAuth(name)
 	if !info.Exists {
-		jsonError(w, 404, "用户不存在")
+		webres.Error(w, 404, "用户不存在")
 		return
 	}
 	if info.Role == "admin" && !info.Disabled && s.db.CountAdmins() <= 1 {
-		jsonError(w, 400, "不能删除最后一名管理员")
+		webres.Error(w, 400, "不能删除最后一名管理员")
 		return
 	}
 	// 行级级联：账号体系 + 设置 + 文件 + 聊天（私聊/聊天室）+ 分享链接 + 反馈 +
@@ -376,7 +390,7 @@ func (s *Service) deleteUserCore(w http.ResponseWriter, r *http.Request, operato
 	if s.onUserDeleted != nil {
 		s.onUserDeleted(name)
 	}
-	writeJSON(w, ok())
+	webres.WriteJSON(w, ok())
 }
 
 // ---- 自助接口 ----
@@ -385,27 +399,24 @@ func (s *Service) deleteUserCore(w http.ResponseWriter, r *http.Request, operato
 //（身份级事件，合法吊销），新令牌由本次响应外的前端重新登录/续期取得。
 func (s *Service) ChangePassword(w http.ResponseWriter, r *http.Request) {
 	if s.externalAuth {
-		jsonError(w, http.StatusForbidden, "密码由统一身份系统管理（OPENOS_AUTH_MODE=external），本地改密已停用")
+		webres.Error(w, http.StatusForbidden, "密码由统一身份系统管理（OPENOS_AUTH_MODE=external），本地改密已停用")
 		return
 	}
 	id := FromContext(r)
 	var req struct{ Old, New string }
 	jsonDecode(r, &req)
 	info, _ := s.db.GetUserAuth(id.Username)
-	if !info.Exists || !checkPassword(req.Old, info.Salt, info.PasswordHash) {
-		jsonError(w, 400, "原密码错误")
+	if !info.Exists || checkPassword(req.Old, info.Salt, info.PasswordHash) == 0 {
+		webres.Error(w, 400, "原密码错误")
 		return
 	}
 	if WeakPassword(req.New) {
-		jsonError(w, 400, "新密码至少 8 位，且需同时包含字母与数字")
+		webres.Error(w, 400, "新密码至少 8 位，且需同时包含字母与数字")
 		return
 	}
-	ns := newSalt()
-	s.db.Exec(`UPDATE users SET password_hash=?, salt=? WHERE username=?`, hashPassword(req.New, ns), ns, id.Username)
-	s.db.BumpTokenVersion(id.Username) // 旧设备全部下线（唯一身份级吊销）
-	s.InvalidateCache(id.Username)
+	_ = s.setPassword(id.Username, req.New, true) // bump：旧设备全部下线（唯一身份级吊销）
 	s.db.Audit(id.Username, "user.password", "self（旧设备全部下线）", s.clientIP(r))
-	writeJSON(w, ok())
+	webres.WriteJSON(w, ok())
 }
 
 // SetDisplayName PUT /api/users/display-name —— 自助修改显示名（展示层字段，
@@ -416,23 +427,23 @@ func (s *Service) SetDisplayName(w http.ResponseWriter, r *http.Request) {
 		DisplayName string `json:"displayName"`
 	}
 	if err := jsonDecode(r, &req); err != nil {
-		jsonError(w, 400, "参数错误")
+		webres.Error(w, 400, "参数错误")
 		return
 	}
 	name := strings.TrimSpace(req.DisplayName)
 	if name == "" {
-		jsonError(w, 400, "显示名不能为空")
+		webres.Error(w, 400, "显示名不能为空")
 		return
 	}
 	if utf8.RuneCountInString(name) > 64 {
-		jsonError(w, 400, "显示名过长（最多 64 个字符）")
+		webres.Error(w, 400, "显示名过长（最多 64 个字符）")
 		return
 	}
 	s.db.Exec(`UPDATE users SET display_name=? WHERE username=?`, name, id.Username)
 	s.InvalidateCache(id.Username)
 	s.db.Audit(id.Username, "user.displayname", "self → "+name, s.clientIP(r))
 	s.notifyIdentityChanged(id.Username, false)
-	writeJSON(w, ok())
+	webres.WriteJSON(w, ok())
 }
 
 // SeedDefaults 创建默认演示账号（仅当用户表为空且 OPENOS_SEED_DEMO 未关闭；
@@ -453,9 +464,7 @@ func (s *Service) SeedDefaults() error {
 		{"guest", "guest123", "guest", "访客"},
 	}
 	for _, d := range defaults {
-		salt := newSalt()
-		if _, err := s.db.Exec(`INSERT INTO users(username,password_hash,salt,role,display_name,token_version) VALUES(?,?,?,?,?,?)`,
-			d.u, hashPassword(d.p, salt), salt, d.role, d.disp, initialTokenVersion()); err != nil {
+		if err := s.insertUser(d.u, d.p, d.role, d.disp, false, nil); err != nil {
 			return err
 		}
 	}

@@ -38,6 +38,7 @@ import (
 	"openos/server/internal/store"
 	"openos/server/internal/vfs"
 	"openos/server/internal/webproxy"
+	"openos/server/internal/webres"
 )
 
 func main() {
@@ -95,14 +96,8 @@ func main() {
 	// 总线连接周期复核（30s）：令牌吊销（改密/删用户）或禁用、过期后踢下线，客户端
 	// 会用本地（可能已续期）的令牌自动重连，令牌确实失效则重连被 401 拒绝。
 	// 角色不参与复核比较——授权变化实时生效不掉线（身份与授权分离，2026-10）。
-	hub.SetRevalidator(func(user, role, token string) bool {
-		// 短票连接没有长期令牌可验：按用户态复核（吊销/禁用仍即时生效）
-		if strings.HasPrefix(token, "ticket:") {
-			exists, _, _, disabled := authSvc.CurrentUserRole(user)
-			return exists && !disabled
-		}
-		id, err := authSvc.VerifySession(token)
-		return err == nil && id.Username == user
+	hub.SetRevalidator(func(user, _ /*role 不参与复核*/, token string) bool {
+		return authSvc.ConnectionStillValid(user, token)
 	})
 	aiSvc := ai.New(db)
 	fs := vfs.New(dataDir, db, hub)
@@ -222,19 +217,9 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	// verifyQueryAuth query 鉴权（?ticket= 一次性短票优先，兼容 ?token=）：
+	// query 鉴权统一走 authSvc.VerifyQuery（?ticket= 一次性短票优先，兼容 ?token=）：
 	// /ws、附件下载、商店 bundle 取件等无法携带 header 的端点共用。短票只携带
 	// 用户名，角色实时查库拼出；长期 JWT 出 URL 属过渡兼容（安全审计 2026-10）。
-	verifyQueryAuth := func(r *http.Request) (*auth.Identity, error) {
-		if user, ok := authSvc.ConsumeTicketFromRequest(r); ok {
-			exists, role, _, disabled := authSvc.CurrentUserRole(user)
-			if !exists || disabled {
-				return nil, fmt.Errorf("unauthorized")
-			}
-			return &auth.Identity{Username: user, Role: role}, nil
-		}
-		return authSvc.VerifySession(r.URL.Query().Get("token"))
-	}
 
 	// ---- 公开接口 ----
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
@@ -252,7 +237,7 @@ func main() {
 			out["ai"] = aiSvc.Configured()
 			out["online"] = hub.OnlineUsers()
 		}
-		writeJSON(w, out)
+		webres.WriteJSON(w, out)
 	})
 	mux.HandleFunc("POST /api/auth/login", authSvc.Login)
 	mux.HandleFunc("GET /api/auth/logout", authSvc.Logout)
@@ -282,11 +267,7 @@ func main() {
 	// P4 起支持 perm 收件人（与 users 二选一、并存取并集）：{perm: "computer.view"}
 	// → 服务端按角色权限矩阵展开全部持权且启用中的用户（取代宿主侧
 	// notifyPermHolders 类 SQL——权限点的权威投影已在 openos，收件人展开就地完成）。
-	mux.HandleFunc("POST /api/hub/publish", func(w http.ResponseWriter, r *http.Request) {
-		if !authSvc.CheckExchangeSecret(r.Header.Get("X-Exchange-Secret")) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
+	mux.HandleFunc("POST /api/hub/publish", authSvc.HostOnly("host")(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Users   []string       `json:"users"`
 			Perm    string         `json:"perm"`
@@ -309,8 +290,8 @@ func main() {
 				n++
 			}
 		}
-		writeJSON(w, map[string]any{"ok": true, "users": n})
-	})
+		webres.WriteJSON(w, map[string]any{"ok": true, "users": n})
+	}))
 
 	// 宿主声明式角色/权限投影（P2 2026-10）：宿主权威库的全量角色清单（键/显示名/
 	// 权限点/应用授权）+ 权限点目录，幂等同步到 roles/role_perms/role_apps
@@ -321,11 +302,7 @@ func main() {
 	// roleWriteback（可选项）：宿主角色编辑回写地址——声明后 PUT /api/roles/{key}
 	// 对宿主角色的编辑转发该地址（宿主权威落库后自行重新 declare 收敛投影），
 	// 设置「角色与权限」对宿主角色解锁可编辑；未声明 = 宿主角色只读（原行为）。
-	mux.HandleFunc("POST /api/host/declare", func(w http.ResponseWriter, r *http.Request) {
-		if !authSvc.CheckExchangeSecret(r.Header.Get("X-Exchange-Secret")) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
+	mux.HandleFunc("POST /api/host/declare", authSvc.HostOnly("host")(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Roles         []store.HostRoleEntry `json:"roles"`
 			Perms         []store.PermDef       `json:"perms"`
@@ -363,42 +340,32 @@ func main() {
 		if unresolved == nil {
 			unresolved = []store.StaleRole{}
 		}
-		writeJSON(w, map[string]any{"ok": true, "roles": len(req.Roles), "unresolved": unresolved})
-	})
+		webres.WriteJSON(w, map[string]any{"ok": true, "roles": len(req.Roles), "unresolved": unresolved})
+	}))
 
 	// ---- 宿主机对机 API 组（/api/host/*，X-Exchange-Secret 守护）——用户体系
 	// 全量管理 + 应用管理 + AI 每用户供应商。取代旧「exchange 铸 admin 服务账号
 	// 令牌再调管理 REST」的间接路径：不再依赖 OPENOS_EXCHANGE_ROLES 放行 admin、
 	// 不再产生假 admin 用户行。hostsdk 的 Manager 全部封装已切到本组。 ----
-	// hostOnly 密钥守护包装（与 declare 同款 401 语义）。
-	hostOnly := func(fn http.HandlerFunc) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			if !authSvc.CheckExchangeSecret(r.Header.Get("X-Exchange-Secret")) {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			fn(w, r)
-		}
-	}
-	// 用户体系（handler 在 auth/hostapi.go，内部自带密钥守护与审计 operator="host"）
-	mux.HandleFunc("GET /api/host/users", authSvc.HostListUsers)
-	mux.HandleFunc("POST /api/host/users", authSvc.HostCreateUser)
-	mux.HandleFunc("POST /api/host/users/sync", authSvc.HostSyncUsers)
-	mux.HandleFunc("PUT /api/host/users/{name}", authSvc.HostUpdateUser)
-	mux.HandleFunc("DELETE /api/host/users/{name}", authSvc.HostDeleteUser)
-	// 角色与权限点目录（只读对账；投影写入走 POST /api/host/declare）
-	mux.HandleFunc("GET /api/host/roles", authSvc.HostRoles)
-	// 全量应用列表（宿主对账/清退旧应用用；数据面同 REST GET /api/apps?all=1）
-	mux.HandleFunc("GET /api/host/apps", hostOnly(func(w http.ResponseWriter, r *http.Request) {
+	// hostOnly 密钥守护包装（auth.HostOnly：未配置密钥 503、密钥不符 401 且审计，
+	// 与 declare/hub/publish/exchange/introspect 同一实现）。
+	hostOnly := authSvc.HostOnly("host")
+
+	// ---- 应用注册/授权的 host 与 REST 共用内核：两组路由此前是两份逐行拷贝，
+	// 已因 body 上限缺失（REST 版三个写端点无 LimitReader）与错误吞咽（GET all=1
+	// 失败静默返回 null）分叉，收敛为一处。宿主通道经 hostOnly 已验密钥 = 恒信任
+	// locked；REST 版在内核里按密钥头判定。 ----
+	// listAllApps 全量应用列表（宿主对账 / REST GET /api/apps?all=1）。
+	listAllApps := func(w http.ResponseWriter, r *http.Request) {
 		apps, err := db.ListApps()
 		if err != nil {
 			http.Error(w, "读取应用列表失败", 500)
 			return
 		}
-		writeJSON(w, apps)
-	}))
-	// 应用注册（宿主通道恒信任 locked——密钥本身即宿主身份）与强制删除
-	mux.HandleFunc("POST /api/host/apps", hostOnly(func(w http.ResponseWriter, r *http.Request) {
+		webres.WriteJSON(w, apps)
+	}
+	// registerAppCore 应用注册（operator 区分审计归属：host / 用户名）。
+	registerAppCore := func(w http.ResponseWriter, r *http.Request, operator string) {
 		var a store.AppDef
 		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&a); err != nil || a.ID == "" || a.Name == "" {
 			http.Error(w, "参数错误：需要 id 与 name", http.StatusBadRequest)
@@ -406,35 +373,52 @@ func main() {
 		}
 		a.ID = sanitizeID(a.ID)
 		a.Builtin = false
+		// locked（宿主锁定）只信任携带交换密钥的宿主服务调用：管理员经界面/API
+		// 注册的一律普通应用；已锁定的应用仅宿主服务可改，管理员改配置会被拒
+		if !authSvc.CheckExchangeSecret(r.Header.Get("X-Exchange-Secret")) {
+			if cur, ok := db.AppByID(a.ID); ok && cur.Locked {
+				http.Error(w, "宿主内置应用不可编辑", http.StatusForbidden)
+				return
+			}
+			a.Locked = false
+		}
 		if err := db.UpsertApp(a); err != nil {
 			http.Error(w, "注册失败", 500)
 			return
 		}
-		db.Audit("host", "app.register", a.ID, "")
+		db.Audit(operator, "app.register", a.ID, "")
 		hub.Publish("sys:apps-changed", map[string]any{"id": a.ID})
-		writeJSON(w, map[string]string{"ok": "1"})
-	}))
-	mux.HandleFunc("DELETE /api/host/apps/{id}", hostOnly(func(w http.ResponseWriter, r *http.Request) {
+		webres.WriteJSON(w, map[string]string{"ok": "1"})
+	}
+	// deleteAppCore 应用删除：宿主服务调用（带交换密钥）可删自己注册的 locked
+	// 应用（宿主清退应用是正当管理操作）；界面与管理员 API 仍不可删 locked。
+	deleteAppCore := func(w http.ResponseWriter, r *http.Request, operator string) {
 		appID := r.PathValue("id")
-		if err := db.DeleteAppForced(appID); err != nil {
-			http.Error(w, "删除失败: "+err.Error(), http.StatusForbidden)
+		del := db.DeleteApp
+		if authSvc.CheckExchangeSecret(r.Header.Get("X-Exchange-Secret")) {
+			del = db.DeleteAppForced
+		}
+		if err := del(appID); err != nil {
+			http.Error(w, "内置或宿主锁定的应用不可删除", http.StatusForbidden)
 			return
 		}
-		market.RemoveBundles(appID)
-		db.Audit("host", "app.delete", appID, "")
+		market.RemoveBundles(appID) // 商店 bundle 应用卸载即清理组件文件（非 bundle / 商店关闭时为空操作）
+		db.Audit(operator, "app.delete", appID, "")
 		hub.Publish("sys:apps-changed", nil)
-		writeJSON(w, map[string]string{"ok": "1"})
-	}))
-	// 角色应用授权映射（读取对账 / 按角色全量覆盖）与角色显示名
-	mux.HandleFunc("GET /api/host/apps/access", hostOnly(func(w http.ResponseWriter, r *http.Request) {
+		webres.WriteJSON(w, map[string]string{"ok": "1"})
+	}
+	// appsAccessView 角色 → 应用授权矩阵 + 角色清单与显示名（两通道同数据面）。
+	appsAccessView := func(w http.ResponseWriter, r *http.Request) {
 		m, _ := db.RoleAccessMap()
 		roles, _ := db.ListRoles()
 		if roles == nil {
 			roles = []string{"admin", "user", "guest"}
 		}
-		writeJSON(w, map[string]any{"roles": roles, "access": m, "labels": db.RoleLabels()})
-	}))
-	mux.HandleFunc("PUT /api/host/apps/access", hostOnly(func(w http.ResponseWriter, r *http.Request) {
+		// labels：宿主注入的角色显示名（未注入为空对象，前端回落内置文案）
+		webres.WriteJSON(w, map[string]any{"roles": roles, "access": m, "labels": db.RoleLabels()})
+	}
+	// setRoleAppsCore 按角色覆盖应用授权。
+	setRoleAppsCore := func(w http.ResponseWriter, r *http.Request, operator string) {
 		var req struct {
 			Role string   `json:"role"`
 			Apps []string `json:"apps"`
@@ -447,11 +431,13 @@ func main() {
 			http.Error(w, "保存失败", 500)
 			return
 		}
-		db.Audit("host", "apps.access", "role="+req.Role, "")
+		db.Audit(operator, "apps.access", "role="+req.Role, "")
 		hub.Publish("sys:apps-changed", map[string]any{"role": req.Role})
-		writeJSON(w, map[string]string{"ok": "1"})
-	}))
-	mux.HandleFunc("PUT /api/host/apps/role-labels", hostOnly(func(w http.ResponseWriter, r *http.Request) {
+		webres.WriteJSON(w, map[string]string{"ok": "1"})
+	}
+	// setRoleLabelsCore 角色显示名全量覆盖（宿主注入，如把集成系统的角色 key 映射
+	// 为中文展示名；传空映射即清除）。
+	setRoleLabelsCore := func(w http.ResponseWriter, r *http.Request, operator string) {
 		var req struct {
 			Labels map[string]string `json:"labels"`
 		}
@@ -466,8 +452,33 @@ func main() {
 			http.Error(w, "保存失败", 500)
 			return
 		}
-		db.Audit("host", "apps.role-labels", fmt.Sprintf("%d 项", len(req.Labels)), "")
-		writeJSON(w, map[string]string{"ok": "1"})
+		db.Audit(operator, "apps.role-labels", fmt.Sprintf("%d 项", len(req.Labels)), "")
+		webres.WriteJSON(w, map[string]string{"ok": "1"})
+	}
+	// 用户体系（handler 在 auth/hostapi.go，内部自带密钥守护与审计 operator="host"）
+	mux.HandleFunc("GET /api/host/users", authSvc.HostListUsers)
+	mux.HandleFunc("POST /api/host/users", authSvc.HostCreateUser)
+	mux.HandleFunc("POST /api/host/users/sync", authSvc.HostSyncUsers)
+	mux.HandleFunc("PUT /api/host/users/{name}", authSvc.HostUpdateUser)
+	mux.HandleFunc("DELETE /api/host/users/{name}", authSvc.HostDeleteUser)
+	// 角色与权限点目录（只读对账；投影写入走 POST /api/host/declare）
+	mux.HandleFunc("GET /api/host/roles", authSvc.HostRoles)
+	// 全量应用列表（宿主对账/清退旧应用用；数据面同 REST GET /api/apps?all=1）
+	mux.HandleFunc("GET /api/host/apps", hostOnly(listAllApps))
+	// 应用注册（宿主通道恒信任 locked——密钥本身即宿主身份）与强制删除
+	mux.HandleFunc("POST /api/host/apps", hostOnly(func(w http.ResponseWriter, r *http.Request) {
+		registerAppCore(w, r, "host")
+	}))
+	mux.HandleFunc("DELETE /api/host/apps/{id}", hostOnly(func(w http.ResponseWriter, r *http.Request) {
+		deleteAppCore(w, r, "host")
+	}))
+	// 角色应用授权映射（读取对账 / 按角色全量覆盖）与角色显示名
+	mux.HandleFunc("GET /api/host/apps/access", hostOnly(appsAccessView))
+	mux.HandleFunc("PUT /api/host/apps/access", hostOnly(func(w http.ResponseWriter, r *http.Request) {
+		setRoleAppsCore(w, r, "host")
+	}))
+	mux.HandleFunc("PUT /api/host/apps/role-labels", hostOnly(func(w http.ResponseWriter, r *http.Request) {
+		setRoleLabelsCore(w, r, "host")
 	}))
 	// AI 每用户供应商（handler 与 REST 版共用，见 ai 包）
 	mux.HandleFunc("GET /api/host/ai/user-providers", hostOnly(aiSvc.GetUserProviders))
@@ -482,17 +493,7 @@ func main() {
 	// ---- WebSocket 事件总线（query 鉴权：优先 30s 一次性短票 ?ticket=，兼容 ?token=；
 	// 升级时全量校验用户态，与 REST 同一套判定） ----
 	mux.HandleFunc("GET /ws", func(w http.ResponseWriter, r *http.Request) {
-		if user, ok := authSvc.ConsumeTicketFromRequest(r); ok {
-			exists, role, _, disabled := authSvc.CurrentUserRole(user)
-			if !exists || disabled {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			hub.ServeWS(w, r, user, role, "ticket:"+user)
-			return
-		}
-		token := r.URL.Query().Get("token")
-		id, err := authSvc.VerifySession(token)
+		id, token, err := authSvc.VerifyQuery(r)
 		if err != nil {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -506,16 +507,16 @@ func main() {
 	// 通道是否可用（OPENOS_PROXY=off 时 enabled=false，应用回落浏览器直连）
 	proxyEnabled := envOr("OPENOS_PROXY", "") != "off"
 	authed.HandleFunc("GET /api/proxy/status", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]any{"enabled": proxyEnabled, "path": "/px/"})
+		webres.WriteJSON(w, map[string]any{"enabled": proxyEnabled, "path": "/px/"})
 	})
 	// 当前在线用户快照（增量事件走总线 sys:presence 主题；聊天等应用启动时取一次基线）
 	authed.HandleFunc("GET /api/presence", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]any{"online": hub.OnlineUsers()})
+		webres.WriteJSON(w, map[string]any{"online": hub.OnlineUsers()})
 	})
 	// 房间服务地址发现（gomoku/doudizhu 等游戏 bundle 启动时取 openroom 基址；
 	// OPENOS_ROOM_URL 未配置时返回空 url，应用自会提示「管理员未配置房间服务」）
 	authed.HandleFunc("GET /api/rooms/config", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]any{"url": os.Getenv("OPENOS_ROOM_URL")})
+		webres.WriteJSON(w, map[string]any{"url": os.Getenv("OPENOS_ROOM_URL")})
 	})
 	// 聊天室历史消息分页（登录即可读——总线 chat:room 广播本就全员可订阅，同边界）：
 	// ?before=<id> 取更早一页（0=最新一页），?limit= 默认 50 上限 100。
@@ -530,7 +531,7 @@ func main() {
 			http.Error(w, "查询失败", 500)
 			return
 		}
-		writeJSON(w, map[string]any{"messages": msgs})
+		webres.WriteJSON(w, map[string]any{"messages": msgs})
 	})
 	// 聊天附件归档到当前用户「文档」目录（幂等）：发送方上传后自动存、接收方点击
 	// 时存自己那份，随后前端经 openFile 用对应应用打开（图片→文件应用预览）。
@@ -557,7 +558,7 @@ func main() {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		writeJSON(w, map[string]any{"ok": "1", "path": p})
+		webres.WriteJSON(w, map[string]any{"ok": "1", "path": p})
 	})
 
 	// ---- 用户反馈（反馈应用）----
@@ -604,7 +605,7 @@ func main() {
 				"appId": "feedback",
 			})
 		}
-		writeJSON(w, map[string]any{"ok": "1", "id": fid})
+		webres.WriteJSON(w, map[string]any{"ok": "1", "id": fid})
 	})
 	// 反馈列表：管理员看全部（?mine=1 只看本人），其他角色只看本人。
 	authed.HandleFunc("GET /api/feedback", func(w http.ResponseWriter, r *http.Request) {
@@ -619,7 +620,7 @@ func main() {
 			http.Error(w, "查询失败", 500)
 			return
 		}
-		writeJSON(w, list) // 空列表恒为 [] 而非 null（ListFeedback 已保证）
+		webres.WriteJSON(w, list) // 空列表恒为 [] 而非 null（ListFeedback 已保证）
 	})
 	// 处理反馈（admin）：改状态 / 回复；回复或状态有变化时通知提交者。
 	authed.HandleFunc("PUT /api/feedback/{id}", auth.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -663,7 +664,7 @@ func main() {
 				"appId": "feedback",
 			})
 		}
-		writeJSON(w, map[string]any{"ok": "1"})
+		webres.WriteJSON(w, map[string]any{"ok": "1"})
 	})).ServeHTTP)
 
 	// 附件上传（multipart 字段 file，单文件 ≤10MB；Content-Type 边界由浏览器生成，
@@ -678,13 +679,13 @@ func main() {
 			return
 		}
 		db.Audit(id.Username, "attach.upload", m.Name, "")
-		writeJSON(w, m)
+		webres.WriteJSON(w, m)
 	})
 	// 附件下载：<img>/<a> 标签带不了 Authorization header，鉴权走查询参数 token
 	//（与 /ws、bundle 取件同例）。图片白名单内联显示，其余（含 SVG/HTML，可携带
 	// 脚本）一律 octet-stream 下载——附件服务不可变成 HTML 注入源。
 	mux.HandleFunc("GET /api/attachments/{id}", func(w http.ResponseWriter, r *http.Request) {
-		if _, err := verifyQueryAuth(r); err != nil {
+		if _, _, err := authSvc.VerifyQuery(r); err != nil {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -716,12 +717,11 @@ func main() {
 	authed.HandleFunc("GET /api/apps", func(w http.ResponseWriter, r *http.Request) {
 		id := auth.FromContext(r)
 		if id.Role == "admin" && r.URL.Query().Get("all") == "1" {
-			apps, _ := db.ListApps()
-			writeJSON(w, apps)
+			listAllApps(w, r)
 			return
 		}
 		apps, _ := db.ListAppsForRole(id.Role)
-		writeJSON(w, apps)
+		webres.WriteJSON(w, apps)
 	})
 	authed.HandleFunc("POST /api/apps", func(w http.ResponseWriter, r *http.Request) {
 		id := auth.FromContext(r)
@@ -729,29 +729,7 @@ func main() {
 			http.Error(w, "需要权限：apps.manage", http.StatusForbidden)
 			return
 		}
-		var a store.AppDef
-		if err := json.NewDecoder(r.Body).Decode(&a); err != nil || a.ID == "" || a.Name == "" {
-			http.Error(w, "参数错误：需要 id 与 name", 400)
-			return
-		}
-		a.ID = sanitizeID(a.ID)
-		a.Builtin = false
-		// locked（宿主锁定）只信任携带交换密钥的宿主服务调用：管理员经界面/API
-		// 注册的一律普通应用；已锁定的应用仅宿主服务可改，管理员改配置会被拒
-		if !authSvc.CheckExchangeSecret(r.Header.Get("X-Exchange-Secret")) {
-			if cur, ok := db.AppByID(a.ID); ok && cur.Locked {
-				http.Error(w, "宿主内置应用不可编辑", http.StatusForbidden)
-				return
-			}
-			a.Locked = false
-		}
-		if err := db.UpsertApp(a); err != nil {
-			http.Error(w, "注册失败", 500)
-			return
-		}
-		db.Audit(id.Username, "app.register", a.ID, "")
-		hub.Publish("sys:apps-changed", map[string]any{"id": a.ID})
-		writeJSON(w, map[string]string{"ok": "1"})
+		registerAppCore(w, r, id.Username)
 	})
 	authed.HandleFunc("DELETE /api/apps/{id}", func(w http.ResponseWriter, r *http.Request) {
 		id := auth.FromContext(r)
@@ -759,34 +737,14 @@ func main() {
 			http.Error(w, "需要权限：apps.manage", http.StatusForbidden)
 			return
 		}
-		appID := r.PathValue("id")
-		// 宿主服务调用（带交换密钥）可删除自己注册的 locked 应用：宿主清退应用
-		//（如下线旧版应用清单）是正当管理操作；界面与管理员 API 仍不可删 locked
-		del := db.DeleteApp
-		if authSvc.CheckExchangeSecret(r.Header.Get("X-Exchange-Secret")) {
-			del = db.DeleteAppForced
-		}
-		if err := del(appID); err != nil {
-			http.Error(w, "内置或宿主锁定的应用不可删除", http.StatusForbidden)
-			return
-		}
-		market.RemoveBundles(appID) // 商店 bundle 应用卸载即清理组件文件（非 bundle / 商店关闭时为空操作）
-		db.Audit(id.Username, "app.delete", appID, "")
-		hub.Publish("sys:apps-changed", nil)
-		writeJSON(w, map[string]string{"ok": "1"})
+		deleteAppCore(w, r, id.Username)
 	})
 	authed.HandleFunc("GET /api/apps/access", func(w http.ResponseWriter, r *http.Request) {
 		if !auth.FromContext(r).Can("apps.manage") {
 			http.Error(w, "需要权限：apps.manage", http.StatusForbidden)
 			return
 		}
-		m, _ := db.RoleAccessMap()
-		roles, _ := db.ListRoles()
-		if roles == nil {
-			roles = []string{"admin", "user", "guest"}
-		}
-		// labels：宿主注入的角色显示名（未注入为空对象，前端回落内置文案）
-		writeJSON(w, map[string]any{"roles": roles, "access": m, "labels": db.RoleLabels()})
+		appsAccessView(w, r)
 	})
 	// 角色显示名（宿主注入，如把集成系统的角色 key 映射为中文展示名）：全量覆盖
 	// 语义，宿主在启动/角色变更时整体推送，与 role_apps 同样由宿主侧维护。
@@ -796,22 +754,7 @@ func main() {
 			http.Error(w, "需要权限：apps.manage", http.StatusForbidden)
 			return
 		}
-		var req struct {
-			Labels map[string]string `json:"labels"`
-		}
-		if json.NewDecoder(r.Body).Decode(&req) != nil {
-			http.Error(w, "参数错误", 400)
-			return
-		}
-		if req.Labels == nil {
-			req.Labels = map[string]string{}
-		}
-		if err := db.SetRoleLabels(req.Labels); err != nil {
-			http.Error(w, "保存失败", 500)
-			return
-		}
-		db.Audit(id.Username, "apps.role-labels", fmt.Sprintf("%d 项", len(req.Labels)), "")
-		writeJSON(w, map[string]string{"ok": "1"})
+		setRoleLabelsCore(w, r, id.Username)
 	})
 	authed.HandleFunc("PUT /api/apps/access", func(w http.ResponseWriter, r *http.Request) {
 		id := auth.FromContext(r)
@@ -819,21 +762,7 @@ func main() {
 			http.Error(w, "需要权限：apps.manage", http.StatusForbidden)
 			return
 		}
-		var req struct {
-			Role string   `json:"role"`
-			Apps []string `json:"apps"`
-		}
-		if json.NewDecoder(r.Body).Decode(&req) != nil || req.Role == "" {
-			http.Error(w, "参数错误", 400)
-			return
-		}
-		if err := db.SetRoleApps(req.Role, req.Apps); err != nil {
-			http.Error(w, "保存失败", 500)
-			return
-		}
-		db.Audit(id.Username, "apps.access", "role="+req.Role, "")
-		hub.Publish("sys:apps-changed", map[string]any{"role": req.Role})
-		writeJSON(w, map[string]string{"ok": "1"})
+		setRoleAppsCore(w, r, id.Username)
 	})
 
 	// ---- 角色目录与功能级权限（P2 2026-10）----
@@ -858,7 +787,7 @@ func main() {
 		if perms == nil {
 			perms = []store.PermDef{}
 		}
-		writeJSON(w, map[string]any{"roles": roles, "perms": perms, "hostRolesWritable": wb != ""})
+		webres.WriteJSON(w, map[string]any{"roles": roles, "perms": perms, "hostRolesWritable": wb != ""})
 	})
 	authed.HandleFunc("PUT /api/roles/{key}", func(w http.ResponseWriter, r *http.Request) {
 		id := auth.FromContext(r)
@@ -902,7 +831,7 @@ func main() {
 		authSvc.InvalidateAllCache() // 角色矩阵变化：整体清用户态缓存立即生效
 		db.Audit(id.Username, "roles.upsert", key, "")
 		hub.Publish("sys:apps-changed", map[string]any{"role": key})
-		writeJSON(w, map[string]string{"ok": "1"})
+		webres.WriteJSON(w, map[string]string{"ok": "1"})
 	})
 	authed.HandleFunc("DELETE /api/roles/{key}", func(w http.ResponseWriter, r *http.Request) {
 		id := auth.FromContext(r)
@@ -924,7 +853,7 @@ func main() {
 		authSvc.InvalidateAllCache()
 		db.Audit(id.Username, "roles.delete", key, "")
 		hub.Publish("sys:apps-changed", map[string]any{"role": key})
-		writeJSON(w, map[string]string{"ok": "1"})
+		webres.WriteJSON(w, map[string]string{"ok": "1"})
 	})
 
 	// ---- 应用商店（OPENOS_MARKET=off 时路由不注册，商店应用也不入种子）----
@@ -960,7 +889,7 @@ func main() {
 				http.Error(w, "需要权限：market.manage", http.StatusForbidden)
 				return
 			}
-			writeJSON(w, map[string]any{"defaults": market.DefaultURLs(), "custom": market.CustomSources()})
+			webres.WriteJSON(w, map[string]any{"defaults": market.DefaultURLs(), "custom": market.CustomSources()})
 		})
 		authed.HandleFunc("PUT /api/market/sources", func(w http.ResponseWriter, r *http.Request) {
 			id := auth.FromContext(r)
@@ -987,7 +916,7 @@ func main() {
 			}
 			db.Audit(id.Username, "market.sources", fmt.Sprintf("%d 个自定义源", len(clean)), "")
 			okN, total := market.RefreshNow() // 保存即拉取，管理端保存后货架即时更新
-			writeJSON(w, map[string]any{"ok": "1", "custom": clean, "sourcesOk": okN, "entries": total})
+			webres.WriteJSON(w, map[string]any{"ok": "1", "custom": clean, "sourcesOk": okN, "entries": total})
 		})
 		// 商店「刷新」按钮：立即并发拉取全部远程目录源（与周期循环经 refreshMu 串行）。
 		// 仅 admin——虽拉取目标只来自管理员配置，但任意用户可触发会放大对配置源的
@@ -998,10 +927,10 @@ func main() {
 				return
 			}
 			okN, total := market.RefreshNow()
-			writeJSON(w, map[string]any{"sourcesOk": okN, "entries": total})
+			webres.WriteJSON(w, map[string]any{"sourcesOk": okN, "entries": total})
 		})
 		authed.HandleFunc("GET /api/market/autoupgrade", func(w http.ResponseWriter, r *http.Request) {
-			writeJSON(w, map[string]bool{"on": market.AutoUpgradeOn(db)})
+			webres.WriteJSON(w, map[string]bool{"on": market.AutoUpgradeOn(db)})
 		})
 		// 自动升级开关（market.manage，默认开）：每次目录刷新（10 分钟周期/手动刷新/源保存）
 		// 把商店安装的应用自动对齐到目录版本并保留授权；手动切过旧版本的应用会跳过
@@ -1028,10 +957,10 @@ func main() {
 			if req.On {
 				okN, total = market.RefreshNow() // 刷新尾部自动执行一轮升级
 			}
-			writeJSON(w, map[string]any{"ok": "1", "on": req.On, "sourcesOk": okN, "entries": total})
+			webres.WriteJSON(w, map[string]any{"ok": "1", "on": req.On, "sourcesOk": okN, "entries": total})
 		})
 		authed.HandleFunc("GET /api/market/apps", func(w http.ResponseWriter, r *http.Request) {
-			writeJSON(w, market.List(db))
+			webres.WriteJSON(w, market.List(db))
 		})
 		authed.HandleFunc("POST /api/market/install", func(w http.ResponseWriter, r *http.Request) {
 			id := auth.FromContext(r)
@@ -1089,13 +1018,13 @@ func main() {
 			}
 			db.Audit(id.Username, "market.install", e.ID+"@"+e.Version, "")
 			hub.Publish("sys:apps-changed", map[string]any{"id": e.ID})
-			writeJSON(w, map[string]string{"ok": "1"})
+			webres.WriteJSON(w, map[string]string{"ok": "1"})
 		})
 		// bundle 组件取件：前端 BundleApp 容器用动态 import() 加载——ESM 模块请求
 		// 无法携带 Authorization header，鉴权走查询参数 token（与 /ws 同例）。
 		// 逐请求校验：登录态 + 应用为商店安装的 bundle 形态 + 当前角色获授权。
 		mux.HandleFunc("GET /api/market/bundle/{id}", func(w http.ResponseWriter, r *http.Request) {
-			idn, err := verifyQueryAuth(r)
+			idn, _, err := authSvc.VerifyQuery(r)
 			if err != nil {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
@@ -1138,7 +1067,7 @@ func main() {
 			http.Error(w, err.Error(), 500)
 			return
 		}
-		writeJSON(w, entries)
+		webres.WriteJSON(w, entries)
 	})).ServeHTTP)
 	authed.HandleFunc("GET /api/stats", auth.RequirePerm("system.manage")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s := db.Stats(startedAt)
@@ -1146,7 +1075,7 @@ func main() {
 			// 文件统计以统一 home 磁盘为准（files 表已随 VFS 磁盘化弃用）
 			s.FileCount, s.StorageUsed = fs.DiskStats()
 		}
-		writeJSON(w, s)
+		webres.WriteJSON(w, s)
 	})).ServeHTTP)
 
 	// 虚拟文件系统（OPENOS_VFS=off 时统一 503）
@@ -1183,7 +1112,7 @@ func main() {
 			rows.Scan(&k, &v)
 			out[k] = v
 		}
-		writeJSON(w, out)
+		webres.WriteJSON(w, out)
 	})
 	authed.HandleFunc("PUT /api/settings", func(w http.ResponseWriter, r *http.Request) {
 		user := auth.FromContext(r).Username
@@ -1198,7 +1127,7 @@ func main() {
 		}
 		db.SetUserSetting(user, req.Key, req.Value)
 		db.Audit(user, "settings.put", req.Key, "")
-		writeJSON(w, map[string]string{"ok": "1"})
+		webres.WriteJSON(w, map[string]string{"ok": "1"})
 	})
 
 	// AI（goder / AI 助手）
@@ -1214,7 +1143,7 @@ func main() {
 	// AI 服务状态（所有登录用户可读：设置页展示当前模型与 goder 启用状态，不含密钥）
 	authed.HandleFunc("GET /api/ai/status", func(w http.ResponseWriter, r *http.Request) {
 		_, _, model, _ := aiSvc.Provider()
-		writeJSON(w, map[string]any{
+		webres.WriteJSON(w, map[string]any{
 			"configured": aiSvc.Configured(), "model": model, "demo": !aiSvc.Configured(),
 			"goder":         goderMgr.Status(),
 			"userProviders": db.CountAIUserProviders(),
@@ -1223,7 +1152,7 @@ func main() {
 
 	// goder 集成状态（前端引导）
 	authed.HandleFunc("GET /api/goder/status", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, goderMgr.Status())
+		webres.WriteJSON(w, goderMgr.Status())
 	})
 
 	// goder 项目目录：统一 home 下 goder/<项目名>（新建项目即项目上下文，
@@ -1243,11 +1172,11 @@ func main() {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		writeJSON(w, map[string]any{"path": dir})
+		webres.WriteJSON(w, map[string]any{"path": dir})
 	}))
 	// 用户统一 home 真实路径（goder 裸会话 workspace 兜底等场景）
 	authed.HandleFunc("GET /api/goder/home", fs.Guard(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]any{"path": fs.HomePath(auth.FromContext(r).Username)})
+		webres.WriteJSON(w, map[string]any{"path": fs.HomePath(auth.FromContext(r).Username)})
 	}))
 
 	// 日历：中国法定节假日（含调休安排）查询，内置已发布年份 + 在线同步 + 缓存
@@ -1255,7 +1184,7 @@ func main() {
 
 	// 终端能力（真实 shell 是否开启）
 	authed.HandleFunc("GET /api/term/capability", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]bool{"realShell": fs.RealShellEnabled()})
+		webres.WriteJSON(w, map[string]bool{"realShell": fs.RealShellEnabled()})
 	})
 
 	// goder-serve 反代（同源 /goder-api，注入 OpenOS 登录身份；需登录）
@@ -1288,7 +1217,7 @@ func main() {
 	// 登录后前端会调用一次 /api/auth/ready，为用户补种 home 目录
 	mux.Handle("GET /api/auth/ready", authSvc.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fs.EnsureHome(auth.FromContext(r).Username)
-		writeJSON(w, map[string]string{"ok": "1"})
+		webres.WriteJSON(w, map[string]string{"ok": "1"})
 	})))
 	mux.Handle("/api/", authSvc.Middleware(authed))
 
@@ -1318,7 +1247,7 @@ func main() {
 	}
 
 	// ---- 中间件链：恢复 → 安全头 → 访问日志 → 限流 ----
-	handler := withRecovery(withSecurityHeaders(withLogging(rateLimit(authSvc, root))))
+	handler := withRecovery(withSecurityHeaders(withLogging(rateLimit(root))))
 
 	addr := envOr("OPENOS_ADDR", "127.0.0.1:8081")
 	srv := &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
@@ -1412,7 +1341,7 @@ func (s *statusWriter) Flush() {
 
 // rateLimit 全局 IP 限流：600 次/分钟，突发 1200。覆盖 /api、/ws、/goder-api
 // 与 /app、/px（统一代理——登录用户可绕开 /api 桶打代理与子进程，安全审计 2026-09）。
-func rateLimit(_ *auth.Service, next http.Handler) http.Handler {
+func rateLimit(next http.Handler) http.Handler {
 	var mu sync.Mutex
 	buckets := map[string]*tokenBucket{}
 	get := func(ip string) *tokenBucket {
@@ -1579,11 +1508,6 @@ func sanitizeID(s string) string {
 		}
 	}
 	return b.String()
-}
-
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	json.NewEncoder(w).Encode(v)
 }
 
 // forwardRoleWrite 宿主托管角色编辑转发（PUT /api/roles/{key} 的 host 分支）：

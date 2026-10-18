@@ -19,21 +19,49 @@ import (
 	"net/http"
 
 	"openos/server/internal/store"
+	"openos/server/internal/webres"
 )
 
-// requireHostSecret 机对机守护（/api/host/* 组共用；失败时已写出响应）。
-func (s *Service) requireHostSecret(w http.ResponseWriter, r *http.Request) bool {
+// hostScopeNames 宿主通道的展示名（未启用时的错误提示用）。
+var hostScopeNames = map[string]string{
+	"host":       "宿主接口",
+	"exchange":   "令牌交换",
+	"introspect": "令牌内省",
+}
+
+// requireHostSecret 机对机守护（X-Exchange-Secret 恒定时间比对；失败时已写出
+// 响应）。未配置密钥 = 通道未启用（503）；密钥不符 = 401 且审计 auth.<scope>.deny
+//（此前 exchange/introspect/host 三组入口各写一份、未配置时状态码与审计口径
+// 不一致，收敛于此唯一实现）。scope 取 "host" / "exchange" / "introspect"。
+func (s *Service) requireHostSecret(w http.ResponseWriter, r *http.Request, scope string) bool {
 	ip := s.clientIP(r)
 	if s.exchangeSecret == "" {
-		jsonError(w, http.StatusServiceUnavailable, "宿主接口未启用（需配置 OPENOS_EXCHANGE_SECRET）")
+		webres.Error(w, http.StatusServiceUnavailable, hostScopeNames[scope]+"未启用（需配置 OPENOS_EXCHANGE_SECRET）")
 		return false
 	}
 	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Exchange-Secret")), []byte(s.exchangeSecret)) != 1 {
-		s.db.Audit("?", "auth.host.deny", "path="+r.URL.Path+" ip="+ip, ip)
-		jsonError(w, http.StatusUnauthorized, "密钥错误")
+		detail := "ip=" + ip
+		if scope == "host" {
+			detail = "path=" + r.URL.Path + " " + detail // host 组入口多，带 path 区分
+		}
+		s.db.Audit("?", "auth."+scope+".deny", detail, ip)
+		webres.Error(w, http.StatusUnauthorized, "密钥错误")
 		return false
 	}
 	return true
+}
+
+// HostOnly 机对机路由的密钥守护中间件（公开 mux 上直接注册的宿主入口用，
+// 如 /api/host/*、/api/hub/publish、/api/host/declare；scope 进审计事件名）。
+func (s *Service) HostOnly(scope string) func(http.HandlerFunc) http.HandlerFunc {
+	return func(fn http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if !s.requireHostSecret(w, r, scope) {
+				return
+			}
+			fn(w, r)
+		}
+	}
 }
 
 // Exchange POST /api/auth/exchange —— 宿主应用服务端以共享密钥换取 OpenOS JWT。
@@ -51,13 +79,7 @@ func (s *Service) requireHostSecret(w http.ResponseWriter, r *http.Request) bool
 //   - 响应与登录一致：{token, tokenTtl, user}，并种同源 Cookie 供嵌入组件使用。
 func (s *Service) Exchange(w http.ResponseWriter, r *http.Request) {
 	ip := s.clientIP(r)
-	if s.exchangeSecret == "" {
-		jsonError(w, http.StatusServiceUnavailable, "令牌交换未启用")
-		return
-	}
-	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Exchange-Secret")), []byte(s.exchangeSecret)) != 1 {
-		s.db.Audit("?", "auth.exchange.deny", "ip="+ip, ip)
-		jsonError(w, http.StatusUnauthorized, "交换密钥错误")
+	if !s.requireHostSecret(w, r, "exchange") {
 		return
 	}
 	var req struct {
@@ -70,40 +92,37 @@ func (s *Service) Exchange(w http.ResponseWriter, r *http.Request) {
 		Perms []string `json:"perms"`
 	}
 	if err := jsonDecode(r, &req); err != nil || req.Username == "" {
-		jsonError(w, 400, "参数错误")
+		webres.Error(w, 400, "参数错误")
 		return
 	}
 	if req.Role == "" {
 		req.Role = "user"
 	}
 	if !validRole(req.Role) {
-		jsonError(w, 400, "非法角色")
+		webres.Error(w, 400, "非法角色")
 		return
 	}
 	if s.exchangeRoles != nil && !s.exchangeRoles[req.Role] {
 		s.db.Audit(req.Username, "auth.exchange.deny", "role not allowed: "+req.Role, ip)
-		jsonError(w, 400, "角色不在交换白名单内（OPENOS_EXCHANGE_ROLES）")
+		webres.Error(w, 400, "角色不在交换白名单内（OPENOS_EXCHANGE_ROLES）")
 		return
 	}
 
 	info, err := s.db.GetUserAuth(req.Username)
 	if err != nil {
-		jsonError(w, 500, "读取用户失败")
+		webres.Error(w, 500, "读取用户失败")
 		return
 	}
 	if !info.Exists {
 		// 自动开通：密码置为随机值（宿主体系外的登录通道不可用）
 		pw := randomHex(24)
-		salt := newSalt()
-		if _, err := s.db.Exec(`INSERT INTO users(username,password_hash,salt,role,display_name,token_version) VALUES(?,?,?,?,?,?)`,
-			req.Username, hashPassword(pw, salt), salt, req.Role, req.DisplayName, initialTokenVersion()); err != nil {
-			jsonError(w, 400, "开通用户失败（用户名可能已存在）")
+		if err := s.insertUser(req.Username, pw, req.Role, req.DisplayName, false, nil); err != nil {
+			webres.Error(w, 400, "开通用户失败（用户名可能已存在）")
 			return
 		}
-		s.InvalidateCache(req.Username)
 		s.db.Audit(req.Username, "user.exchange-provision", "role="+req.Role, ip)
 	} else if info.Disabled {
-		jsonError(w, 403, "用户已被禁用")
+		webres.Error(w, 403, "用户已被禁用")
 		return
 	}
 
@@ -119,17 +138,17 @@ func (s *Service) Exchange(w http.ResponseWriter, r *http.Request) {
 	// 以库中最新状态（patch 可能调整了 role）签发
 	info, err = s.db.GetUserAuth(req.Username)
 	if err != nil || !info.Exists {
-		jsonError(w, 500, "读取用户失败")
+		webres.Error(w, 500, "读取用户失败")
 		return
 	}
 	token, err := s.Issue(req.Username, info.Role, info.TokenVersion)
 	if err != nil {
-		jsonError(w, 500, "签发令牌失败")
+		webres.Error(w, 500, "签发令牌失败")
 		return
 	}
 	s.setSessionCookie(w, r, token, int(s.ttl.Seconds()))
 	s.db.Audit(req.Username, "auth.exchange", "role="+info.Role, ip)
-	writeJSON(w, map[string]any{"token": token, "tokenTtl": int(s.ttl.Seconds()), "user": map[string]any{
+	webres.WriteJSON(w, map[string]any{"token": token, "tokenTtl": int(s.ttl.Seconds()), "user": map[string]any{
 		"username": req.Username, "role": info.Role, "displayName": info.DisplayName,
 		"perms": s.effectivePerms(req.Username, info.Role),
 	}})
@@ -150,35 +169,28 @@ func (s *Service) Exchange(w http.ResponseWriter, r *http.Request) {
 //   - 逐请求一跳代价可观，调用方应缓存（建议 TTL 取 min(exp-now, 60s)，对齐服务端
 //     用户态 10s 缓存的吊销时延）。
 func (s *Service) Introspect(w http.ResponseWriter, r *http.Request) {
-	if s.exchangeSecret == "" {
-		jsonError(w, http.StatusServiceUnavailable, "令牌内省未启用（需配置 OPENOS_EXCHANGE_SECRET）")
-		return
-	}
-	ip := s.clientIP(r)
-	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Exchange-Secret")), []byte(s.exchangeSecret)) != 1 {
-		s.db.Audit("?", "auth.introspect.deny", "ip="+ip, ip)
-		jsonError(w, http.StatusUnauthorized, "密钥错误")
+	if !s.requireHostSecret(w, r, "introspect") {
 		return
 	}
 	var req struct {
 		Token string `json:"token"`
 	}
 	if err := jsonDecode(r, &req); err != nil || req.Token == "" {
-		jsonError(w, 400, "参数错误")
+		webres.Error(w, 400, "参数错误")
 		return
 	}
 	c, err := s.Verify(req.Token)
 	if err != nil {
-		writeJSON(w, map[string]any{"active": false})
+		webres.WriteJSON(w, map[string]any{"active": false})
 		return
 	}
 	exists, role, tv, disabled := s.currentUserRole(c.Sub)
 	if !exists || tv != c.TV || disabled {
-		writeJSON(w, map[string]any{"active": false})
+		webres.WriteJSON(w, map[string]any{"active": false})
 		return
 	}
 	info, _ := s.db.GetUserAuth(c.Sub)
-	writeJSON(w, map[string]any{
+	webres.WriteJSON(w, map[string]any{
 		"active": true, "sub": c.Sub, "username": c.Sub,
 		"role": role, "displayName": info.DisplayName,
 		"exp": c.Exp, "iat": c.Iat,
@@ -189,7 +201,7 @@ func (s *Service) Introspect(w http.ResponseWriter, r *http.Request) {
 
 // HostListUsers GET /api/host/users —— 全字段用户列表（含权限快照与 token 版本）。
 func (s *Service) HostListUsers(w http.ResponseWriter, r *http.Request) {
-	if !s.requireHostSecret(w, r) {
+	if !s.requireHostSecret(w, r, "host") {
 		return
 	}
 	s.listUsersCore(w)
@@ -197,7 +209,7 @@ func (s *Service) HostListUsers(w http.ResponseWriter, r *http.Request) {
 
 // HostCreateUser POST /api/host/users —— 显式建用户（宿主权威；空密码 → 随机值）。
 func (s *Service) HostCreateUser(w http.ResponseWriter, r *http.Request) {
-	if !s.requireHostSecret(w, r) {
+	if !s.requireHostSecret(w, r, "host") {
 		return
 	}
 	s.createUserCore(w, r, "host", true)
@@ -205,7 +217,7 @@ func (s *Service) HostCreateUser(w http.ResponseWriter, r *http.Request) {
 
 // HostSyncUsers POST /api/host/users/sync —— 批量幂等同步（语义同 REST 版）。
 func (s *Service) HostSyncUsers(w http.ResponseWriter, r *http.Request) {
-	if !s.requireHostSecret(w, r) {
+	if !s.requireHostSecret(w, r, "host") {
 		return
 	}
 	s.syncUsersCore(w, r, "host")
@@ -213,7 +225,7 @@ func (s *Service) HostSyncUsers(w http.ResponseWriter, r *http.Request) {
 
 // HostUpdateUser PUT /api/host/users/{name} —— 字段级更新（含 perms，语义同 REST 版）。
 func (s *Service) HostUpdateUser(w http.ResponseWriter, r *http.Request) {
-	if !s.requireHostSecret(w, r) {
+	if !s.requireHostSecret(w, r, "host") {
 		return
 	}
 	s.updateUserCore(w, r, "host", true)
@@ -221,7 +233,7 @@ func (s *Service) HostUpdateUser(w http.ResponseWriter, r *http.Request) {
 
 // HostDeleteUser DELETE /api/host/users/{name} —— 删除并级联清理。
 func (s *Service) HostDeleteUser(w http.ResponseWriter, r *http.Request) {
-	if !s.requireHostSecret(w, r) {
+	if !s.requireHostSecret(w, r, "host") {
 		return
 	}
 	s.deleteUserCore(w, r, "host")
@@ -230,17 +242,17 @@ func (s *Service) HostDeleteUser(w http.ResponseWriter, r *http.Request) {
 // HostRoles GET /api/host/roles —— 角色目录 + 权限点目录（宿主侧对账/展示用；
 // 投影写入走 POST /api/host/declare）。
 func (s *Service) HostRoles(w http.ResponseWriter, r *http.Request) {
-	if !s.requireHostSecret(w, r) {
+	if !s.requireHostSecret(w, r, "host") {
 		return
 	}
 	roles, err := s.db.ListRoleDefs()
 	if err != nil {
-		jsonError(w, 500, "读取角色目录失败: "+err.Error())
+		webres.Error(w, 500, "读取角色目录失败: "+err.Error())
 		return
 	}
 	perms, err := s.db.PermsCatalog()
 	if err != nil {
-		jsonError(w, 500, "读取权限点目录失败: "+err.Error())
+		webres.Error(w, 500, "读取权限点目录失败: "+err.Error())
 		return
 	}
 	if roles == nil {
@@ -249,5 +261,5 @@ func (s *Service) HostRoles(w http.ResponseWriter, r *http.Request) {
 	if perms == nil {
 		perms = []store.PermDef{}
 	}
-	writeJSON(w, map[string]any{"roles": roles, "perms": perms})
+	webres.WriteJSON(w, map[string]any{"roles": roles, "perms": perms})
 }

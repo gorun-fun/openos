@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"openos/server/internal/store"
+	"openos/server/internal/webres"
 )
 
 // Claims JWT 载荷。
@@ -304,6 +305,38 @@ func (s *Service) VerifySession(token string) (*Identity, error) {
 	return &Identity{Username: c.Sub, Role: role, Perms: perms}, nil
 }
 
+// VerifyQuery query 鉴权（?ticket= 一次性短票优先，兼容 ?token= 长期 JWT）：
+// /ws 升级、附件下载、商店 bundle 取件等无法携带 Authorization header 的端点
+// 共用。返回身份与复核令牌——短票场景为 "ticket:"+user（供连接周期复核识别
+// 短票形态，短票本身用后即焚不可复核），JWT 场景为原始 token。
+func (s *Service) VerifyQuery(r *http.Request) (*Identity, string, error) {
+	if user, ok := s.ConsumeTicketFromRequest(r); ok {
+		exists, role, _, disabled := s.currentUserRole(user)
+		if !exists || disabled {
+			return nil, "", errors.New("unauthorized")
+		}
+		return &Identity{Username: user, Role: role}, "ticket:" + user, nil
+	}
+	token := r.URL.Query().Get("token")
+	id, err := s.VerifySession(token)
+	if err != nil {
+		return nil, "", err
+	}
+	return id, token, nil
+}
+
+// ConnectionStillValid 总线连接周期复核：短票连接（"ticket:" 前缀）无长期令牌
+// 可验、按用户态复核（吊销/禁用即时生效）；JWT 连接全量校验签名与用户态并
+// 比对用户名。此前该逻辑在 main 的 /ws 与 revalidator 各写一份，已收敛于此。
+func (s *Service) ConnectionStillValid(user, token string) bool {
+	if strings.HasPrefix(token, "ticket:") {
+		exists, _, _, disabled := s.currentUserRole(user)
+		return exists && !disabled
+	}
+	id, err := s.VerifySession(token)
+	return err == nil && id.Username == user
+}
+
 // currentUserState 取用户当前角色、token 版本、禁用态与有效权限点（10s 缓存；
 // 权限与角色同窗缓存——角色/权限变更须 InvalidateCache 立即生效）。
 func (s *Service) currentUserState(username string) (exists bool, role string, tv int64, disabled bool, perms []string) {
@@ -435,17 +468,19 @@ func hashPassword(password, salt string) string {
 // legacyIters 历史迭代参数（新→旧），checkPassword 逐级兼容并触发透明升级。
 var legacyIters = []int{20000, 4096}
 
-// checkPassword 校验密码，兼容历史参数的存量 hash。
-func checkPassword(password, salt, hash string) bool {
+// checkPassword 校验密码，兼容历史参数的存量 hash；返回命中的迭代参数
+//（0 = 不匹配）。Login 以「命中参数 ≠ 当前参数」判定是否需要透明升级——
+// 避免在成功路径上把同一次 600k 轮 PBKDF2 计算重算一遍。
+func checkPassword(password, salt, hash string) int {
 	if hashWithIters(password, salt, pbkdf2Iters) == hash {
-		return true
+		return pbkdf2Iters
 	}
 	for _, it := range legacyIters {
 		if hashWithIters(password, salt, it) == hash {
-			return true
+			return it
 		}
 	}
-	return false
+	return 0
 }
 
 func newSalt() string {
@@ -514,12 +549,12 @@ func (s *Service) Middleware(next http.Handler) http.Handler {
 		}
 		c, err := s.Verify(token)
 		if err != nil {
-			jsonError(w, http.StatusUnauthorized, "未认证或登录已过期")
+			webres.Error(w, http.StatusUnauthorized, "未认证或登录已过期")
 			return
 		}
 		exists, role, tv, disabled, perms := s.currentUserState(c.Sub)
 		if !exists || tv != c.TV || disabled {
-			jsonError(w, http.StatusUnauthorized, "凭证已失效，请重新登录")
+			webres.Error(w, http.StatusUnauthorized, "凭证已失效，请重新登录")
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(contextWithIdentity(r, &Identity{Username: c.Sub, Role: role, Perms: perms})))
@@ -546,18 +581,13 @@ func (s *Service) setSessionCookie(w http.ResponseWriter, r *http.Request, token
 	http.SetCookie(w, c)
 }
 
-// IssueTicket 签发一次性短票（登录态调用；见 ticketStore）。
-func (s *Service) IssueTicket(user string) string { return s.tickets.issue(user) }
+// issueTicket 签发一次性短票（WsTicket 处理器调用；见 ticketStore）。
+func (s *Service) issueTicket(user string) string { return s.tickets.issue(user) }
 
 // ConsumeTicketFromRequest 核销 query 短票（?ticket=）并返回用户名；
-// 与 VerifySession 组合出完整身份（query 端点鉴权用）。
+// 与 VerifySession 组合出完整身份（query 端点鉴权用，见 VerifyQuery）。
 func (s *Service) ConsumeTicketFromRequest(r *http.Request) (string, bool) {
 	return s.tickets.consume(r.URL.Query().Get("ticket"))
-}
-
-// CurrentUserRole 用户当前角色与状态（导出给总线短票连接的复核与 query 鉴权）。
-func (s *Service) CurrentUserRole(username string) (exists bool, role string, tv int64, disabled bool) {
-	return s.currentUserRole(username)
 }
 
 // ValidRoleKey 角色键合法（导出：角色目录 CRUD 校验用，与 exchange 同一规则）。
@@ -567,7 +597,7 @@ func ValidRoleKey(role string) bool { return validRole(role) }
 // /ws 与附件/商店取件等无法携带 header 的 query 鉴权场景用它替代长期 JWT。
 func (s *Service) WsTicket(w http.ResponseWriter, r *http.Request) {
 	id := FromContext(r)
-	writeJSON(w, map[string]any{"ticket": s.IssueTicket(id.Username), "ttl": int(ticketTTL.Seconds())})
+	webres.WriteJSON(w, map[string]any{"ticket": s.issueTicket(id.Username), "ttl": int(ticketTTL.Seconds())})
 }
 
 // AIProxyKey 每用户的 AI 代理密钥（"uid:hex(HMAC)"，HMAC 用 jwt_secret 派生、
@@ -596,7 +626,7 @@ func (s *Service) UserForAIProxyKey(key string) (string, bool) {
 func RequireAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if id := FromContext(r); id == nil || id.Role != "admin" {
-			jsonError(w, http.StatusForbidden, "需要管理员权限")
+			webres.Error(w, http.StatusForbidden, "需要管理员权限")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -613,7 +643,7 @@ func RequirePerm(perm string) func(http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
-			jsonError(w, http.StatusForbidden, "需要权限："+perm)
+			webres.Error(w, http.StatusForbidden, "需要权限："+perm)
 		})
 	}
 }
@@ -629,7 +659,7 @@ func FromContext(r *http.Request) *Identity {
 // Login POST /api/auth/login
 func (s *Service) Login(w http.ResponseWriter, r *http.Request) {
 	if s.externalAuth {
-		jsonError(w, http.StatusForbidden, "本地登录已禁用（OPENOS_AUTH_MODE=external），请经统一身份登录")
+		webres.Error(w, http.StatusForbidden, "本地登录已禁用（OPENOS_AUTH_MODE=external），请经统一身份登录")
 		return
 	}
 	var req struct {
@@ -637,47 +667,50 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	if err := jsonDecode(r, &req); err != nil || req.Username == "" {
-		jsonError(w, 400, "参数错误")
+		webres.Error(w, 400, "参数错误")
 		return
 	}
 	ip := s.clientIP(r)
 	key := req.Username + "|" + ip
 	if d := s.locked(key); d > 0 {
 		s.db.Audit(req.Username, "login.locked", "ip="+ip, ip)
-		jsonError(w, http.StatusTooManyRequests, "尝试过于频繁，请 "+d.Round(time.Minute).String()+" 后再试")
+		webres.Error(w, http.StatusTooManyRequests, "尝试过于频繁，请 "+d.Round(time.Minute).String()+" 后再试")
 		return
 	}
 
 	info, err := s.db.GetUserAuth(req.Username)
-	if err != nil || !info.Exists || !checkPassword(req.Password, info.Salt, info.PasswordHash) {
+	matchedIters := 0
+	if err == nil && info.Exists {
+		matchedIters = checkPassword(req.Password, info.Salt, info.PasswordHash)
+	}
+	if err != nil || !info.Exists || matchedIters == 0 {
 		s.fail(key)
 		s.db.Audit(req.Username, "login.fail", "ip="+ip, ip)
-		jsonError(w, 401, "用户名或密码错误")
+		webres.Error(w, 401, "用户名或密码错误")
 		return
 	}
 	if info.Disabled {
 		s.db.Audit(req.Username, "login.denied", "disabled", ip)
-		jsonError(w, 403, "账号已被禁用，请联系管理员")
+		webres.Error(w, 403, "账号已被禁用，请联系管理员")
 		return
 	}
-	// 旧参数 hash（4096 轮）透明升级到当前参数
-	if hashWithIters(req.Password, info.Salt, pbkdf2Iters) != info.PasswordHash {
-		ns := newSalt()
-		s.db.Exec(`UPDATE users SET password_hash=?, salt=? WHERE username=?`, hashPassword(req.Password, ns), ns, req.Username)
-		s.InvalidateCache(req.Username)
+	// 旧参数 hash（4096 轮）透明升级到当前参数（按 checkPassword 命中的参数判定，
+	// 不重算哈希；等参数重哈希不吊销已有会话）
+	if matchedIters != pbkdf2Iters {
+		_ = s.setPassword(req.Username, req.Password, false)
 	}
 	s.success(key)
 
 	token, err := s.Issue(req.Username, info.Role, info.TokenVersion)
 	if err != nil {
-		jsonError(w, 500, "签发令牌失败")
+		webres.Error(w, 500, "签发令牌失败")
 		return
 	}
 	// 同时种 Cookie：goder 等嵌入组件的同源 fetch 自动携带（httpOnly，JS 不可读）
 	s.setSessionCookie(w, r, token, int(s.ttl.Seconds()))
 	s.db.Audit(req.Username, "login.ok", "ip="+ip, ip)
 	perms := s.effectivePerms(req.Username, info.Role)
-	writeJSON(w, map[string]any{"token": token, "tokenTtl": int(s.ttl.Seconds()), "user": map[string]any{
+	webres.WriteJSON(w, map[string]any{"token": token, "tokenTtl": int(s.ttl.Seconds()), "user": map[string]any{
 		"username": req.Username, "role": info.Role, "displayName": info.DisplayName, "perms": perms,
 	}})
 }
@@ -688,7 +721,7 @@ func (s *Service) Logout(w http.ResponseWriter, r *http.Request) {
 	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
 		w.Header().Add("Set-Cookie", TokenCookie+"=; Path=/; Max-Age=0; Secure")
 	}
-	writeJSON(w, ok())
+	webres.WriteJSON(w, ok())
 }
 
 func randomHex(n int) string {
@@ -715,16 +748,16 @@ func (s *Service) Refresh(w http.ResponseWriter, r *http.Request) {
 	id := FromContext(r)
 	info, err := s.db.GetUserAuth(id.Username)
 	if err != nil || !info.Exists {
-		jsonError(w, 401, "用户不存在")
+		webres.Error(w, 401, "用户不存在")
 		return
 	}
 	token, err := s.Issue(id.Username, info.Role, info.TokenVersion)
 	if err != nil {
-		jsonError(w, 500, "签发失败")
+		webres.Error(w, 500, "签发失败")
 		return
 	}
 	s.setSessionCookie(w, r, token, int(s.ttl.Seconds()))
-	writeJSON(w, map[string]any{"token": token, "tokenTtl": int(s.ttl.Seconds()), "user": map[string]any{
+	webres.WriteJSON(w, map[string]any{"token": token, "tokenTtl": int(s.ttl.Seconds()), "user": map[string]any{
 		"username": id.Username, "role": info.Role, "displayName": info.DisplayName,
 		"perms": s.effectivePerms(id.Username, info.Role),
 	}})
@@ -738,7 +771,7 @@ func (s *Service) Me(w http.ResponseWriter, r *http.Request) {
 	if perms == nil {
 		perms = []string{}
 	}
-	writeJSON(w, map[string]any{"username": id.Username, "role": id.Role, "displayName": info.DisplayName, "perms": perms})
+	webres.WriteJSON(w, map[string]any{"username": id.Username, "role": id.Role, "displayName": info.DisplayName, "perms": perms})
 }
 
 func validRole(r string) bool {
@@ -759,17 +792,6 @@ func contextWithIdentity(r *http.Request, id *Identity) context.Context {
 // 如 osmcp 插件以某用户身份调用 vfs handler）。身份须由调用方先行校验。
 func WithIdentity(r *http.Request, id *Identity) *http.Request {
 	return r.WithContext(contextWithIdentity(r, id))
-}
-
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	json.NewEncoder(w).Encode(v)
-}
-
-func jsonError(w http.ResponseWriter, code int, msg string) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
 func jsonDecode(r *http.Request, v any) error {
