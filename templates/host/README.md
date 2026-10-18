@@ -56,6 +56,11 @@ mgr.Declare(roleDecls, permDecls)   // 取代 os_role_seed 标记表类 workarou
 
 // 5) 业务事件 → 桌面通知（旁路，失败不影响业务事务）：
 mgr.NotifyUsers(userIDs, "保洁任务", "3 楼 301 已派发", "rooms")
+
+// 6) token-hub 套餐 → goder 每用户模型供应商同步（可选，AISyncer）：
+hostsdk.NewAISyncer(hostsdk.AISyncConfig{
+    THBase: cfg.THURL, THKey: cfg.THKey, SetDefault: true,
+}, mgr).Run(ctx)   // 周期全量声明；整轮 users 失败绝不写空清单
 ```
 
 ## 前端接线（app/web）
@@ -64,10 +69,26 @@ mgr.NotifyUsers(userIDs, "保洁任务", "3 楼 301 已派发", "rooms")
 import { createOpenOS } from '@openos/framework'
 import { createHostApi } from '@openos/host'
 
+// 宿主业务 API 客户端：令牌内存缓存 + 401 静默续期（refresh Cookie 复活）重试
+// + SSO 跳转挂起 + 6h 保活，续期响应带 openos_token 时自动同步 openos 客户端。
+// 不配置 session 则退化为简单形态（401 → onUnauthorized）。
 export const os = createHostApi({
   tokenKey: 'token', base: '/api/v1',
-  onUnauthorized() { location.href = '/api/v1/auth/sso/login' },
+  headers: () => ({}),                                    // 动态附加头（如门店上下文）
+  session: { loginUrl: '/api/v1/auth/sso/login' },
 })
+
+// goder 能力清单（CAP）：createCapKit 把「REST 端点 + 权限码 + 参数 schema」
+// 收敛为声明式条目（q 只读 / act 操作 + method / view 可视化；project 投影脱敏），
+// 见 web/src/capkit.ts。
+import { createCapKit, capS, capObj } from '@openos/framework'
+const caps = createCapKit(os)
+export const CAPABILITIES = {
+  rooms: {
+    queries: [caps.q('vacant', { title: '今日空房', perm: 'room.view',
+      path: '/rooms/vacant', desc: '…' })],
+  },
+}
 
 createOpenOS({
   apps: { rooms: () => import('./apps/RoomsApp.vue') },   // 编译期兜底
@@ -75,6 +96,7 @@ createOpenOS({
   login: { mode: 'sso', url: '/api/v1/auth/sso/login' },
   brand: { name: '业务系统', sub: '基于 OpenOS' },
   chrome: { rooms: 'merged' },                            // 融合窗体
+  capabilities: CAPABILITIES,
 })
 ```
 
