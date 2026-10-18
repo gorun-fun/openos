@@ -118,10 +118,27 @@
   }
 
   // withMark 给还原空间的地址补 __os_px 标记（pushState 会整体覆盖 query，须持续
-  // 维持标记；绝对 URL 原样——跨源 replaceState 本就会被浏览器拒绝）
+  // 维持标记）。绝对 URL 仅同源形态折回路径再补标记——跨源 replaceState/pushState
+  // 本就被浏览器拒绝；同源绝对地址（SPA 用 location.origin+path 拼出，代理页里
+  // origin 已是宿主源、浏览器视为同源放行）此前原样透传会进入【无标记】形态：
+  // 后续 location 赋值类逃逸的 Referer 无标记，服务端 CatchEscape/PxEscape 回捕
+  // 失守，iframe 逃到宿主根路径落 SPA 兜底（美团 ebooking 门户新工作台实测：
+  // merchant/home 以绝对地址 pushState 后未登录弹 /login/ 即整窗变「不能在
+  // iframe 内打开」守卫页）。折回仅取 path+query，hash 部分原样拼回。
   function withMark(u) {
-    if (!u || !PXMARK || u.charAt(0) === '#' || /^[a-z][a-z0-9+.-]*:/i.test(u)) return u;
+    if (!u || !PXMARK || u.charAt(0) === '#') return u;
     try {
+      if (/^[a-z][a-z0-9+.-]*:\/\//i.test(u)) {
+        var o = location.origin;
+        var np = location.protocol + '//' + location.hostname + '/';
+        var xs = (location.protocol === 'https:' ? 'http' : 'https') + '//' + location.hostname + '/';
+        var hit = -1;
+        if (u.indexOf(o + '/') === 0) hit = o.length;
+        else if (u.indexOf(np) === 0) hit = np.length - 1;
+        else if (u.indexOf(xs) === 0) hit = xs.length - 1;
+        if (hit < 0) return u; // 跨源：原样（浏览器本就拒绝该类 replaceState）
+        u = u.slice(hit) || '/';
+      }
       u = pxQuery(u);
       var i = u.indexOf('#'), h = i >= 0 ? u.slice(i) : '';
       if (i >= 0) u = u.slice(0, i);
