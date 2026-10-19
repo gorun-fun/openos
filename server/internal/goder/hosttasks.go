@@ -62,19 +62,19 @@ func (m *Manager) Addr() string { return m.addr }
 
 // HostTaskCreateRequest POST /api/host/goder/tasks 请求体。
 type HostTaskCreateRequest struct {
-	UID      string `json:"uid"`      // openos 用户名（= exchange 传入的 username）
-	Workspace string `json:"workspace"` // 会话工作区（已存在的绝对路径，通常是宿主准备好的仓库工作区）
-	Task     string `json:"task"`     // 任务全文（首条用户消息）
-	Model    string `json:"model"`    // 模型：裸名（如 glm-5.3-flash）或全限定名（TokenHub/glm-5.3-flash）；空 = 用户默认
-	Title    string `json:"title"`    // 会话在分组里的标题；空 = 任务首行截断
-	Group    string `json:"group"`    // 分组名；空 = 自动修复
-	MaxSteps int    `json:"max_steps"`
+	UID          string `json:"uid"`       // openos 用户名（= exchange 传入的 username）
+	Workspace    string `json:"workspace"` // 会话工作区（已存在的绝对路径，通常是宿主准备好的仓库工作区）
+	Task         string `json:"task"`      // 任务全文（首条用户消息）
+	Model        string `json:"model"`     // 模型：裸名（如 glm-5.3-flash）或全限定名（TokenHub/glm-5.3-flash）；空 = 用户默认
+	Title        string `json:"title"`     // 会话在分组里的标题；空 = 任务首行截断
+	Group        string `json:"group"`     // 分组名；空 = 自动修复
+	MaxSteps     int    `json:"max_steps"`
 	SystemPrompt string `json:"system_prompt"`
 }
 
 // hostTaskContext 无人值守宿主任务的会话环境简报：与用户在桌面打开
 // goder 时的 host_context（GoderStudio 注入）同源语义，但无桌面工具面
-//（不装 osmcp，见文件头）。核心是交互约束——无头会话里 ask_user 类
+// （不装 osmcp，见文件头）。核心是交互约束——无头会话里 ask_user 类
 // 交互会挂起等待永不到来的用户。
 func hostTaskContext(uid string) string {
 	return fmt.Sprintf(
@@ -302,11 +302,11 @@ func (h *HostTasks) loopback(ctx context.Context, method, path string, body []by
 
 // ghResponse gh server Responses 资源的精简视图（轮询够用）。
 type ghResponse struct {
-	ID         string `json:"id"`
-	Status     string `json:"status"`
-	Model      string `json:"model"`
-	SessionID  string `json:"grf:session_id"`
-	Error      *struct {
+	ID        string `json:"id"`
+	Status    string `json:"status"`
+	Model     string `json:"model"`
+	SessionID string `json:"grf:session_id"`
+	Error     *struct {
 		Message string `json:"message"`
 	} `json:"error"`
 	IncompleteDetails *struct {
@@ -350,7 +350,9 @@ func (r *ghResponse) assistantText() string {
 // 服务端解析裸名（默认供应商优先 → 唯一供应商命中 → 歧义忽略），但这里
 // 保留本地解析：无头任务要 fail-fast——解析失败给管理员可读的错误（套餐
 // 未含/未同步是最常见原因），绝不静默换模型，而 gh 的 best-effort 语义会
-// 静默回落默认。空 = 用户默认。
+// 静默回落默认。歧义口径与 gh 的 ResolveModel 对齐：默认供应商含该模型
+// 优先，多家供应商同名命中时报错（不武断挑字母序首家——旧实现会把修复
+// 流量静默路由到意料外的供应商）。空 = 用户默认。
 func (h *HostTasks) resolveModel(uid, want string) (string, error) {
 	raw, err := os.ReadFile(filepath.Join(GrfHomePath(h.m.dataDir, uid), "settings.json"))
 	if err != nil {
@@ -395,10 +397,22 @@ func (h *HostTasks) resolveModel(uid, want string) (string, error) {
 		}
 		return "", fmt.Errorf("模型 %s 不在用户 %s 的可用清单（供应商未配置或套餐未含）", want, uid)
 	default:
+		// gh ResolveModel 同款择序：默认供应商优先 → 恰一家命中；多家歧义
+		// 不武断挑选，交由错误面暴露（fail-fast，绝不静默换路由）
+		if dp, _, ok := strings.Cut(cfg.Default, "/"); ok && has(dp, want) {
+			return dp + "/" + want, nil
+		}
+		hit := ""
 		for _, n := range names {
 			if has(n, want) {
-				return n + "/" + want, nil
+				if hit != "" {
+					return "", fmt.Errorf("模型 %s 同时在用户 %s 的多家供应商清单（%s、%s），请用全限定名 供应商/模型 指定", want, uid, hit, n)
+				}
+				hit = n
 			}
+		}
+		if hit != "" {
+			return hit + "/" + want, nil
 		}
 		return "", fmt.Errorf("模型 %s 不在用户 %s 的可用清单（token-hub 套餐未含或未同步，可在「设置 → AI」或套餐侧确认）", want, uid)
 	}

@@ -16,7 +16,7 @@
 // 写盘规则与 osmcp 的插件 upsert 同一套路：map[string]json.RawMessage 保留
 // 未知键、内容不变不写、0600。settings.json 尚不存在（用户还没打开过 goder）
 // 时以空白配置起播并建目录——仍应赶在 goder-serve 播种与 gh 首次启动之前
-//（首启即读到正确配置，新会话直接生效）；gh 新版已在回合边界检测
+// （首启即读到正确配置，新会话直接生效）；gh 新版已在回合边界检测
 // settings.json 变更并让存量会话跟随新默认（见 grf-harness 的
 // refreshDefaultClient），错过播种窗口也不再需要重启/空闲回收兜底。
 package goder
@@ -223,7 +223,32 @@ func upsertAIProviders(settingsPath string, cfg ProviderConfig, extras []store.A
 			return false, err
 		}
 	}
-	return true, os.WriteFile(settingsPath, out, 0o600)
+	return true, WriteSettingsAtomic(settingsPath, out)
+}
+
+// WriteSettingsAtomic 原子落盘 settings.json（同目录临时文件 + rename）：
+// gh 新版在回合边界热跟随本文件（每回合 stat，指纹变化即全量解析），且
+// goder/gh 侧的写盘均已原子化（goder internal/grfsettings 与 gh 的
+// WriteFileAtomic 均为同目录 tmp+rename）——openos 的两个写者（本包 AI
+// 供应商渲染、osmcp 插件 upsert）若继续就地 WriteFile，撕裂读会让 gh 该
+// 回合解析失败跳过跟随（轻）甚至触发按空文档的损坏自愈（重）。rename
+// 保证读者要么见旧全文要么见新全文；临时名带随机后缀防两写者互踩
+// （osmcp 复用，见 install.go upsertSettings）。
+func WriteSettingsAtomic(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".settings-*.tmp")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name) // rename 成功后为 no-op，失败/写坏时清残件
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, path) // CreateTemp 恒 0600，与既有写入权限一致
 }
 
 func mustMarshalString(s string) json.RawMessage {

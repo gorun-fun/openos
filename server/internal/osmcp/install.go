@@ -113,7 +113,9 @@ func upsertSettings(settingsPath, exe, endpoint, token, uid string) error {
 	if string(out) == string(raw) {
 		return nil
 	}
-	return os.WriteFile(settingsPath, out, 0o600)
+	// 原子写（goder.WriteSettingsAtomic）：与 goder aisync 写同一份文件，
+	// gh 回合边界热跟随时撕裂读会解析失败/触发空文档自愈
+	return goder.WriteSettingsAtomic(settingsPath, out)
 }
 
 // readWrapperUID 从既有 wrapper 内容里抠出烙写的用户名（存量自愈用：目录名是
