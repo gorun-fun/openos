@@ -3,10 +3,14 @@
 // 可自由拖动/缩放，浏览体验（侧栏/多视图/搜索）与访达完全一致；
 // 请求方 await fileDialog(...)，用户在窗口内确认后 Promise 以路径 resolve，
 // 取消或直接关窗则 resolve null。
-import { useWindows } from '../stores/windows'
+// 应答走 ui/launch 的拉起信封（reqId + 关窗兜底 + 幂等回执三件由 launch 统一
+// 承载，本文件不再自建 pending 表）：FilesApp 从窗口 props 的 __launch 取
+// reqId、经 resolveLaunch 回执路径。
+import { launch } from './launch'
 
 export interface FileDialogRequest {
-  reqId: string
+  /** 应答 id：由 launch 信封注入（FilesApp 侧从 __launch.reqId 填充），调用方无须传 */
+  reqId?: string
   mode: 'open' | 'save'
   title?: string
   defaultDir?: string
@@ -15,24 +19,12 @@ export interface FileDialogRequest {
   exts?: string[]
 }
 
-const pending = new Map<string, (path: string | null) => void>()
-let seq = 0
-
 /** 打开文件选择窗口（复用文件应用）；resolve 为选中的目标路径，取消为 null。 */
 export function fileDialog(opts: Omit<FileDialogRequest, 'reqId'>): Promise<string | null> {
-  const req: FileDialogRequest = { reqId: `fd-${Date.now()}-${++seq}`, ...opts }
-  return new Promise((resolve) => {
-    pending.set(req.reqId, resolve)
-    const windows = useWindows()
-    // props 带 reqId 保证并发的多次选择各自开窗不去重
-    windows.open('files', { picker: req }, req.title || (req.mode === 'open' ? '打开' : '存储为'), { w: 880, h: 560 })
-  })
-}
-
-/** 文件窗口回执：确认（带目标路径）或取消（null）。幂等，重复调用只生效一次。 */
-export function resolveFileDialog(reqId: string, path: string | null) {
-  const fn = pending.get(reqId)
-  if (!fn) return
-  pending.delete(reqId)
-  fn(path)
+  // props 带 picker 保证并发的多次选择各自开窗不去重（launch 的 reqId 唯一，
+  // 本就不走 open() 的同参数去重）；窗口尺寸沿旧形态。
+  return launch('files', { picker: opts }, {
+    title: opts.title || (opts.mode === 'open' ? '打开' : '存储为'),
+    width: 880, height: 560,
+  }) as Promise<string | null>
 }

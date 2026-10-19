@@ -4,17 +4,20 @@
 // gh server 会话并后台执行任务（background 模式），会话落在该用户自己的
 // goder 数据目录里——用户打开 goder 即可跟进完整修复过程与续聊。
 //
-// 执行链：EnsureAIUser（渲染该用户的托管/声明供应商，先于 gh 懒启动）→
-// 回环调 goder-serve（X-GRF-UID 身份，与 ProxyHandler 同款注入）→
-// POST /goder-api/v1/responses（首请求带 grf:session：workspace 必须已存在，
-// 无人值守语义固定 write-workspace + auto_approve，不开放给调用方）→
-// background 立回 queued，调用方轮询 GET 取终态 / POST cancel 取消。
+// 执行链：EnsureAIUser（经管理面声明该用户的托管/声明供应商，先于 gh 懒
+// 启动）→ 管理面解析模型（fail-fast：歧义/未含给可读错误，择序由 goder-serve
+// 与 gh ResolveModel 对齐维护，openos 不再复刻）→ 回环调 goder-serve
+//（X-GRF-UID 身份，与 ProxyHandler 同款注入）→ POST /goder-api/v1/responses
+//（首请求带 grf:session：workspace 必须已存在，无人值守语义固定
+// write-workspace + auto_approve，不开放给调用方）→ background 立回 queued，
+// 调用方轮询 GET 取终态 / POST cancel 取消。
 //
-// 会话归组：goder 的分组索引（项目 → 会话）在前端是本地态，openos 嵌入态已
-// 镜像到 user_settings 的 goder.index 键（GoderStudio 的 setPersistence 适配器：
-// load 服务端优先、save 防抖回写）。这里在创建成功后把会话条目写进该键并确保
-// 「自动修复」项目存在，用户下次打开 goder 会话即出现在该分组下；save 侧的
-// 合并逻辑（同文件 GoderStudio.vue）防止陈旧浏览器副本把代建条目冲回未分组。
+// 会话归组：经 goder-serve 管理面把会话追加进服务端会话索引
+//（POST /admin/users/{uid}/index/sessions，读改写在服务端一把锁内完成）；
+// 前端 GoderStudio 的 setPersistence 适配器同样以 goder-serve 索引为权威
+//（load/save 走 /goder-api/index）。历史实现经 user_settings 的 goder.index
+// 镜像三方耦合（服务端直写 + 浏览器读改写合并）已收敛为单一存储。归组
+// best-effort：失败不影响任务执行，会话回落「未分组」仍可见。
 //
 // 安全边界：X-Exchange-Secret 全信任（宿主级）；不装 osmcp 桌面控制插件——
 // 无头修复会话不需要桌面工具面，也不给模型多余的攻击面（用户自己打开 goder
@@ -31,27 +34,26 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
-	"openos/server/internal/store"
+	"openos/server/internal/webres"
 )
 
-// goder.index 镜像键与自动修复分组的常量见 index.go（分组编排整体拆出）。
+// goder.index 归组的默认值见 index.go（分组编排整体拆出）；
+// 管理面客户端见 admin.go。
 
 // HostTasks 宿主机对机 goder 任务端点（main 以 hostOnly 包装挂路由）。
 type HostTasks struct {
 	m   *Manager
-	db  *store.DB
 	hc  *http.Client
 	log func(string, ...any)
 }
 
-// NewHostTasks 构造（db 用于分组索引读写；可为 nil = 不归组，仅执行）。
-func NewHostTasks(m *Manager, db *store.DB) *HostTasks {
+// NewHostTasks 构造（会话归组走 goder-serve 管理面，不再需要 openos 库）。
+func NewHostTasks(m *Manager) *HostTasks {
 	return &HostTasks{
-		m: m, db: db,
+		m:   m,
 		hc:  &http.Client{Timeout: 60 * time.Second},
 		log: log.Printf,
 	}
@@ -62,12 +64,14 @@ func (m *Manager) Addr() string { return m.addr }
 
 // HostTaskCreateRequest POST /api/host/goder/tasks 请求体。
 type HostTaskCreateRequest struct {
-	UID          string `json:"uid"`       // openos 用户名（= exchange 传入的 username）
-	Workspace    string `json:"workspace"` // 会话工作区（已存在的绝对路径，通常是宿主准备好的仓库工作区）
-	Task         string `json:"task"`      // 任务全文（首条用户消息）
-	Model        string `json:"model"`     // 模型：裸名（如 glm-5.3-flash）或全限定名（TokenHub/glm-5.3-flash）；空 = 用户默认
-	Title        string `json:"title"`     // 会话在分组里的标题；空 = 任务首行截断
-	Group        string `json:"group"`     // 分组名；空 = 自动修复
+	UID       string `json:"uid"`        // openos 用户名（= exchange 传入的 username）
+	Workspace string `json:"workspace"`  // 会话工作区（已存在的绝对路径，通常是宿主准备好的仓库工作区）
+	Task      string `json:"task"`       // 任务全文（首条用户消息）
+	Model     string `json:"model"`      // 模型：裸名（如 glm-5.3-flash）或全限定名（TokenHub/glm-5.3-flash）；空 = 用户默认
+	Title     string `json:"title"`      // 会话在分组里的标题；空 = 任务首行截断
+	Group     string `json:"group"`      // 分组名；空 = 自动修复
+	ProjectID string `json:"project_id"` // 分组项目 id；空 = fixer（同一业务复用稳定 id，改名不重建分组）
+	Actor     string `json:"actor"`      // 身份显示名（透传 X-GRF-Name）；空 = 自动修复
 	MaxSteps     int    `json:"max_steps"`
 	SystemPrompt string `json:"system_prompt"`
 }
@@ -89,33 +93,33 @@ func hostTaskContext(uid string) string {
 func (h *HostTasks) Create(w http.ResponseWriter, r *http.Request) {
 	var req HostTaskCreateRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&req); err != nil {
-		hostErr(w, 400, "请求体解析失败: "+err.Error())
+		webres.Error(w, 400, "请求体解析失败: "+err.Error())
 		return
 	}
 	req.UID = strings.TrimSpace(req.UID)
 	req.Workspace = strings.TrimSpace(req.Workspace)
 	if req.UID == "" || req.Workspace == "" || strings.TrimSpace(req.Task) == "" {
-		hostErr(w, 400, "uid / workspace / task 必填")
+		webres.Error(w, 400, "uid / workspace / task 必填")
 		return
 	}
 	if !filepath.IsAbs(req.Workspace) {
-		hostErr(w, 400, "workspace 必须是绝对路径")
+		webres.Error(w, 400, "workspace 必须是绝对路径")
 		return
 	}
 	if st, err := os.Stat(req.Workspace); err != nil || !st.IsDir() {
-		hostErr(w, 400, "workspace 目录不存在: "+req.Workspace)
+		webres.Error(w, 400, "workspace 目录不存在: "+req.Workspace)
 		return
 	}
 	if !h.ready() {
-		hostErr(w, 503, "goder 服务未就绪（未部署或未启用，见 GET /api/goder/status）")
+		webres.Error(w, 503, "goder 服务未就绪（未部署或未启用，见 GET /api/goder/status）")
 		return
 	}
 	// 供应商就位（幂等，先于 gh 懒启动；不装 osmcp 插件，见文件头说明）
 	h.m.EnsureAIUser(req.UID)
 
-	model, err := h.resolveModel(req.UID, req.Model)
+	model, err := h.resolveModel(r.Context(), req.UID, req.Model)
 	if err != nil {
-		hostErr(w, 400, err.Error())
+		webres.Error(w, 400, err.Error())
 		return
 	}
 
@@ -127,9 +131,17 @@ func (h *HostTasks) Create(w http.ResponseWriter, r *http.Request) {
 	if group == "" {
 		group = fixerGroupName
 	}
+	projectID := req.ProjectID
+	if projectID == "" {
+		projectID = fixerProjectID
+	}
+	actor := req.Actor
+	if actor == "" {
+		actor = fixerGroupName
+	}
 	maxSteps := req.MaxSteps
 	if maxSteps <= 0 {
-		maxSteps = defaultFixModels
+		maxSteps = defaultFixSteps
 	}
 	sessCfg := map[string]any{
 		"workspace":    req.Workspace,
@@ -152,21 +164,19 @@ func (h *HostTasks) Create(w http.ResponseWriter, r *http.Request) {
 		"grf:session": sessCfg,
 	})
 	var created ghResponse
-	if err := h.loopback(r.Context(), http.MethodPost, "/goder-api/v1/responses", body, req.UID, &created); err != nil {
-		hostErr(w, 502, "创建 goder 会话失败: "+err.Error())
+	if err := h.loopback(r.Context(), http.MethodPost, "/goder-api/v1/responses", body, req.UID, actor, &created); err != nil {
+		webres.Error(w, 502, "创建 goder 会话失败: "+err.Error())
 		return
 	}
 	if created.SessionID == "" || created.ID == "" {
-		hostErr(w, 502, "goder 会话创建响应异常（缺 grf:session_id / id）")
+		webres.Error(w, 502, "goder 会话创建响应异常（缺 grf:session_id / id）")
 		return
 	}
 	// 归组（best-effort：失败不影响任务执行，会话回落「未分组」仍可见）
-	if h.db != nil {
-		if err := h.indexSession(req.UID, created.SessionID, title, group, model, created.ID); err != nil {
-			h.log("[goder] host 任务归组失败(%s/%s): %v", req.UID, created.SessionID, err)
-		}
+	if err := h.indexSession(r.Context(), req.UID, created.SessionID, projectID, group, title, model, created.ID); err != nil {
+		h.log("[goder] host 任务归组失败(%s/%s): %v", req.UID, created.SessionID, err)
 	}
-	writeHostJSON(w, 200, map[string]any{
+	webres.WriteJSON(w, map[string]any{
 		"session_id":  created.SessionID,
 		"response_id": created.ID,
 		"model":       model,
@@ -180,7 +190,7 @@ func (h *HostTasks) Get(w http.ResponseWriter, r *http.Request) {
 	h.withTask(w, r, "查询 goder 任务失败", func(uid, id string) error {
 		h.m.EnsureAIUser(uid)
 		var res ghResponse
-		if err := h.loopback(r.Context(), http.MethodGet, "/goder-api/v1/responses/"+id, nil, uid, &res); err != nil {
+		if err := h.loopback(r.Context(), http.MethodGet, "/goder-api/v1/responses/"+id, nil, uid, fixerGroupName, &res); err != nil {
 			return err
 		}
 		out := map[string]any{
@@ -203,7 +213,7 @@ func (h *HostTasks) Get(w http.ResponseWriter, r *http.Request) {
 				"output_tokens": res.Usage.OutputTokens,
 			}
 		}
-		writeHostJSON(w, 200, out)
+		webres.WriteJSON(w, out)
 		return nil
 	})
 }
@@ -212,34 +222,34 @@ func (h *HostTasks) Get(w http.ResponseWriter, r *http.Request) {
 func (h *HostTasks) Cancel(w http.ResponseWriter, r *http.Request) {
 	h.withTask(w, r, "取消 goder 任务失败", func(uid, id string) error {
 		var res json.RawMessage
-		if err := h.loopback(r.Context(), http.MethodPost, "/goder-api/v1/responses/"+id+"/cancel", []byte("{}"), uid, &res); err != nil {
+		if err := h.loopback(r.Context(), http.MethodPost, "/goder-api/v1/responses/"+id+"/cancel", []byte("{}"), uid, fixerGroupName, &res); err != nil {
 			return err
 		}
-		writeHostJSON(w, 200, map[string]any{"ok": true})
+		webres.WriteJSON(w, map[string]any{"ok": true})
 		return nil
 	})
 }
 
 // withTask Get/Cancel 的公共前言：uid/id 必填校验 + ready 检查后以 uid/id
 // 执行回调；回调返回的 error 统一按 hostHTTPError 解包——goder-serve 的
-// 非 200 原状态原体透传，其余错误 502 + failMsg（错误响应语义与抽取前
-// 两分支逐字一致）。回调写完各自的 200 响应后返回 nil。
+// 非 200 原状态原体透传，其余错误 502 + failMsg。回调写完各自的 200 响应后
+// 返回 nil。
 func (h *HostTasks) withTask(w http.ResponseWriter, r *http.Request, failMsg string, fn func(uid, id string) error) {
 	uid, id := r.PathValue("uid"), r.PathValue("id")
 	if uid == "" || id == "" {
-		hostErr(w, 400, "uid / id 必填")
+		webres.Error(w, 400, "uid / id 必填")
 		return
 	}
 	if !h.ready() {
-		hostErr(w, 503, "goder 服务未就绪")
+		webres.Error(w, 503, "goder 服务未就绪")
 		return
 	}
 	if err := fn(uid, id); err != nil {
 		if he, ok := err.(*hostHTTPError); ok {
-			writeHostJSON(w, he.status, he.body)
+			webres.WriteJSONStatus(w, he.status, he.body)
 			return
 		}
-		hostErr(w, 502, failMsg+": "+err.Error())
+		webres.Error(w, 502, failMsg+": "+err.Error())
 		return
 	}
 }
@@ -264,9 +274,9 @@ func (e *hostHTTPError) Error() string {
 	return fmt.Sprintf("goder-serve HTTP %d", e.status)
 }
 
-// loopback 以指定用户身份调 goder-serve（header 身份注入与 ProxyHandler 同源：
-// 覆盖式 set，环回直连不受外部伪造影响）。
-func (h *HostTasks) loopback(ctx context.Context, method, path string, body []byte, uid string, out any) error {
+// loopback 以指定用户身份调 goder-serve（header 身份注入与 ProxyHandler
+// 同源：覆盖式 set，环回直连不受外部伪造影响；name 为身份显示名）。
+func (h *HostTasks) loopback(ctx context.Context, method, path string, body []byte, uid, name string, out any) error {
 	var rd io.Reader
 	if body != nil {
 		rd = bytes.NewReader(body)
@@ -277,7 +287,7 @@ func (h *HostTasks) loopback(ctx context.Context, method, path string, body []by
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-GRF-UID", uid)
-	req.Header.Set("X-GRF-Name", "自动修复")
+	req.Header.Set("X-GRF-Name", name)
 	resp, err := h.hc.Do(req)
 	if err != nil {
 		return err
@@ -346,86 +356,31 @@ func (r *ghResponse) assistantText() string {
 	return ""
 }
 
-// resolveModel 把请求模型解析成全限定名（provider/model）。gh 新版已能在
-// 服务端解析裸名（默认供应商优先 → 唯一供应商命中 → 歧义忽略），但这里
-// 保留本地解析：无头任务要 fail-fast——解析失败给管理员可读的错误（套餐
-// 未含/未同步是最常见原因），绝不静默换模型，而 gh 的 best-effort 语义会
-// 静默回落默认。歧义口径与 gh 的 ResolveModel 对齐：默认供应商含该模型
-// 优先，多家供应商同名命中时报错（不武断挑字母序首家——旧实现会把修复
-// 流量静默路由到意料外的供应商）。空 = 用户默认。
-func (h *HostTasks) resolveModel(uid, want string) (string, error) {
-	raw, err := os.ReadFile(filepath.Join(GrfHomePath(h.m.dataDir, uid), "settings.json"))
+// resolveModel 把请求模型解析成全限定名（provider/model）。解析择序（默认
+// 供应商优先 → 恰一家命中；多家歧义如实上报，不武断挑选）由 goder-serve
+// 管理面承载（与 gh config.ResolveModel 对齐维护，openos 不再复刻规则）；
+// 这里只做 fail-fast 的错误文案合成——无头任务绝不静默换模型，套餐未含/
+// 未同步给管理员可读的错误是最常见诉求。空 = 用户默认。
+func (h *HostTasks) resolveModel(ctx context.Context, uid, want string) (string, error) {
+	res, err := h.m.adminResolveModel(ctx, uid, want)
 	if err != nil {
-		return "", fmt.Errorf("用户 %s 的 goder 模型配置不可读（先登录一次 goder 或检查 AI 供应商同步）: %v", uid, err)
+		return "", fmt.Errorf("用户 %s 的模型配置查询失败（goder 管理面不可达）: %v", uid, err)
 	}
-	var cfg struct {
-		Providers map[string]struct {
-			Models []string `json:"models"`
-		} `json:"providers"`
-		Default string `json:"default"`
-	}
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return "", fmt.Errorf("用户 %s 的 settings.json 损坏: %v", uid, err)
-	}
-	names := make([]string, 0, len(cfg.Providers))
-	for n := range cfg.Providers {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	has := func(provider, model string) bool {
-		p, ok := cfg.Providers[provider]
-		if !ok {
-			return false
-		}
-		for _, m := range p.Models {
-			if m == model {
-				return true
-			}
-		}
-		return false
-	}
-	switch {
-	case want == "":
-		if cfg.Default == "" {
-			return "", fmt.Errorf("用户 %s 未配置默认模型（token-hub 套餐未绑定或未同步）", uid)
-		}
-		return cfg.Default, nil
-	case strings.Contains(want, "/"):
-		provider, model, _ := strings.Cut(want, "/")
-		if has(provider, model) {
-			return want, nil
-		}
-		return "", fmt.Errorf("模型 %s 不在用户 %s 的可用清单（供应商未配置或套餐未含）", want, uid)
-	default:
-		// gh ResolveModel 同款择序：默认供应商优先 → 恰一家命中；多家歧义
-		// 不武断挑选，交由错误面暴露（fail-fast，绝不静默换路由）
-		if dp, _, ok := strings.Cut(cfg.Default, "/"); ok && has(dp, want) {
-			return dp + "/" + want, nil
-		}
-		hit := ""
-		for _, n := range names {
-			if has(n, want) {
-				if hit != "" {
-					return "", fmt.Errorf("模型 %s 同时在用户 %s 的多家供应商清单（%s、%s），请用全限定名 供应商/模型 指定", want, uid, hit, n)
-				}
-				hit = n
-			}
-		}
-		if hit != "" {
-			return hit + "/" + want, nil
+	switch res.Status {
+	case "ok":
+		return res.Resolved, nil
+	case "no_default":
+		return "", fmt.Errorf("用户 %s 未配置默认模型（token-hub 套餐未绑定或未同步）", uid)
+	case "ambiguous":
+		return "", fmt.Errorf("模型 %s 同时在用户 %s 的多家供应商清单（%s），请用全限定名 供应商/模型 指定", want, uid, strings.Join(res.Candidates, "、"))
+	case "not_found":
+		if strings.Contains(want, "/") {
+			return "", fmt.Errorf("模型 %s 不在用户 %s 的可用清单（供应商未配置或套餐未含）", want, uid)
 		}
 		return "", fmt.Errorf("模型 %s 不在用户 %s 的可用清单（token-hub 套餐未含或未同步，可在「设置 → AI」或套餐侧确认）", want, uid)
+	default: // unreadable
+		return "", fmt.Errorf("用户 %s 的 goder 模型配置不可读（先登录一次 goder 或检查 AI 供应商同步）", uid)
 	}
 }
 
-// indexSession / deriveHostTitle（goder.index 分组编排）见 index.go。
-
-func hostErr(w http.ResponseWriter, status int, msg string) {
-	writeHostJSON(w, status, map[string]any{"error": msg})
-}
-
-func writeHostJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-}
+// indexSession / deriveHostTitle（会话归组编排）见 index.go。

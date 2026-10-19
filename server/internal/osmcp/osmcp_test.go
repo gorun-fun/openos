@@ -1,15 +1,16 @@
 // osmcp_test.go — MCP 分派/鉴权、工具（设置/VFS 进程内调用）、前端桥往返、
-// 安装器（wrapper/settings 两种模式/幂等/自愈）、shim 行协议。
+// 安装器（经宿主管理面假件：幂等跳过/失败重试/存量自愈）、shim 行协议。
 package osmcp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -108,23 +109,38 @@ func TestToolsList(t *testing.T) {
 	if err := json.Unmarshal(out.Result, &res); err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Tools) != 35 { // 20 内置 + P6 11（share×3/market×3/users/app_tools/app_tool/calendar/dock）+ CAP 4（caps/app_call/app_query/app_ui）
-		t.Fatalf("应有 35 个工具，got %d", len(res.Tools))
+	// ① 与注册表完全一致（单一事实源 staticToolList 即 tools/list 的装配实现：
+	//    装配丢工具/错位在此暴露——原硬编码 35 断言的真实意图）
+	want := s.staticToolList()
+	if len(res.Tools) != len(want) {
+		t.Fatalf("tools/list 应与注册表一致：%d 个工具，got %d", len(want), len(res.Tools))
 	}
-	want := map[string]bool{"os_info": false, "os_apps_list": false, "os_fs_write": false,
-		"os_window_open": false, "os_desktop_state": false, "os_notes_do": false, "os_bus_publish": false}
-	for _, tl := range res.Tools {
-		if _, ok := want[tl.Name]; ok {
-			want[tl.Name] = true
+	seen := map[string]bool{}
+	for i, tl := range res.Tools {
+		if name, _ := want[i]["name"].(string); tl.Name != name {
+			t.Errorf("第 %d 个工具应为 %s，got %s", i, name, tl.Name)
 		}
 		if tl.Description == "" || tl.InputSchema == nil {
 			t.Errorf("工具 %s 缺 description 或 inputSchema", tl.Name)
 		}
-	}
-	for name, seen := range want {
-		if !seen {
-			t.Errorf("缺少工具 %s", name)
+		// ② 全部 os_ 前缀且无重名
+		if !strings.HasPrefix(tl.Name, "os_") {
+			t.Errorf("工具 %s 缺 os_ 前缀", tl.Name)
 		}
+		if seen[tl.Name] {
+			t.Errorf("工具重名: %s", tl.Name)
+		}
+		seen[tl.Name] = true
+	}
+	// ③ CAP 四件必须在场（新应用接入不改服务端的根基）
+	for _, name := range []string{"os_caps", "os_app_query", "os_app_call", "os_app_ui"} {
+		if !seen[name] {
+			t.Errorf("缺少 CAP 工具 %s", name)
+		}
+	}
+	// ④ 宽松下限：防注册组意外大面积丢失（精确账目由①保证）
+	if len(res.Tools) <= 30 {
+		t.Fatalf("工具总数应大于 30，got %d", len(res.Tools))
 	}
 }
 
@@ -374,107 +390,109 @@ func TestBridgeErrorAndTimeout(t *testing.T) {
 	}
 }
 
-func TestInstallPlugin(t *testing.T) {
-	grfHome := t.TempDir()
-	endpoint := "http://127.0.0.1:7712/mcp"
+// fakeGoderAdmin — 宿主管理面假件（记录安装调用；wrapper/settings 双模式
+// 落盘语义已上移 goder-serve，见 goder 仓 pkg/ghserver/hostsettings_test.go）。
+type fakeGoderAdmin struct {
+	mu       sync.Mutex
+	installs []fakeInstall
+	listed   []goder.AdminPluginItem
+	fail     bool
+}
 
-	if err := installPlugin("/opt/openos-server", grfHome, endpoint, "tok", "alice"); err != nil {
-		t.Fatal(err)
-	}
-	wrapPath := filepath.Join(grfHome, "plugins", wrapperFileName())
-	raw, err := os.ReadFile(wrapPath)
-	if err != nil {
-		t.Fatalf("wrapper 未落盘: %v", err)
-	}
-	want := wrapperContent("/opt/openos-server", endpoint, "tok", "alice")
-	if string(raw) != want {
-		t.Fatalf("wrapper 内容不符:\n got %q\nwant %q", raw, want)
-	}
-	st, _ := os.Stat(wrapPath)
-	if st.Mode().Perm() != 0o700 {
-		t.Fatalf("wrapper 权限应为 0700，got %v", st.Mode().Perm())
-	}
-	// 自动发现模式：不应创建 settings.json
-	if _, err := os.Stat(filepath.Join(grfHome, "settings.json")); !os.IsNotExist(err) {
-		t.Fatal("自动发现模式不应写 settings.json")
-	}
-	// readWrapperUID 能从 wrapper 抠回用户名（healAll 依赖）
-	if uid := readWrapperUID(wrapPath); uid != "alice" {
-		t.Fatalf("readWrapperUID 应得 alice，got %q", uid)
-	}
+type fakeInstall struct {
+	uid, name string
+	command   []string
+}
 
-	// 显式列表模式：settings.json 有 plugins 键 → upsert 命令项且保留他人条目
-	settings := filepath.Join(grfHome, "settings.json")
-	seed := `{"model": "gpt", "plugins": [{"name": "other", "command": ["x"]}]}` + "\n"
-	if err := os.WriteFile(settings, []byte(seed), 0o600); err != nil {
-		t.Fatal(err)
+func (f *fakeGoderAdmin) InstallHostPlugin(_ context.Context, uid, name string, command []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fail {
+		return errors.New("goder 服务未就绪")
 	}
-	if err := installPlugin("/opt/openos-server", grfHome, endpoint, "tok", "alice"); err != nil {
-		t.Fatal(err)
+	f.installs = append(f.installs, fakeInstall{uid, name, command})
+	return nil
+}
+
+func (f *fakeGoderAdmin) ListHostPlugins(context.Context) ([]goder.AdminPluginItem, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.listed, nil
+}
+
+func (f *fakeGoderAdmin) EnsureReady(time.Duration) bool { return true }
+
+func (f *fakeGoderAdmin) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.installs)
+}
+
+func TestEnsureUserInstallsViaAdmin(t *testing.T) {
+	deps, _, _ := newTestDeps(t)
+	fake := &fakeGoderAdmin{}
+	deps.Goder = fake
+	m := &Manager{deps: deps, installed: map[string]string{}, exe: "/opt/openos-server", cfg: Config{Addr: "127.0.0.1:7712"}}
+
+	// 用户名含特殊字符：安装命令按原始 uid 透传（目录清洗是 goder-serve 的事）
+	m.EnsureUser("we ird!")
+	if fake.count() != 1 {
+		t.Fatalf("首调应安装一次,got %d", fake.count())
 	}
-	var cfg struct {
-		Plugins []struct {
-			Name    string   `json:"name"`
-			Command []string `json:"command"`
-		} `json:"plugins"`
+	ins := fake.installs[0]
+	if ins.uid != "we ird!" || ins.name != pluginName || len(ins.command) != 5 {
+		t.Fatalf("安装参数不符: %+v", ins)
 	}
-	data, _ := os.ReadFile(settings)
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		t.Fatal(err)
+	if ins.command[0] != "/opt/openos-server" || ins.command[1] != "mcp-shim" ||
+		!strings.HasPrefix(ins.command[2], "http://127.0.0.1:7712") || ins.command[4] != "we ird!" {
+		t.Fatalf("命令行不符: %v", ins.command)
 	}
-	if len(cfg.Plugins) != 2 {
-		t.Fatalf("显式模式应有两个插件条目，got %d: %s", len(cfg.Plugins), data)
+	// 幂等：命令行未变不重放
+	m.EnsureUser("we ird!")
+	if fake.count() != 1 {
+		t.Fatalf("命令行未变应跳过,got %d", fake.count())
 	}
-	var openos *struct {
-		Name    string   `json:"name"`
-		Command []string `json:"command"`
+	// 安装失败不记缓存：下次重试
+	fake.mu.Lock()
+	fake.fail = true
+	fake.mu.Unlock()
+	m.exe = "/new/path/openos-server" // 命令行变化触发重放（失败）
+	m.EnsureUser("we ird!")
+	if fake.count() != 1 {
+		t.Fatalf("失败调用不应记录,got %d", fake.count())
 	}
-	for i := range cfg.Plugins {
-		if cfg.Plugins[i].Name == pluginName {
-			openos = &cfg.Plugins[i]
-		}
+	fake.mu.Lock()
+	fake.fail = false
+	fake.mu.Unlock()
+	m.EnsureUser("we ird!")
+	if fake.count() != 2 {
+		t.Fatalf("失败后应重试成功,got %d", fake.count())
 	}
-	if openos == nil || len(openos.Command) != 5 || openos.Command[3] != "tok" || openos.Command[4] != "alice" {
-		t.Fatalf("openos 命令项不符: %+v", openos)
-	}
-	// 再装一次 → upsert 不重复
-	if err := installPlugin("/opt/openos-server", grfHome, endpoint, "tok", "alice"); err != nil {
-		t.Fatal(err)
-	}
-	data, _ = os.ReadFile(settings)
-	_ = json.Unmarshal(data, &cfg)
-	if len(cfg.Plugins) != 2 {
-		t.Fatalf("重复安装不应新增条目，got %d", len(cfg.Plugins))
+	if fake.installs[1].command[0] != "/new/path/openos-server" {
+		t.Fatalf("重试应带新 exe: %v", fake.installs[1].command)
 	}
 }
 
-func TestManagerEnsureAndHeal(t *testing.T) {
+func TestHealUsers(t *testing.T) {
 	deps, _, _ := newTestDeps(t)
-	m := &Manager{deps: deps, marks: map[string]ensMark{}, exe: "/opt/openos-server", cfg: Config{Addr: "127.0.0.1:7712", Token: "tok"}}
+	fake := &fakeGoderAdmin{listed: []goder.AdminPluginItem{
+		{UID: "张三", San: "张三", Name: pluginName},
+		{UID: "u2", San: "u2", Name: pluginName},
+		{UID: "u3", San: "u3", Name: "someone-else"}, // 非本插件：不动
+	}}
+	deps.Goder = fake
+	m := &Manager{deps: deps, installed: map[string]string{}, exe: "/opt/openos-server", cfg: Config{Addr: "127.0.0.1:7712"}}
 
-	// 用户名含特殊字符 → 清洗后目录
-	m.EnsureUser("we ird!")
-	wrap := filepath.Join(goder.GrfHomePath(deps.DataDir, "we ird!"), "plugins", wrapperFileName())
-	raw, err := os.ReadFile(wrap)
-	if err != nil {
-		t.Fatalf("EnsureUser 未落 wrapper: %v", err)
+	if n := m.healUsers(); n != 2 {
+		t.Fatalf("应自愈两个用户,got %d", n)
 	}
-	if !strings.Contains(string(raw), `"we ird!" "$@"`) && !strings.Contains(string(raw), "we ird!") {
-		t.Fatalf("wrapper 应烙原始用户名: %q", raw)
+	if fake.count() != 2 {
+		t.Fatalf("安装计数不符,got %d", fake.count())
 	}
-	if uid := readWrapperUID(wrap); uid != "we ird!" {
-		t.Fatalf("wrapper 用户名往返不符: %q", uid)
-	}
-
-	// 自愈：可执行路径变化后 healAll 按旧 wrapper 抠回用户名重写
-	m.exe = "/new/path/openos-server"
-	m.healAll()
-	raw, err = os.ReadFile(wrap)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(raw), "/new/path/openos-server") {
-		t.Fatalf("healAll 应重写 wrapper: %q", raw)
+	for _, ins := range fake.installs {
+		if ins.name != pluginName {
+			t.Fatalf("不应安装其它插件: %+v", ins)
+		}
 	}
 }
 

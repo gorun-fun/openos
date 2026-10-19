@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"openos/server/internal/atomicfile"
 	"openos/server/internal/store"
 )
 
@@ -116,17 +117,15 @@ func (s *Store) Save(uploader string, r *http.Request) (Meta, error) {
 	if err != nil {
 		return Meta{}, err
 	}
-	tmp := s.FilePath(id) + ".tmp"
-	dst, err := os.Create(tmp)
+	st, err := atomicfile.Stage(s.FilePath(id), 0o644)
 	if err != nil {
 		return Meta{}, err
 	}
 
 	// 单次流式读：前 512B 嗅探 mime，边写边计大小，超限即中止清理。
-	// fail 收敛「关文件 + 删临时文件 + 返回错」五处清理路径（漏一处即留 .tmp 垃圾）。
+	// fail 收敛「放弃暂存（关文件 + 删 .tmp）+ 返回错」清理路径（漏一处即留垃圾）。
 	fail := func(err error) (Meta, error) {
-		dst.Close()
-		os.Remove(tmp)
+		st.Abort()
 		return Meta{}, err
 	}
 	var head []byte
@@ -142,7 +141,7 @@ func (s *Store) Save(uploader string, r *http.Request) (Meta, error) {
 				}
 				head = append(head, buf[:take]...)
 			}
-			if _, werr := dst.Write(buf[:n]); werr != nil {
+			if _, werr := st.Write(buf[:n]); werr != nil {
 				return fail(werr)
 			}
 			size += int64(n)
@@ -157,12 +156,8 @@ func (s *Store) Save(uploader string, r *http.Request) (Meta, error) {
 			return fail(rerr)
 		}
 	}
-	if err := dst.Close(); err != nil {
-		os.Remove(tmp)
-		return Meta{}, err
-	}
-	if err := os.Rename(tmp, s.FilePath(id)); err != nil {
-		os.Remove(tmp)
+	// Commit 关暂存并原子改名落位（同目录 .tmp → 正式路径，任一步失败自清理）
+	if err := st.Commit(); err != nil {
 		return Meta{}, err
 	}
 

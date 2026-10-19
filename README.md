@@ -250,19 +250,19 @@ goder 嵌入约定的 `newProject` 钩子（`POST /api/goder/project` 建目录�
 
 goder 里的 AI（gh 智能体）可通过内置的 **openos MCP 插件** 控制当前用户桌面上的所有功能应用：开/关/排列窗口、切换深色与壁纸、管理便签、读写 VFS 文件（文档/表格应用的数据）、发通知、发布任意总线主题（驱动声明式/第三方应用）。goder 启用时自动部署，无需配置。
 
-**架构**（不修改 goder 上游，接入方式与 goder 自带 `goder-console` 插件同款）：
+**架构**（不修改 goder 上游；接入经 goder-serve **宿主管理面**声明式安装——`POST /goder-api/admin/plugins/install`，与 goder 自带 `goder-console` 插件同款双模式落盘，由 goder-serve 承载）：
 
 ```
 gh server（每用户一个，goder-serve 子进程）
-  └─ 自动发现 grf-home/plugins/openos（wrapper 脚本，OpenOS 落盘）
+  └─ 自动发现 grf-home/plugins/openos（wrapper 脚本，goder-serve 按声明落盘）
        └─ exec openos-server mcp-shim <endpoint> <token> <user>   ← stdio MCP 插件
             ↕ HTTP JSON-RPC（127.0.0.1:7712/mcp，Bearer 令牌 + X-OS-User）
-openos-server 进程内 osmcp 包（35 个 os_* 工具，gh 侧全名 mcp__openos__os_*）
+openos-server 进程内 osmcp 包（os_* 工具，gh 侧全名 mcp__openos__os_*）
   ├─ 服务端直答：应用列表 / 用户设置 / VFS 文件（复用 vfs 权限与配额）/ 总线发布
   │              / 文件分享 / 商店安装（权限点门控）/ 用户目录（权限点门控）
   └─ 前端桥：PublishTo(user,"sys:agent") ↓ 浏览器 agentBridge 执行
               bus.remote("agent:resp") ↑ 回传结果（15s 超时兜底）
-              桌面/便签/日历/Dock + 能力暴露层（os_caps/os_app_*，见「能力暴露层」）
+              桌面/Dock + 能力暴露层（os_caps/os_app_*，calendar/notes 数据也在其中）
               + 宿主自定义工具（见「扩展点」）
 ```
 
@@ -272,7 +272,7 @@ openos-server 进程内 osmcp 包（35 个 os_* 工具，gh 侧全名 mcp__openo
 |---|---|
 | 系统 | `os_info`（版本/用户/goder 状态/在线用户）、`os_apps_list`（可用应用）、`os_users_list`（全部用户目录，需 `users.manage` 权限） |
 | 窗口/桌面 | `os_desktop_state`（窗口列表+外观实时状态）、`os_window_open/close/do`（focus/minimize/最大化/半屏吸附/移动尺寸/改标题）、`os_app_open_file`（按扩展名选应用打开）、`os_desktop_do`（壁纸/深色/Dock 自动隐藏）、`os_notify`（系统通知，入通知中心可回看） |
-| 数据 | `os_notes_do`（便签增删改查）、`os_calendar_do`（日程 list/add/remove）、`os_dock_do`（Dock 固定/移除/重排）、`os_settings_get/put`、`os_fs_list/read/write/mkdir/delete/search/usage`（VFS，限定 `/home/<用户>`、≤8MB、配额 100MB，写入广播 `fs:changed` 自动刷新文件应用） |
+| 数据 | `os_dock_do`（Dock 固定/移除/重排）、`os_settings_get/put`、`os_fs_list/read/write/mkdir/delete/search/usage`（VFS，限定 `/home/<用户>`、≤8MB、配额 100MB，写入广播 `fs:changed` 自动刷新文件应用）；便签/日历数据经能力暴露层（`os_app_query`/`os_app_call`，appId=notes/calendar） |
 | 分享 | `os_share_list/create/revoke`（跨用户文件分享链接：默认 7 天上限 30 天，owner 校验/撤销/审计与 REST 完全一致） |
 | 商店 | `os_market_list/install/uninstall`（目录/安装/卸载，需 `market.manage` 权限——首个非本人维度的工具，按功能权限点门控） |
 | 通用通道 | `os_bus_publish`（向自己桌面发布任意总线主题，可驱动声明式应用的 `dataSource.topic`）、`os_app_tools`/`os_app_tool`（宿主自定义工具的发现与执行，已并入能力暴露层 `origin:legacy`，保留兼容） |
@@ -288,7 +288,7 @@ openos-server 进程内 osmcp 包（35 个 os_* 工具，gh 侧全名 mcp__openo
 
 - **能力三分类**：`queries`（只读数据查询，**无需打开应用即可执行**——fn 直读 store 或 http 声明式取数）、`actions`（业务操作）、`views`（可视化操作入口：打开到指定视图 + `data-os-cap` 锚点高亮 + `steps` 分步引导文案，AI 可转述给用户）。
 - **执行三模式**（每个能力三选一，优先级 run > http > window）：`run` fn 回调在桌面壳执行（应用窗口无需在场）；`http` 声明式 REST——GET/DELETE 时 args 映射 query 参数、POST/PUT 作 JSON body，相对 `/api/…` 走 OpenOS 登录态、绝对地址裸 fetch（`auth:true` 强制携带，宿主同源后端用）；`window` 打开/聚焦窗口并携带 props（应用按 props 路由视图）。
-- **四层来源同一协议**：L1 内置应用随代码注册（calendar/notes 为首批示范）；L2 宿主声明 `createOpenOS({ capabilities: { rooms: {…} } })`——**grf-hotel/grf-os 零侵入接入，业务数据层用 http 模式零代码暴露**；L3 动态应用运行期注册（`OpenOS.registerCapabilities` / `registerApp({ capabilities })`，商店 bundle 应用经 `window.OpenOS`）；schema 声明式应用在 config JSON 顶层 `agentCaps` 键声明（纯 JSON，仅 http/window 模式，管理员配置即暴露）。旧 registerAgentTool 以 `origin:'legacy'` 并入同一执行管线。
+- **四层来源同一协议**：L1 内置应用随代码注册（calendar/notes 为首批示范）；L2 宿主声明 `createOpenOS({ capabilities: { rooms: {…} } })`——grf-hotel/grf-os 零侵入接入（grf-hotel 实际全量走 run 回调调自家 API 客户端；http 声明式模式协议仍支持）；L3 动态应用运行期注册（`OpenOS.registerCapabilities` / `registerApp({ capabilities })`，商店 bundle 应用经 `window.OpenOS`）；schema 声明式应用在 config JSON 顶层 `agentCaps` 键声明（纯 JSON，仅 http/window 模式，管理员配置即暴露）。旧 registerAgentTool 以 `origin:'legacy'` 并入同一执行管线。
 - **宿主声明示例**（grf-hotel「查空房 + 打开房态盘」）：
 
   ```ts
@@ -313,7 +313,7 @@ openos-server 进程内 osmcp 包（35 个 os_* 工具，gh 侧全名 mcp__openo
 
 **安全边界**：MCP 端点仅监听回环地址 + Bearer 令牌（`<data>/goder/osmcp.json`，0600 持久化，**按用户分发、令牌↔X-OS-User 成对校验**）；wrapper 0700；工具执行前校验用户存在且未禁用；**工具只作用于发起用户本人**（`os_users_list`/`os_market_*` 为只读/管理维度，按功能权限点门控——admin 恒持，细分授权经角色权限矩阵下发）；写类工具入审计日志（`goder.tool`）。
 
-**生效时机与自愈**：新用户首次访问 `/goder-api` 时落 wrapper（先于该用户 gh 懒启动，gh 启动即发现插件）；服务重启时扫描存量用户目录自动重装（应对二进制路径变化，dev 的 `go run` 亦适用）。**已在运行的存量 gh server 不热加载插件**——部署本功能后重启 openos-server 即可（容器部署天然干净）；宿主 `~/.grf` 种子若预置了 `plugins` 键（显式列表模式），插件以命令项 upsert 进入，同样需 gh 重启。
+**生效时机与自愈**：新用户首次访问 `/goder-api` 时经管理面安装（先于该用户 gh 懒启动，gh 启动即发现插件；命令行未变即跳过重放）；服务重启时经管理面清单回读存量用户自动重装（应对二进制路径/端点变化，dev 的 `go run` 亦适用）。**已在运行的存量 gh server 不热加载插件**——部署本功能后重启 openos-server 即可（容器部署天然干净）；宿主 `~/.grf` 种子若预置了 `plugins` 键（显式列表模式），插件以命令项 upsert 进入，同样需 gh 重启。
 
 相关环境变量：`OPENOS_OSMCP=off`（停用插件）、`OPENOS_OSMCP_ADDR`（默认 127.0.0.1:7712，被占自动回退随机端口）。
 

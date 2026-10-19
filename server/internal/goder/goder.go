@@ -15,10 +15,10 @@
 package goder
 
 import (
-	"bytes"
-	"encoding/json"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -27,7 +27,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -55,11 +54,19 @@ type Manager struct {
 
 	proxy *httputil.ReverseProxy
 
+	// adminToken / admin：goder-serve 宿主管理面（/goder-api/admin/*，
+	// 声明式集成通道——供应商声明/模型解析/插件安装/会话索引/用户目录
+	// 生命周期）的 Bearer 令牌与客户端。未配置 GODER_ADMIN_TOKEN 时每次
+	// 进程启动生成随机值（子进程只听回环、令牌只在本进程与子进程之间
+	// 流转，无须持久化）。全部管理面调用走 adminCall（见 admin.go）。
+	adminToken string
+	admin      *http.Client
+
 	// AI 联动（见 aisync.go）。锁归属单一：本组全部字段只由 aiMu 保护
 	//（历史上曾横跨 mu/aiMu 两把锁，读者无从判断该用哪把，已统一收敛）；
 	// mu 只管子进程生命周期（cmd/started/ready）。
-	aiMu    sync.Mutex
-	aiMarks map[string]aiMark
+	aiMu   sync.Mutex
+	aiEnsured map[string]string
 	// AI 代理（安全审计 2026-10）：非空时托管供应商写「代理地址 + 每用户代理密钥」
 	// 而非直连平台 Key——平台 Key 不再落任何 goder 用户家目录
 	aiProxyBase string
@@ -82,7 +89,17 @@ func New(dataDir string) *Manager {
 		ghBin:    envOr("OPENOS_GH_BIN", "gh"),
 		dataDir:  dataDir,
 		disabled: os.Getenv("OPENOS_GODER") == "off",
-		aiMarks:  map[string]aiMark{},
+		aiEnsured: map[string]string{},
+		admin:     &http.Client{Timeout: 30 * time.Second},
+	}
+	m.adminToken = os.Getenv("GODER_ADMIN_TOKEN")
+	if m.adminToken == "" {
+		// 未配置则自持随机令牌（launch 时注入子进程）：管理面只服务本进程
+		// 的声明式集成，运维仍可用 GODER_ADMIN_TOKEN 显式指定固定值。
+		b := make([]byte, 24)
+		if _, err := rand.Read(b); err == nil {
+			m.adminToken = hex.EncodeToString(b)
+		}
 	}
 	if m.disabled {
 		m.lastErr = "goder 已通过 OPENOS_GODER=off 停用"
@@ -160,15 +177,18 @@ func (m *Manager) launch() {
 	}, safeenv.GhEnvOverrides()...)
 	// goder-serve 网关自身的可调项（存在才透传）：空闲回收 TTL、进程生命
 	// 周期事件回调（GODER_WEBHOOK_URL/_SECRET，回调带 X-Goder-Signature
-	// HMAC 签名头）、运维面令牌（GODER_ADMIN_TOKEN，/goder-api/admin/*）。
-	// 值均来自部署配置（与白名单同信任级）、不含 OPENOS_* 秘密。
+	// HMAC 签名头）。值来自部署配置（与白名单同信任级）、不含 OPENOS_* 秘密。
 	for _, name := range []string{
-		"GODER_IDLE_TTL", "GODER_WEBHOOK_URL", "GODER_WEBHOOK_SECRET", "GODER_ADMIN_TOKEN",
+		"GODER_IDLE_TTL", "GODER_WEBHOOK_URL", "GODER_WEBHOOK_SECRET",
 	} {
 		if v := os.Getenv(name); v != "" {
 			overrides = append(overrides, name+"="+v)
 		}
 	}
+	// 管理面令牌恒注入（New 里已确定：配置值或自持随机值）——声明式集成
+	// （供应商/插件/索引/删号级联）全走 /goder-api/admin/*，不再依赖部署
+	// 侧显式配置才可用。
+	overrides = append(overrides, "GODER_ADMIN_TOKEN="+m.adminToken)
 	cmd.Env = safeenv.Env(overrides...)
 	cmd.Stdout = logWriter{prefix: "[goder-serve] "}
 	cmd.Stderr = logWriter{prefix: "[goder-serve] "}
@@ -254,26 +274,31 @@ func (m *Manager) Status() map[string]any {
 	}
 }
 
-// DeleteUserData 删除某用户的 goder 会话数据目录（header 身份模式下按 UID 分目录；
-// 删用户时级联清理，目录不存在时为空操作）。
+// DeleteUserData 删除某用户的 goder 全部数据（停其 gh 进程 + 删用户目录，
+// 幂等）。删用户时级联清理；经 goder-serve 管理面完成（含 PerUserHome 目录
+// 清洗规则），openos 不再触碰 serve-data 布局。
 func (m *Manager) DeleteUserData(username string) {
-	if username == "" {
+	if username == "" || m.disabled {
 		return
 	}
-	// serve-data 实际布局为 users/<清洗后 uid>（PerUserHome），历史实现少了 users
-	// 段且未做 uid 清洗，删号级联从未真正清掉 goder 数据
-	_ = os.RemoveAll(filepath.Join(m.dataDir, "goder", "serve-data", "users", SanUID(username)))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := m.adminCall(ctx, http.MethodDelete, "/goder-api/admin/users/"+url.PathEscape(username), nil, nil); err != nil {
+		// goder 未部署/未就绪时目录本就不存在（或无进程），按幂等空操作处理
+		log.Printf("goder: 删号级联清理失败(%s): %v", username, err)
+	}
 }
 
 // ---- HTTP ----
 
 // ProxyHandler 反代 /goder-api/* → goder-serve，注入身份头。
 // 调用方负责已通过 OpenOS 鉴权（identity != nil 时注入，否则 401）。
+// 平台托管供应商的 managed:true 注入由 goder-serve 网关在其代理层完成
+// （声明过受管名即生效，见 admin.go 的供应商声明），本端不再改写响应。
 func (m *Manager) ProxyHandler(identity func(r *http.Request) (uid, name string, ok bool)) http.Handler {
 	target, _ := url.Parse("http://" + m.addr)
 	rp := httputil.NewSingleHostReverseProxy(target)
 	rp.FlushInterval = -1 // SSE 流式透传
-	rp.ModifyResponse = m.markManagedProvider
 	orig := rp.Director
 	rp.Director = func(req *http.Request) {
 		orig(req)
@@ -302,83 +327,6 @@ func (m *Manager) ProxyHandler(identity func(r *http.Request) (uid, name string,
 		}
 		rp.ServeHTTP(w, r)
 	})
-}
-
-// markManagedProvider GET /goder-api/v1/agent/models（goder 设置页模型表的
-// 数据源）响应里，为平台托管供应商注入 managed:true —— goder 嵌入约定的
-// 只读展示语义（见 goder docs/embedding.md 与 agent-dto.ts ProviderDTO.managed），
-// 用户在 goder 设置页看到的 OpenOS 条目与宿主声明条目均不可改（前者来源
-// 「系统设置 → AI 服务」，后者来源宿主业务系统如 token-hub 套餐）。
-// 用 map[string]json.RawMessage 改写，default/path/maxSteps 等其余键原样保真
-// （goder 前端 PUT 时整表回传，丢键会破坏用户配置）。
-func (m *Manager) markManagedProvider(resp *http.Response) error {
-	if resp.Request == nil || resp.Request.Method != http.MethodGet ||
-		resp.Request.URL.Path != "/goder-api/v1/agent/models" ||
-		resp.Header.Get("Content-Encoding") != "" {
-		return nil
-	}
-	ct := resp.Header.Get("Content-Type")
-	if ct != "" && !strings.Contains(ct, "json") {
-		return nil
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	resp.Body.Close()
-	if err != nil {
-		resp.Body = io.NopCloser(bytes.NewReader(body))
-		return nil // 读到多少放回多少，不因改写失败断掉响应
-	}
-	var all map[string]json.RawMessage
-	if json.Unmarshal(body, &all) != nil {
-		return restoreBody(resp, body)
-	}
-	var provs []map[string]json.RawMessage
-	if json.Unmarshal(all["providers"], &provs) != nil || len(provs) == 0 {
-		return restoreBody(resp, body)
-	}
-	managed, _ := json.Marshal(true)
-	touched := false
-	for _, p := range provs {
-		var name string
-		_ = json.Unmarshal(p["name"], &name)
-		if m.isManagedProviderName(name) {
-			p["managed"] = managed
-			touched = true
-		}
-	}
-	if !touched {
-		return restoreBody(resp, body)
-	}
-	nb, err := json.Marshal(provs)
-	if err != nil {
-		return restoreBody(resp, body)
-	}
-	all["providers"] = nb
-	out, err := json.Marshal(all)
-	if err != nil {
-		return restoreBody(resp, body)
-	}
-	return restoreBody(resp, out)
-}
-
-// isManagedProviderName 供应商名是否为平台托管名或宿主声明名（只读展示语义）。
-func (m *Manager) isManagedProviderName(name string) bool {
-	if name == AIProviderName {
-		return true
-	}
-	for _, n := range m.managedNamesSnapshot() {
-		if n == name {
-			return true
-		}
-	}
-	return false
-}
-
-// restoreBody 把（可能改写过的）响应体放回并校准 Content-Length。
-func restoreBody(resp *http.Response, body []byte) error {
-	resp.Body = io.NopCloser(bytes.NewReader(body))
-	resp.ContentLength = int64(len(body))
-	resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
-	return nil
 }
 
 // ServeJS GET /vendor/goder.js —— 自包含 ESM 嵌入库。

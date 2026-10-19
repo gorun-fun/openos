@@ -150,11 +150,13 @@ func main() {
 			hub.Publish("sys:apps-changed", map[string]any{"user": user})
 		}
 	})
-	// goder 桌面控制插件（openos MCP）：gh 侧经 wrapper 自动发现接入，
-	// 向 AI 暴露 os_* 工具（窗口/应用/桌面/便签/VFS/设置/通知/总线发布）
+	// goder 桌面控制插件（openos MCP）：gh 侧经 goder-serve 宿主管理面
+	// 声明式安装（wrapper/settings 双模式），向 AI 暴露 os_* 工具
+	//（窗口/应用/桌面/便签/VFS/设置/通知/总线发布）
 	osmcpMgr := osmcp.New(osmcp.Deps{
 		DB: db, Hub: hub, FS: fs, DataDir: dataDir,
 		Version: store.Version, StartedAt: startedAt,
+		Goder:       goderMgr,
 		GoderStatus: goderMgr.Status,
 		OnlineUsers: hub.OnlineUsers,
 	})
@@ -485,7 +487,7 @@ func main() {
 	mux.HandleFunc("PUT /api/host/ai/user-providers", hostOnly(aiSvc.SaveUserProviders))
 	// goder 无头任务（宿主业务系统代用户创建会话并后台执行，见 internal/goder/hosttasks.go；
 	// grf-os 的自动修复引擎经此把修复会话落到操作者 goder 的「自动修复」分组下）
-	goderHostTasks := goder.NewHostTasks(goderMgr, db)
+	goderHostTasks := goder.NewHostTasks(goderMgr)
 	mux.HandleFunc("POST /api/host/goder/tasks", hostOnly(goderHostTasks.Create))
 	mux.HandleFunc("GET /api/host/goder/tasks/{uid}/{id}", hostOnly(goderHostTasks.Get))
 	mux.HandleFunc("POST /api/host/goder/tasks/{uid}/{id}/cancel", hostOnly(goderHostTasks.Cancel))

@@ -493,16 +493,20 @@ function calendarCaps(): AppCapabilities {
             title: { type: 'string', description: '标题' },
             date: { type: 'string', description: '日期 YYYY-MM-DD' },
             time: { type: 'string', description: '时间 HH:MM（可选）' },
+            remind: { type: 'string', enum: ['at', '5m', '15m', '1h', '1d'], description: '提醒时机（可选）：at=准点 / 5m / 15m / 1h / 1d 提前' },
           },
           required: ['title', 'date'],
         },
         run: (args: any) => {
           if (!args?.title || !args?.date) throw new Error('缺少 title/date')
+          const REMINDS = ['at', '5m', '15m', '1h', '1d']
+          const remind = REMINDS.includes(args.remind) ? args.remind : undefined
           const e = useCalendar().addEvent({
             title: String(args.title), date: String(args.date),
             time: args.time ? String(args.time) : undefined,
+            remind,
           })
-          return { id: e.id, title: e.title, date: e.date, time: e.time }
+          return { id: e.id, title: e.title, date: e.date, time: e.time, remind: e.remind }
         },
       },
       {

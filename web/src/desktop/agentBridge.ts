@@ -13,8 +13,8 @@ import { bus } from '../bus/bus'
 import { useWindows } from '../stores/windows'
 import { useDesktop } from '../stores/desktop'
 import { useNotes } from '../stores/notes'
+
 import { useNotifications } from '../stores/notifications'
-import { useCalendar } from '../stores/calendar'
 import { useDock } from '../stores/dock'
 import { openPath } from '../apps/openWith'
 import { agentTools, runAgentTool } from './agentTools'
@@ -127,29 +127,8 @@ const ACTIONS: Record<string, Action> = {
     }
   },
 
-  notes_do({ action, id, text, color }) {
-    const notes = useNotes()
-    switch (action) {
-      case 'list': return notes.notes.map(noteRow)
-      case 'create': {
-        const n = notes.create(text == null ? '' : String(text), Number.isFinite(Number(color)) ? Number(color) : undefined)
-        return noteRow(n)
-      }
-      case 'update': {
-        if (!id) throw new Error('缺少 id')
-        if (text != null) notes.setText(String(id), String(text))
-        if (Number.isFinite(Number(color))) notes.setColor(String(id), Number(color))
-        const n = notes.byId(String(id))
-        if (!n) throw new Error(`便签不存在：${id}`)
-        return noteRow(n)
-      }
-      case 'remove':
-        if (!id) throw new Error('缺少 id')
-        notes.remove(String(id))
-        return { ok: true }
-      default: throw new Error(`未知便签动作：${action}`)
-    }
-  },
+  // 便签/日历已并入 CAP 能力清单（capabilities.ts 内置 caps，经 os_caps 发现、
+  // os_app_query/os_app_call/os_app_ui 消费），不再有专属桥动作。
 
   notify({ text, type }) {
     if (!text) throw new Error('缺少 text')
@@ -172,33 +151,6 @@ const ACTIONS: Record<string, Action> = {
     if (!tool) throw new Error('缺少 tool')
     const data = await runAgentTool(String(tool), args || {})
     return { tool: String(tool), result: data ?? null }
-  },
-
-  /** 日历日程（数据权威在前端 calendar store：user_settings calendar.events）。 */
-  calendar_do({ action, id, title, date, time, remind }) {
-    const cal = useCalendar()
-    switch (action) {
-      case 'list': {
-        const today = new Date()
-        const pad = (n: number) => String(n).padStart(2, '0')
-        const from = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`
-        return cal.events
-          .filter((e) => !date || e.date === date)
-          .sort((a, b) => (a.date + (a.time || '~')).localeCompare(b.date + (b.time || '~')))
-          .slice(0, date ? 100 : 30)
-          .map((e) => ({ id: e.id, title: e.title, date: e.date, time: e.time, remind: e.remind, upcoming: e.date >= from }))
-      }
-      case 'add': {
-        if (!title || !date) throw new Error('缺少 title/date（date 形如 2026-10-05）')
-        const e = cal.addEvent({ title: String(title), date: String(date), time: time ? String(time) : undefined, remind })
-        return { id: e.id, title: e.title, date: e.date, time: e.time }
-      }
-      case 'remove':
-        if (!id) throw new Error('缺少 id')
-        cal.removeEvent(String(id))
-        return { ok: true }
-      default: throw new Error(`未知日历动作：${action}（list/add/remove）`)
-    }
   },
 
   /** Dock 定制（pinned 持久化 user_settings dock 键）。 */

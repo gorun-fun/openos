@@ -4,7 +4,7 @@
 //   - 服务端直答：os_info / os_apps_list / os_settings_* / os_fs_* /
 //     os_bus_publish（数据在服务端，无需前端往返）
 //   - 前端桥：os_desktop_state / os_window_* / os_app_open_file /
-//     os_desktop_do / os_notes_do / os_notify（窗口与桌面状态在浏览器里，
+//     os_desktop_do / os_dock_do / os_notify（窗口与桌面状态在浏览器里，
 //     经 bridge 往返执行）
 //
 // 描述文案会进 gh 的系统提示词，是 AI 的使用手册，保持准确且带操作提示。
@@ -27,6 +27,33 @@ func (s *Server) registerTools() {
 	s.registerBridgeTools()
 	s.registerP6Tools()
 	s.registerCAPTools()
+}
+
+// toolListing 注册表工具 → tools/list 应答条目（schema 兜底与 annotations 组装）。
+func toolListing(t *Tool) map[string]any {
+	schema := t.Schema
+	if schema == nil {
+		schema = map[string]any{"type": "object", "properties": map[string]any{}}
+	}
+	return map[string]any{
+		"name":        t.Name,
+		"description": t.Description,
+		"inputSchema": schema,
+		"annotations": map[string]any{"readOnlyHint": t.ReadOnly},
+	}
+}
+
+// staticToolList 注册表（os_* 内置工具）装配成 tools/list 应答条目——serveMCP
+// 与 osmcp_test 共用的单一事实源：测试断言 tools/list 应答与之完全一致，装配
+// 路径丢工具即测试红（取代此前硬编码「35 个」+ 手工拆账 20+11+4 的脆弱断言，
+// 增删工具不再需要同步改测试）。运行期合并的宿主/应用自定义工具不在此列
+// （见 serveMCP 的 tools/list 分支）。
+func (s *Server) staticToolList() []map[string]any {
+	out := make([]map[string]any, 0, len(s.tools))
+	for _, t := range s.tools {
+		out = append(out, toolListing(t))
+	}
+	return out
 }
 
 // ---- 能力暴露层（CAP）：应用能力的通用发现与执行 ----
@@ -310,21 +337,9 @@ func (s *Server) registerP6Tools() {
 		},
 	})
 
-	// 日历与 Dock（桥：数据权威在前端 store）
-	s.add(Tool{
-		Name:        "os_calendar_do",
-		Description: "日历日程操作：list（列日程，可按 date=YYYY-MM-DD 过滤）/ add（title+date 必填，time=HH:MM 可选）/ remove（id）。",
-		Schema: obj(map[string]any{
-			"action": pstr("list | add | remove"),
-			"id":     pstr("日程 id（remove 用）"),
-			"title":  pstr("日程标题（add 用）"),
-			"date":   pstr("日期 YYYY-MM-DD（add 必填 / list 可选过滤）"),
-			"time":   pstr("时间 HH:MM（可选）"),
-		}, "action"),
-		Handler: func(c *ToolCall) ([]Content, bool) {
-			return s.bridgePass(c, "calendar_do")
-		},
-	})
+	// Dock（桥：数据权威在前端 store）。日历/便签已并入 CAP 能力清单
+	//（capabilities.ts 内置 caps，经 os_caps 发现、os_app_query/call/ui 消费，
+	// 不再有专属 os_*_do 工具——同一数据两套工具面会让模型选择成提示词彩票）。
 	s.add(Tool{
 		Name:        "os_dock_do",
 		Description: "Dock 定制：list（当前固定列表）/ pin（appId 固定到末尾）/ unpin（appId 移除）/ reorder（appIds 数组全量重排）。",
@@ -438,7 +453,7 @@ func (s *Server) registerInfoTools() {
 	s.add(Tool{
 		Name:        "os_settings_get",
 		ReadOnly:    true,
-		Description: "读取当前用户的服务端设置键值（user_settings，字符串值）。不存在返回空。常用键：wallpaper（壁纸编号）、dark（「1」/「0」）、dockAutoHide、notes（便签数据，建议改用 os_notes_do）。",
+		Description: "读取当前用户的服务端设置键值（user_settings，字符串值）。不存在返回空。常用键：wallpaper（壁纸编号）、dark（「1」/「0」）、dockAutoHide。便签/日历数据请走 os_app_query（appId=notes/calendar）。",
 		Schema: obj(map[string]any{
 			"key": pstr("设置键名"),
 		}, "key"),
@@ -459,7 +474,7 @@ func (s *Server) registerInfoTools() {
 
 	s.add(Tool{
 		Name:        "os_settings_put",
-		Description: "写入当前用户的服务端设置键值（字符串值）。注意：便签请用 os_notes_do（前端实时更新）；壁纸/深色请用 os_desktop_do（前端即时生效），本工具适合自定义键值。",
+		Description: "写入当前用户的服务端设置键值（字符串值）。注意：便签/日历请走 os_app_call（appId=notes/calendar，前端实时更新）；壁纸/深色请用 os_desktop_do（前端即时生效），本工具适合自定义键值。",
 		Schema: obj(map[string]any{
 			"key":   pstr("设置键名"),
 			"value": pstr("设置值（字符串）"),
@@ -729,29 +744,6 @@ func (s *Server) registerBridgeTools() {
 				return textErr("参数错误：需要 action")
 			}
 			return s.bridgeCall(c, "desktop_do", argsOf(&a))
-		},
-	})
-
-	s.add(Tool{
-		Name:        "os_notes_do",
-		Description: "便签管理（桌面便签小组件与便签应用共用数据，实时更新）：list（列出全部，含文本预览）/ create（新建，text 可选、color 为 0-4 颜色下标可选）/ update（改 text 或 color）/ remove（删除）。",
-		Schema: obj(map[string]any{
-			"action": pstr("list | create | update | remove"),
-			"id":     pstr("便签 ID（update/remove 必填）"),
-			"text":   pstr("便签文本（create/update 可选）"),
-			"color":  pnum("颜色下标 0-4（create/update 可选）"),
-		}, "action"),
-		Handler: func(c *ToolCall) ([]Content, bool) {
-			var a struct {
-				Action string   `json:"action"`
-				ID     string   `json:"id,omitempty"`
-				Text   *string  `json:"text,omitempty"`
-				Color  *float64 `json:"color,omitempty"`
-			}
-			if err := decodeArgs(c, &a); err != nil || a.Action == "" {
-				return textErr("参数错误：需要 action")
-			}
-			return s.bridgeCall(c, "notes_do", argsOf(&a))
 		},
 	})
 

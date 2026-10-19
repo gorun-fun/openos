@@ -1,33 +1,31 @@
 // aisync.go — AI 模型配置与 goder 的联动（设置 → AI 服务 的落点）。
 //
 // OpenOS 唯一的 AI 应用是 goder：管理员在「系统设置 → AI 服务」保存的
-// Base URL / API Key / 模型，会以平台托管供应商（名为 AIProviderName）写进
-// 每个 goder 用户 grf-home 的 settings.json（gh 的模型配置文件，格式见
-// goder frontend agent-dto.ts / 宿主 ~/.grf/settings.json），并设为默认模型。
-// goder 设置页经反代注入的 managed 标记将该条目只读展示（嵌入约定，见
-// goder docs/embedding.md），用户自建的其他供应商不受影响。
+// Base URL / API Key / 模型，以平台托管供应商（名为 AIProviderName）经
+// goder-serve 宿主管理面声明（PUT /goder-api/admin/users/{uid}/providers，
+// 见 admin.go），写入该用户 grf-home 的 settings.json 并按决策链设默认
+// 模型。managed:true 只读展示由 goder-serve 网关在其代理层注入（声明过
+// 受管名即生效），openos 不再改写响应。
 //
-// v0.0.42 起另有「宿主声明的每用户供应商」（store.AIUserProvider）：业务宿主
-// 经 PUT /api/ai/user-providers 声明（如 grf-os 把 token-hub 套餐派生成
-// per-user 网关接入），渲染时与托管条目一并写入该用户的 settings.json。
-// 声明条目 default 优先于平台托管默认；names 全集内但本次未声明的名字会被
-// 从 settings.json 清除（宿主是唯一写者，声明外名字不碰）。
+// v0.0.42 起另有「宿主声明的每用户供应商」（store.AIUserProvider）：业务
+// 宿主经 PUT /api/ai/user-providers 声明（如 grf-os 把 token-hub 套餐派生成
+// per-user 网关接入），渲染时与托管条目一并声明；声明条目 default 优先于
+// 平台托管默认；names 全集内但本次未声明的名字会被清除（宿主是唯一写者，
+// 声明外名字不碰）。
 //
-// 写盘规则与 osmcp 的插件 upsert 同一套路：map[string]json.RawMessage 保留
-// 未知键、内容不变不写、0600。settings.json 尚不存在（用户还没打开过 goder）
-// 时以空白配置起播并建目录——仍应赶在 goder-serve 播种与 gh 首次启动之前
-// （首启即读到正确配置，新会话直接生效）；gh 新版已在回合边界检测
-// settings.json 变更并让存量会话跟随新默认（见 grf-harness 的
-// refreshDefaultClient），错过播种窗口也不再需要重启/空闲回收兜底。
+// 写盘的保真/清理/默认决策链/内容不变不写/空白起播语义全部由 goder-serve
+// 的声明端点承载（语义用例见 goder pkg/ghserver/hostsettings_test.go，
+// 自本仓 upsertAIProviders 时代逐条移植）；openos 侧只负责合成声明与
+// 幂等缓存（服务端 settings.json 指纹 + 声明摘要一致即免重放）。
 package goder
 
 import (
-	"encoding/json"
+	"context"
+	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"regexp"
-	"strings"
+	"sort"
+	"time"
 
 	"openos/server/internal/store"
 )
@@ -46,112 +44,25 @@ func (c ProviderConfig) valid() bool {
 	return c.BaseURL != "" && c.APIKey != "" && c.Model != ""
 }
 
-// GrfHomePath 某用户在 goder-serve PerUserHome 布局下的 GRF_HOME。
-// 目录名清洗规则须与 goder ghserver 的 uidSan 严格同步（[^a-zA-Z0-9_.-]→_）。
-func GrfHomePath(dataDir, uid string) string {
-	san := uidSan.ReplaceAllString(uid, "_")
-	return filepath.Join(dataDir, "goder", "serve-data", "users", san, "grf-home")
-}
-
-// uidSan 用户名 → 目录名清洗规则，与 goder ghserver 的 manager.go 严格一致
-// （osmcp 包亦经 GrfHomePath 复用此处，三处不再各自维护副本）。
+// uidSan 用户名 → 键名清洗（[^a-zA-Z0-9_.-]→_）。历史上是与 goder ghserver
+// 目录布局的锁步约束（错位即数据目录漂移）；管理面上移后 goder-serve 自持
+// 目录知识，本规则只剩两个内部用途：声明表键与代理密钥派生的口径对齐
+//（两者必须同键，否则全量同步每次都改写触发指纹抖动）。
 var uidSan = regexp.MustCompile(`[^a-zA-Z0-9_.-]`)
 
-// SanUID 用户名 → goder 用户目录名（清洗规则见 uidSan）。宿主声明的每用户
-// 供应商以清洗后的 uid 入库，与 serve-data/users/<目录名> 及代理密钥派生对齐。
+// SanUID 用户名 → 声明表/代理密钥的统一键（清洗规则见 uidSan 注释）。
 func SanUID(uid string) string { return uidSan.ReplaceAllString(uid, "_") }
 
-// ForEachGrfHome 遍历 serve-data 下所有已存在的 goder 用户 grf-home 目录
-// （本包 SyncAIProvider 与 osmcp healAll 共用同一份扫描：ReadDir 按目录名
-// 有序，跳过非目录项与缺 grf-home 子目录的项）。回调收到的目录名即清洗后
-// 的 uid（SanUID 口径）；users 目录不存在或不可读时不回调直接返回
-// （= 还没有任何 goder 用户）。
-func ForEachGrfHome(dataDir string, fn func(sanUID, grfHome string)) {
-	usersDir := filepath.Join(dataDir, "goder", "serve-data", "users")
-	entries, err := os.ReadDir(usersDir)
-	if err != nil {
-		return // 目录尚不存在 = 还没有任何 goder 用户
-	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		grfHome := filepath.Join(usersDir, e.Name(), "grf-home")
-		if st, err := os.Stat(grfHome); err != nil || !st.IsDir() {
-			continue
-		}
-		fn(e.Name(), grfHome)
-	}
-}
-
-// aiMark settings.json 的 (mtime, size) 指纹，EnsureAIUser 幂等跳过用。
-type aiMark struct{ mtime, size int64 }
-
-// upsertAIProviders 把托管供应商与宿主声明的每用户供应商写入（或清出）一个
-// settings.json。managedNames 为宿主历史声明过的名字全集（清理残留用）。
-// 默认模型决策链：声明条目 IsDefault 优先，否则平台托管默认；写入时机 =
-// forceDefault（admin 保存/宿主声明后）或现默认为空或已指向受管条目
-// （OpenOS 或声明名）——不打架用户在 goder 里自选的默认模型。返回是否写盘。
-func upsertAIProviders(settingsPath string, cfg ProviderConfig, extras []store.AIUserProvider, managedNames []string, forceDefault bool) (bool, error) {
-	raw, err := os.ReadFile(settingsPath)
-	if err != nil {
-		// 无文件 = 该用户尚未打开过 goder：以空白配置起播而非跳过——否则首请求
-		// 时 goder-serve 先播种空 settings.json、gh 随即启动读走无托管/声明条目的
-		// 配置（gh 只在启动时读盘），第二轮 Ensure 补写也追不上。先写则 goder-serve
-		// 的 GODER_SETTINGS_SEED（仅文件不存在时复制）跳过，gh 首启即带条目
-		raw = nil
-	}
-	var all map[string]json.RawMessage
-	if raw != nil {
-		if err := json.Unmarshal(raw, &all); err != nil {
-			return false, nil // 损坏文件不碰（与 osmcp upsertSettings 同策略）
-		}
-	}
-	if all == nil {
-		all = map[string]json.RawMessage{}
-	}
-
-	provs := all["providers"]
-	var providers map[string]json.RawMessage
-	if len(provs) > 0 && string(provs) != "null" {
-		if err := json.Unmarshal(provs, &providers); err != nil {
-			return false, err
-		}
-	}
-	if providers == nil {
-		providers = map[string]json.RawMessage{}
-	}
-
-	curDefault := ""
-	if d, ok := all["default"]; ok {
-		_ = json.Unmarshal(d, &curDefault)
-	}
-
-	// 受管名字集合 = 平台托管名 + 宿主声明名全集
-	managedSet := map[string]bool{AIProviderName: true}
-	for _, n := range managedNames {
-		if n != "" && n != AIProviderName {
-			managedSet[n] = true
-		}
-	}
-
-	// 平台托管条目
+// buildAdminDecl 合成一次声明：平台托管条目 + 宿主按用户声明条目；受管名
+// 全集 = 托管名 + 声明名全集（清理残留用）；默认模型决策链与旧
+// upsertAIProviders 一致（声明条目 IsDefault 优先，否则平台托管默认）。
+func buildAdminDecl(cfg ProviderConfig, extras []store.AIUserProvider, managedNames []string, forceDefault bool) AdminProvidersDecl {
+	decl := AdminProvidersDecl{ForceDefault: forceDefault}
 	if cfg.valid() {
-		entry, err := json.Marshal(map[string]any{
-			"base_url": cfg.BaseURL,
-			"api_key":  cfg.APIKey,
-			"models":   []string{cfg.Model},
+		decl.Entries = append(decl.Entries, AdminProviderEntry{
+			Name: AIProviderName, BaseURL: cfg.BaseURL, APIKey: cfg.APIKey, Models: []string{cfg.Model},
 		})
-		if err != nil {
-			return false, err
-		}
-		providers[AIProviderName] = entry
-	} else {
-		delete(providers, AIProviderName)
 	}
-
-	// 宿主声明的每用户条目（要素不全的跳过）
-	declared := map[string]bool{}
 	for _, e := range extras {
 		if e.Name == "" || e.Name == AIProviderName || e.UID == "" {
 			continue
@@ -159,110 +70,37 @@ func upsertAIProviders(settingsPath string, cfg ProviderConfig, extras []store.A
 		if e.BaseURL == "" || e.APIKey == "" || len(e.Models) == 0 {
 			continue
 		}
-		models := e.Models
-		entry, err := json.Marshal(map[string]any{
-			"base_url": e.BaseURL,
-			"api_key":  e.APIKey,
-			"models":   models,
+		decl.Entries = append(decl.Entries, AdminProviderEntry{
+			Name: e.Name, BaseURL: e.BaseURL, APIKey: e.APIKey, Models: e.Models,
 		})
-		if err != nil {
-			return false, err
-		}
-		providers[e.Name] = entry
-		declared[e.Name] = true
-	}
-	// names 全集内但本次未声明的 → 清理残留（声明外名字不碰）
-	for name := range providers {
-		if name != AIProviderName && managedSet[name] && !declared[name] {
-			delete(providers, name)
+		if e.IsDefault && decl.Default == "" {
+			decl.Default = e.Name + "/" + e.Models[0]
 		}
 	}
-
-	// 默认模型决策链
-	wantDefault := ""
-	for _, e := range extras {
-		if e.IsDefault && len(e.Models) > 0 {
-			wantDefault = e.Name + "/" + e.Models[0]
-			break
+	if decl.Default == "" && cfg.valid() {
+		decl.Default = AIProviderName + "/" + cfg.Model
+	}
+	// 受管名全集（去重有序：摘要稳定性）
+	set := map[string]bool{AIProviderName: true}
+	for _, n := range managedNames {
+		if n != "" {
+			set[n] = true
 		}
 	}
-	if wantDefault == "" && cfg.valid() {
-		wantDefault = AIProviderName + "/" + cfg.Model
+	for n := range set {
+		decl.Managed = append(decl.Managed, n)
 	}
-	curManaged := managedSet[strings.SplitN(curDefault, "/", 2)[0]]
-	if wantDefault != "" {
-		if forceDefault || curDefault == "" || curManaged {
-			all["default"] = mustMarshalString(wantDefault)
-		}
-	} else if curManaged {
-		// 无候选默认：指向受管条目的 default 随条目清除（gh 回落内置默认）
-		delete(all, "default")
-	}
-
-	if len(providers) == 0 {
-		delete(all, "providers") // 本就无供应商的文件不引入空键
-	} else {
-		all["providers"] = mustMarshalRaw(providers)
-	}
-	// 无原文件且渲染后既无供应商也无默认模型：不值得起播（避免为空白配置建文件）
-	if raw == nil && len(providers) == 0 {
-		if d, ok := all["default"]; !ok || string(d) == `""` {
-			return false, nil
-		}
-	}
-	out, err := json.MarshalIndent(all, "", "  ")
-	if err != nil {
-		return false, err
-	}
-	out = append(out, '\n')
-	if raw != nil && string(out) == string(raw) {
-		return false, nil // 内容未变不写（不惊动 mtime，osmcp 的指纹也不失效）
-	}
-	if raw == nil { // 起播：用户目录可能尚未建立（从未打开过 goder）
-		if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
-			return false, err
-		}
-	}
-	return true, WriteSettingsAtomic(settingsPath, out)
+	sort.Strings(decl.Managed)
+	return decl
 }
 
-// WriteSettingsAtomic 原子落盘 settings.json（同目录临时文件 + rename）：
-// gh 新版在回合边界热跟随本文件（每回合 stat，指纹变化即全量解析），且
-// goder/gh 侧的写盘均已原子化（goder internal/grfsettings 与 gh 的
-// WriteFileAtomic 均为同目录 tmp+rename）——openos 的两个写者（本包 AI
-// 供应商渲染、osmcp 插件 upsert）若继续就地 WriteFile，撕裂读会让 gh 该
-// 回合解析失败跳过跟随（轻）甚至触发按空文档的损坏自愈（重）。rename
-// 保证读者要么见旧全文要么见新全文；临时名带随机后缀防两写者互踩
-// （osmcp 复用，见 install.go upsertSettings）。
-func WriteSettingsAtomic(path string, data []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".settings-*.tmp")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	defer os.Remove(name) // rename 成功后为 no-op，失败/写坏时清残件
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(name, path) // CreateTemp 恒 0600，与既有写入权限一致
+// declDigest 声明摘要（幂等缓存键的一半）：取影响写盘结果的全部面。
+func declDigest(decl AdminProvidersDecl) string {
+	return fmt.Sprintf("%d/%v/%s/%v/%v", len(decl.Entries), decl.Entries, decl.Default, decl.Managed, decl.ForceDefault)
 }
 
-func mustMarshalString(s string) json.RawMessage {
-	b, _ := json.Marshal(s)
-	return b
-}
-
-func mustMarshalRaw(m map[string]json.RawMessage) json.RawMessage {
-	b, _ := json.Marshal(m)
-	return b
-}
-
-// SetAIProviderSource 注入当前 AI 配置的读取回调（托管标记注入与逐用户
-// 确保用；由 main 在 ai/goder 两个管理器都就绪后接线）。
+// SetAIProviderSource 注入当前 AI 配置的读取回调（声明合成用；由 main 在
+// ai/goder 两个管理器都就绪后接线）。
 func (m *Manager) SetAIProviderSource(src func() (ProviderConfig, bool)) {
 	m.aiMu.Lock()
 	m.aiSource = src
@@ -290,12 +128,13 @@ func (m *Manager) SetAIProxy(base string, keyFor func(uid string) string) {
 	m.aiMu.Unlock()
 }
 
-// SetProviderDB 注入宿主声明供应商的存储（main 启动时调用；未注入则只渲染
+// SetProviderDB 注入宿主声明供应商的存储（main 启动时调用；未注入则只声明
 // 平台托管条目）。
 func (m *Manager) SetProviderDB(db *store.DB) {
 	m.aiMu.Lock()
 	m.providerDB = db
 	m.managedNames = nil // 重建缓存
+	m.aiEnsured = map[string]string{}
 	m.aiMu.Unlock()
 }
 
@@ -307,8 +146,8 @@ func (m *Manager) RefreshManagedNames() {
 	m.aiMu.Unlock()
 }
 
-// managedNamesSnapshot 声明名全集（常驻缓存，Replace 声明后经 RefreshManagedNames
-// 失效重建；markManagedProvider 高频路径用）。
+// managedNamesSnapshot 声明名全集（缓存，Replace 声明后经 RefreshManagedNames
+// 失效重建；声明合成用）。
 func (m *Manager) managedNamesSnapshot() []string {
 	m.aiMu.Lock()
 	defer m.aiMu.Unlock()
@@ -323,12 +162,11 @@ func (m *Manager) managedNamesSnapshot() []string {
 	return names
 }
 
-// managedProvider 把平台配置转换为写进 settings.json 的托管条目：
-// 代理注入时指向 /api/ai/v1/* 并换每用户密钥；未注入（兼容形态）或平台未配置
-// （三要素不全——启动自愈/声明渲染会带 invalid cfg 进来）时保持原样，让 upsert
-// 走清除分支，绝不凭代理地址把「未配置」写成有效条目。
-// 密钥派生统一用清洗后的 uid（SyncAIProvider 只能拿到目录名，两路派生必须一致，
-// 否则每次全量同步都会改写 settings.json 触发指纹抖动）。
+// managedProvider 把平台配置转换为写进声明的托管条目：代理注入时指向
+// /api/ai/v1/* 并换每用户密钥；未注入（兼容形态）或平台未配置（三要素
+// 不全——启动自愈/声明渲染会带 invalid cfg 进来）时保持原样，让声明走
+// 清除分支，绝不凭代理地址把「未配置」写成有效条目。密钥派生统一用清洗
+// 后的 uid（SyncAIProvider 只能拿到目录名口径，两路派生必须一致）。
 func (m *Manager) managedProvider(cfg ProviderConfig, uid string) ProviderConfig {
 	m.aiMu.Lock()
 	base, kf := m.aiProxyBase, m.aiProxyKey
@@ -336,8 +174,7 @@ func (m *Manager) managedProvider(cfg ProviderConfig, uid string) ProviderConfig
 	if base == "" || kf == nil || !cfg.valid() {
 		return cfg
 	}
-	san := uidSan.ReplaceAllString(uid, "_")
-	return ProviderConfig{BaseURL: base, APIKey: kf(san), Model: cfg.Model}
+	return ProviderConfig{BaseURL: base, APIKey: kf(SanUID(uid)), Model: cfg.Model}
 }
 
 // userProviderView 某用户的渲染视图：声明条目 + 名字全集（未接库为零值）。
@@ -354,35 +191,47 @@ func (m *Manager) userProviderView(uid string) ([]store.AIUserProvider, []string
 
 // SyncAIProvider 把托管供应商与宿主声明条目同步到所有已存在的 goder 用户
 // （管理员保存配置后、宿主声明后与启动时调用）。forceDefault 语义见
-// upsertAIProviders。返回写盘用户数。
+// buildAdminDecl。返回写盘用户数（服务端 applied 聚合）。
 func (m *Manager) SyncAIProvider(cfg ProviderConfig, forceDefault bool) int {
 	if m.disabled {
 		return 0
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if !m.ensureReady(5 * time.Second) {
+		log.Printf("goder: 全量同步跳过（goder-serve 未就绪，靠请求路径 EnsureAIUser 兜底）")
+		return 0
+	}
+	users, err := m.adminListUsers(ctx)
+	if err != nil {
+		log.Printf("goder: 同步 AI 供应商失败（列用户）: %v", err)
+		return 0
+	}
 	n := 0
-	ForEachGrfHome(m.dataDir, func(san, grfHome string) {
-		sp := filepath.Join(grfHome, "settings.json")
+	for _, u := range users {
 		// 目录名即清洗后的 uid，与声明表（原 uid）与代理密钥派生对齐
-		extras, names := m.userProviderView(san)
-		wrote, err := upsertAIProviders(sp, m.managedProvider(cfg, san), extras, names, forceDefault)
+		extras, names := m.userProviderView(u.San)
+		decl := buildAdminDecl(m.managedProvider(cfg, u.San), extras, names, forceDefault)
+		applied, err := m.adminPutProviders(ctx, u.San, decl)
 		if err != nil {
-			log.Printf("goder: 同步 AI 供应商失败(%s): %v", san, err)
-			return
+			log.Printf("goder: 同步 AI 供应商失败(%s): %v", u.San, err)
+			continue
 		}
-		if wrote {
+		if applied {
 			n++
 		}
-		m.rememberAIMark(san, sp)
-	})
+	}
 	m.aiMu.Lock()
 	m.aiSyncedUsers = n
 	m.aiMu.Unlock()
 	return n
 }
 
-// EnsureAIUser 幂等确保某用户的托管供应商与声明条目就位（/goder-api 请求路径
-// 调用，先于该用户 gh 的懒启动；settings.json 播种后首次请求即补齐）。
-// 保用户自选的默认模型（forceDefault=false）。
+// EnsureAIUser 幂等确保某用户的托管供应商与声明条目就位（/goder-api 请求
+// 路径调用，先于该用户 gh 的懒启动——中间件先于反代执行，声明完成时 gh
+// 尚未首启，首启即读到正确配置）。热路径幂等：服务端 settings.json 指纹
+// 与声明摘要同上次成功写入一致即免重放。保用户自选的默认模型
+//（forceDefault=false）。
 func (m *Manager) EnsureAIUser(uid string) {
 	if m.disabled || uid == "" {
 		return
@@ -393,33 +242,30 @@ func (m *Manager) EnsureAIUser(uid string) {
 	if !ok && len(extras) == 0 && len(names) == 0 {
 		return
 	}
-	sp := filepath.Join(GrfHomePath(m.dataDir, uid), "settings.json")
-	mt, sz := statAIMark(sp)
-	m.aiMu.Lock()
-	mark, seen := m.aiMarks[uid]
-	m.aiMu.Unlock()
-	if seen && mark == (aiMark{mt, sz}) {
-		return // 文件未变化
+	if !m.ensureReady(5 * time.Second) {
+		return // 未部署/未就绪：由反代层的 503/启动流兜底，下个请求重试
 	}
-	if _, err := upsertAIProviders(sp, m.managedProvider(cfg, uid), extras, names, false); err != nil {
+	decl := buildAdminDecl(m.managedProvider(cfg, uid), extras, names, false)
+	want := declDigest(decl)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if mark, err := m.adminGetProvidersMark(ctx, san); err == nil && mark.Mark != "" {
+		m.aiMu.Lock()
+		prev, seen := m.aiEnsured[uid]
+		m.aiMu.Unlock()
+		if seen && prev == mark.Mark+"|"+want {
+			return // 文件与声明都未变化
+		}
+	}
+	if _, err := m.adminPutProviders(ctx, san, decl); err != nil {
 		log.Printf("goder: 确保 AI 供应商失败(%s): %v", uid, err)
 		return
 	}
-	m.rememberAIMark(uid, sp)
-}
-
-func (m *Manager) rememberAIMark(uid, settingsPath string) {
-	mt, sz := statAIMark(settingsPath)
-	m.aiMu.Lock()
-	m.aiMarks[uid] = aiMark{mt, sz}
-	m.aiMu.Unlock()
-}
-
-func statAIMark(p string) (int64, int64) {
-	if st, err := os.Stat(p); err == nil {
-		return st.ModTime().UnixNano(), st.Size()
+	if mark, err := m.adminGetProvidersMark(ctx, san); err == nil {
+		m.aiMu.Lock()
+		m.aiEnsured[uid] = mark.Mark + "|" + want
+		m.aiMu.Unlock()
 	}
-	return 0, 0
 }
 
 // LastSyncUsers 最近一次全量同步写盘的用户数（状态展示用）。

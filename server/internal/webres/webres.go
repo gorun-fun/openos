@@ -8,16 +8,21 @@ import (
 	"net/http"
 )
 
-// WriteJSON 写出 JSON 响应（Content-Type 统一 application/json; charset=utf-8）。
+// WriteJSON 写出 200 的 JSON 响应（Content-Type 统一 application/json; charset=utf-8）。
 func WriteJSON(w http.ResponseWriter, v any) {
+	WriteJSONStatus(w, http.StatusOK, v)
+}
+
+// WriteJSONStatus 写出携带显式状态码的 JSON 响应——上游服务原状态原体透传
+// 场景（如 goder hosttasks 转发 goder-serve 的错误体）；标准 {"error"} 契约用 Error。
+func WriteJSONStatus(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(v)
 }
 
 // Error 写出 {"error": msg} 形态的错误响应——前端 api/client.ts 按该契约解析
 // 错误文案向用户展示（http.Error 纯文本的具体消息到不了用户面前）。
 func Error(w http.ResponseWriter, code int, msg string) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	WriteJSONStatus(w, code, map[string]string{"error": msg})
 }

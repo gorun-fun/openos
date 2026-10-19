@@ -64,17 +64,39 @@ async function init() {
   //    命名（goder:<scope>:index），同一浏览器切换 OpenOS 账号互不串台。
   const me = session.user!
   const scope = `openos:${me.username}`
-  // 3.5 分组索引持久化注入：默认落浏览器 localStorage，换设备即丢分组与自定义
-  //     标题（会话本体在服务端不丢）。注入服务端镜像——load 服务端优先（user_settings
-  //     的 goder.index 键），无数据回落本地并经 save 迁移上云；save 双写（本地缓存
-  //     + 400ms 防抖回写）。旧版 goder.js 未导出 setPersistence 时保持默认行为。
-  //     回写前先读服务端副本合并「外部代建条目」（服务端 host goder 任务 API 归组
-  //     写入的会话/项目）：防陈旧浏览器副本把代建会话冲回「未分组」——本地索引
-  //     没有该会话时 refreshConversations 会以未分组默认值补录并触发保存。
+  // 3.5 分组索引持久化注入：权威存储在 goder-serve（每用户会话索引，同源
+  //     用户态端点 GET/PUT /goder-api/index，身份经 openos_token Cookie 自动
+  //     携带；服务端 host goder 任务 API 的归组追加写入同一存储）。换设备分组
+  //     与自定义标题不丢（会话本体本就在服务端）。历史的 user_settings
+  //     goder.index 镜像只作一次性迁移源（goder-serve 索引为空时读出、写进
+  //     新存储）。save 双写（本地缓存 + 400ms 防抖回写）；回写前先读服务端
+  //     副本合并「外部代建条目」：防陈旧浏览器副本把代建会话冲回「未分组」
+  //     ——本地索引没有该会话时 refreshConversations 会以未分组默认值补录
+  //     并触发保存。旧版 goder.js 未导出 setPersistence 时保持默认行为。
   if (typeof ui.setPersistence === 'function') {
     let saveTimer = 0
     let lastSynced = ''
-    const SERVER_KEY = 'goder.index'
+    // 同源用户态索引端点的薄封装（GET 空存储返回 null）
+    const fetchIndex = async (): Promise<any | null> => {
+      try {
+        const resp = await fetch('/goder-api/index', { credentials: 'same-origin' })
+        if (!resp.ok) return null
+        const v = await resp.json()
+        return v && typeof v === 'object' ? v : null
+      } catch { return null }
+    }
+    const putIndex = async (v: string): Promise<boolean> => {
+      try {
+        const resp = await fetch('/goder-api/index', {
+          method: 'PUT', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' }, body: v,
+        })
+        return resp.ok
+      } catch { return false }
+    }
+    const hasContent = (v: any) =>
+      !!v && ((Array.isArray(v.projects) && v.projects.length > 0) ||
+        (v.sessions && Object.keys(v.sessions).length > 0))
     // 合并服务端代建条目：项目按 id 补缺；会话本地缺失 = 补回，本地是未分组
     // 而服务端有明确分组 = 以服务端为准（其余字段保留本地较新值）。
     const mergeServerIndex = (server: any, local: any) => {
@@ -102,15 +124,26 @@ async function init() {
       async load(sc: string) {
         let local: string | null = null
         try { local = localStorage.getItem(`goder:${sc}:index`) } catch { /* ignore */ }
+        const server = await fetchIndex()
+        if (hasContent(server)) {
+          lastSynced = JSON.stringify(server)
+          try { localStorage.setItem(`goder:${sc}:index`, lastSynced) } catch { /* ignore */ }
+          return server
+        }
+        // 一次性迁移：历史的 user_settings goder.index 镜像（hosttasks 归组
+        // 落点的旧权威）→ goder-serve 索引
         try {
           const s = await api.get<Record<string, string>>('/api/settings')
-          if (s[SERVER_KEY] !== undefined) {
-            lastSynced = s[SERVER_KEY]
-            try { localStorage.setItem(`goder:${sc}:index`, s[SERVER_KEY]) } catch { /* ignore */ }
-            return JSON.parse(s[SERVER_KEY])
+          if (s['goder.index'] !== undefined) {
+            const v = JSON.parse(s['goder.index'])
+            if (hasContent(v)) {
+              lastSynced = s['goder.index']
+              await putIndex(s['goder.index'])
+              return v
+            }
           }
         } catch { /* 离线回落本地 */ }
-        // 迁移源优先级：本 scope 本地键 > 旧共享键（scope 分用户化之前 goder:openos:index）
+        // 本地迁移源：本 scope 本地键 > 旧共享键（scope 分用户化之前 goder:openos:index）
         const legacy = local || localStorage.getItem('goder:openos:index')
         return legacy ? JSON.parse(legacy) : null
       },
@@ -121,14 +154,12 @@ async function init() {
         clearTimeout(saveTimer)
         saveTimer = window.setTimeout(async () => {
           let out: any = idx
-          try {
-            const s = await api.get<Record<string, string>>('/api/settings')
-            if (s[SERVER_KEY] !== undefined) out = mergeServerIndex(JSON.parse(s[SERVER_KEY]), out)
-          } catch { /* 离线：仅本地 */ }
+          const server = await fetchIndex()
+          if (server) out = mergeServerIndex(server, out)
           const outV = JSON.stringify(out)
           if (outV === lastSynced) return
           lastSynced = outV
-          api.put('/api/settings', { key: SERVER_KEY, value: outV }).catch(() => { lastSynced = '' })
+          if (!(await putIndex(outV))) lastSynced = ''
         }, 400)
       },
     })

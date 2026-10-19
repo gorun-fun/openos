@@ -41,7 +41,8 @@ import (
 	"openos/server/internal/vfs"
 )
 
-// Deps 插件服务依赖（由 main 组装；GoderStatus/OnlineUsers 以回调注入避免反向依赖）。
+// Deps 插件服务依赖（由 main 组装；GoderStatus/OnlineUsers 以回调注入避免
+// 反向依赖；Goder 为宿主管理面消费口——插件安装经声明式端点完成）。
 type Deps struct {
 	DB        *store.DB
 	Hub       *bus.Hub
@@ -49,6 +50,7 @@ type Deps struct {
 	DataDir   string
 	Version   string
 	StartedAt time.Time
+	Goder     GoderAdmin
 
 	GoderStatus func() map[string]any
 	OnlineUsers func() []string
@@ -77,7 +79,7 @@ type Manager struct {
 
 	tokenMu  sync.RWMutex // 护 cfg.UserTokens
 	installMu sync.Mutex
-	marks     map[string]ensMark // uid → 上次安装时的文件指纹（幂等跳过用）
+	installed map[string]string // uid → 上次成功安装的命令行摘要（幂等跳过用，见 install.go）
 }
 
 // New 创建管理器。OPENOS_OSMCP=off 或 OPENOS_GODER=off 时整体停用。
@@ -85,7 +87,7 @@ func New(deps Deps) *Manager {
 	m := &Manager{
 		deps:     deps,
 		disabled: os.Getenv("OPENOS_OSMCP") == "off" || os.Getenv("OPENOS_GODER") == "off",
-		marks:    map[string]ensMark{},
+		installed: map[string]string{},
 	}
 	if m.disabled {
 		return m

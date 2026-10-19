@@ -140,19 +140,7 @@ func (s *Server) serveMCP(w http.ResponseWriter, r *http.Request) {
 	case "ping":
 		out.Result = map[string]any{}
 	case "tools/list":
-		tools := make([]map[string]any, 0, len(s.tools))
-		for _, t := range s.tools {
-			schema := t.Schema
-			if schema == nil {
-				schema = map[string]any{"type": "object", "properties": map[string]any{}}
-			}
-			tools = append(tools, map[string]any{
-				"name":        t.Name,
-				"description": t.Description,
-				"inputSchema": schema,
-				"annotations": map[string]any{"readOnlyHint": t.ReadOnly},
-			})
-		}
+		tools := s.staticToolList()
 		// P6：合并桌面在线的宿主/应用自定义工具（短超时尽力而为，桌面离线静默跳过；
 		// user 已在 serveMCP 顶部校验非空，无需重读 header）
 		if raw, err := s.bridge.callWait(user, "tools_list", nil, 2*time.Second); err == nil {

@@ -49,6 +49,7 @@ import (
 	"sync"
 	"time"
 
+	"openos/server/internal/atomicfile"
 	"openos/server/internal/store"
 )
 
@@ -954,12 +955,7 @@ func fetchBundle(id, version, addr string) error {
 	if len(raw) == 0 {
 		return fmt.Errorf("组件文件为空")
 	}
-	tmp := dst + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, dst); err != nil {
-		os.Remove(tmp)
+	if err := atomicfile.Write(dst, raw, 0o644); err != nil {
 		return err
 	}
 	log.Printf("market: bundle %s@%s 已落盘（%d 字节）", id, version, len(raw))

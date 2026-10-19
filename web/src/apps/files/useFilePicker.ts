@@ -3,12 +3,12 @@
 // 选择栏（FilePickerBar）、双击文件=确认。外部行为契约（ui/fileDialog 消费方依赖，勿破坏）：
 // - 打开即进选择模式（初始目录=defaultDir、save 模式初始文件名=defaultName）；
 // - open 模式双击/回车选中即 resolve，save 模式重名第一次点变「替换」、再点才覆盖；
-// - 直接关窗 = resolve null（幂等，resolveFileDialog 只生效一次）。
+// - 直接关窗 = resolve null（幂等，resolveLaunch 只生效一次；reqId 来自 launch 信封）。
 import { computed, onBeforeUnmount, ref, watch, type Ref } from 'vue'
 import type { WinState } from '../../stores/windows'
 import { useWindows } from '../../stores/windows'
 import type { VFile } from '../../api/client'
-import { resolveFileDialog, type FileDialogRequest } from '../../ui'
+import { resolveLaunch, type FileDialogRequest } from '../../ui'
 
 const baseName = (p: string) => p.split('/').pop() || ''
 
@@ -28,7 +28,7 @@ export function useFilePicker(opts: {
   const pickName = ref(req?.defaultName || '')
   const pickOverwrite = ref(false) // save 模式重名：第一次点变「替换」，再点才覆盖
   watch([pickName, opts.path], () => { pickOverwrite.value = false })
-  onBeforeUnmount(() => { if (req) resolveFileDialog(req.reqId, null) }) // 关窗=取消（幂等）
+  onBeforeUnmount(() => { if (req) resolveLaunch(req.reqId ?? '', null) }) // 关窗=取消（幂等）
 
   // 选择模式目标：open=选中的非目录文件；save=当前目录 + 输入的文件名
   const pickSel = computed(() => (opts.selectedFile.value && !opts.selectedFile.value.isDir ? opts.selectedFile.value : null))
@@ -48,11 +48,11 @@ export function useFilePicker(opts: {
     if (!req || !pickTarget.value) return
     // save 模式重名：第一次点变更为「替换」，再点才真正覆盖（macOS 行为）
     if (req.mode === 'save' && pickExists.value && !pickOverwrite.value) { pickOverwrite.value = true; return }
-    resolveFileDialog(req.reqId, pickTarget.value)
+    resolveLaunch(req.reqId ?? '', pickTarget.value)
     windows.close(opts.win.id)
   }
   function cancelPick() {
-    if (req) resolveFileDialog(req.reqId, null)
+    if (req) resolveLaunch(req.reqId ?? '', null)
     windows.close(opts.win.id)
   }
   // 双击/打开拦截：open=确认选择；save=带出文件名。返回是否已拦截（父级据此短路）

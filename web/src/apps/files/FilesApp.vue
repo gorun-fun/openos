@@ -10,7 +10,7 @@ import { useApps } from '../../stores/apps'
 import { useSession } from '../../stores/session'
 import { fsApi, downloadFile, fetchRawBlob, type VFile, type ShareDef } from '../../api/client'
 import { bus } from '../../bus/bus'
-import { OsInput, OsEmpty, OsModal, MobileNavToggle, OsTbOverflow, toast, useMenu, menuPos, icons, type FileDialogRequest } from '../../ui'
+import { OsInput, OsEmpty, OsModal, MobileNavToggle, OsTbOverflow, toast, useMenu, menuPos, icons, type FileDialogRequest, launchOf } from '../../ui'
 import { openPath, openWithApps, isImage, fileEmoji, kindOf, extOf, fmtSize, IMAGE_EXTS, parentOf } from '../openWith'
 import { t } from '../../i18n'
 import { blankDeck } from '../slides/format'
@@ -34,6 +34,8 @@ const trashPath = home + '/.Trash'
 // 状态机与回执在 useFilePicker.ts；本窗口仍是完整可拖动的文件管理窗，
 // 仅底部状态栏换成选择栏（FilePickerBar）、双击文件=确认。
 const pickerReq: FileDialogRequest | undefined = props.win.props?.picker
+  ? { ...props.win.props.picker, reqId: launchOf(props.win.props)?.reqId }
+  : undefined
 const path = ref(props.win.props?.path || pickerReq?.defaultDir || home)
 const entries = ref<VFile[]>([])
 const loading = ref(true)
