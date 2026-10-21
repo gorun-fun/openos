@@ -57,6 +57,13 @@ func sanitizeOutRequest(out, orig *http.Request, id string, cfg *proxyConfig, tu
 	// 并把回跳参数（redirect_uri，含 hook 改写的代理路径与 JS 拼 host 的宿主
 	// 绝对地址两种形态）还原为目标站注册的原始值——白名单/风控校验依赖原始值
 	out.URL.RawQuery = restorePxParam(id, stripPxMark(out.URL.RawQuery), cfg, orig.Host)
+	// domain 参数还原：站点 JS 以 location.origin 拼出自身域作查询参数（美团
+	// ebooking 权限接口 auth/resource/menu/url/list 的 domain 参数），代理下
+	// origin 已是宿主源——目标站按域名匹配菜单/权限配置，宿主域查不到配置，
+	// 返回空权限列表，应用启动即「当前 URL 无权限」重定向默认页（线上实证：
+	// 每个 eb 应用被重定向到 me-spu 产品页形成自锁死循环）。值恰为宿主自身源
+	// 的 domain 只可能是代理产物，还原为本次请求的目标站源即恢复真实语义。
+	out.URL.RawQuery = restoreSelfDomainParam(out.URL.RawQuery, orig.Host, tu)
 	// Cookie 过滤：绝不把 OpenOS 会话带给目标站；其余（落在代理路径下的目标会话）放行
 	if c := orig.Header.Get("Cookie"); c != "" {
 		if kept := keepCookies(c); kept != "" {
@@ -188,6 +195,43 @@ func selfRefTarget(u *url.URL, id string) (*url.URL, bool) {
 		tu.RawQuery = u.RawQuery
 	}
 	return tu, true
+}
+
+// restoreSelfDomainParam 把「值恰为宿主自身源」的 domain 查询参数还原为本次
+// 请求的目标站源（scheme://host）。站点 JS 用 location.origin 拼自身域传参，
+// 代理下 origin 是 OpenOS 宿主源；目标站按 domain 匹配配置（美团 ebooking 的
+// 菜单/权限 URL 列表接口），宿主域命中不到配置即返回空权限集。值等于宿主源
+// 只可能是代理产物（站点不可能合法知晓宿主地址之外的用途），改写安全；其余
+// domain 值原样透传。无命中时 query 原样返回（不重编码，保持形态敏感流程
+// 不受扰动）。
+func restoreSelfDomainParam(q string, selfHost string, tu *url.URL) string {
+	if q == "" || !strings.Contains(q, "domain") || tu == nil || tu.Host == "" {
+		return q
+	}
+	vals, err := url.ParseQuery(q)
+	if err != nil {
+		return q
+	}
+	changed := false
+	target := tu.Scheme + "://" + tu.Host
+	for _, k := range []string{"domain", "domainUrl"} {
+		v := vals.Get(k)
+		if v == "" {
+			continue
+		}
+		u, err := url.Parse(v)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			continue
+		}
+		if isSelfHost(u.Host, selfHost) {
+			vals.Set(k, target)
+			changed = true
+		}
+	}
+	if !changed {
+		return q
+	}
+	return vals.Encode()
 }
 
 // applyCfgHeaders 把管理员配置的自定义请求头应用到上游请求（在 sanitize 之后，

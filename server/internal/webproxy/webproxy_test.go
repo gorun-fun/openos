@@ -831,6 +831,25 @@ func TestSiteAdapters(t *testing.T) {
 		t.Errorf("未知域不应命中任何适配器，得到 %v", names(got))
 	}
 
+	// restoreSelfDomainParam：值恰为宿主自身源的 domain 参数还原为目标站源
+	//（美团 ebooking 权限菜单接口按 domain 匹配配置，宿主域命中不到即空权限集，
+	// 应用启动判无权限重定向默认页）；无关值原样透传
+	tuMe, _ := url.Parse("https://eb.meituan.com/api/v1/x")
+	q0 := "bizLine=3&domain=" + url.QueryEscape("https://hotel.gorun.fun") + "&env=beta"
+	if got := restoreSelfDomainParam(q0, "hotel.gorun.fun", tuMe); got != "bizLine=3&domain="+url.QueryEscape("https://eb.meituan.com")+"&env=beta" {
+		t.Errorf("宿主源 domain 应还原为目标站源，得到 %q", got)
+	}
+	// 非宿主源（站点真实自身域）不动
+	q1 := "domain=" + url.QueryEscape("https://eb.meituan.com")
+	if got := restoreSelfDomainParam(q1, "hotel.gorun.fun", tuMe); got != q1 {
+		t.Errorf("非宿主源 domain 不应改写，得到 %q", got)
+	}
+	// 带端口形态的宿主自身域（isSelfHost 的端口归一形态）也还原
+	q2 := "domain=" + url.QueryEscape("https://hotel.gorun.fun:443")
+	if got := restoreSelfDomainParam(q2, "hotel.gorun.fun", tuMe); got != "domain="+url.QueryEscape("https://eb.meituan.com") {
+		t.Errorf("端口形态宿主域 domain 应还原，得到 %q", got)
+	}
+
 	// meituan-container-handshake：美团系域全命中，Hook 含握手协议关键字段
 	//（探测拦截、合成应答的协议名/iframeInSystem/合成 MessageEvent）
 	mtHooks := ""
