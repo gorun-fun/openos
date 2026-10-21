@@ -167,21 +167,28 @@ try {
   }
 } catch (e) { /* referrer getter 不可重定义时忽略 */ }`,
 	},
-	// 美团 ME 容器握手自应答：门户新工作台（hotel-fe-me）的 iframeMessage 模块
-	// 启动即向父容器发 hotel-query-container 探测、等 hotel-container-response
-	//（应答 origin 须过其 isValidHost：含 .meituan./.sankuai./.dianping. 串），
-	// 3s 无应答落 unknown 嵌入态——页面按 unknown 分支渲染（工作台内容区恒停
-	// 死路径整页 404、登录页商户表单空白；对照实证：顶层打开自声明 me 一切
-	// 正常、iframe 嵌入（无论真实源直连还是本代理）恒残缺）。代理把全部帧
-	// 同源化到宿主源后，宿主桌面无法以美团域源应答（宿主源必挂 isValidHost）。
-	// 浏览器代理形态下本 Hook 在页面自身 realm 自应答：拦截发往父窗的探测，
-	// 以合成 MessageEvent（origin 呈现为本页目标站源，站点校验按真实世界语义
-	// 通过）异步投递应答——桌面客户端形态 WebApp onDeskHandshake（SOP 关闭下
-	// e.source.eval 同域源投递）在浏览器形态的等价物。应答载荷 origin 填本页
-	// location.origin（宿主源）：站点后续 postMessageToParentWindow 以它作
-	// targetOrigin，父窗（宿主）源正确命中。每个被嵌代理页（工作台/容器包装
-	// 页/业务子页）各自自应答，互不依赖父页的容器应答能力（原生 iframe 分支
-	// 只探测不监听子页探测）。
+	// 美团 ME 容器握手补全（忠实模拟真实拓扑，按帧层级分治）：
+	// 门户新工作台（hotel-fe-me）的 iframeMessage 模块启动即向父容器发
+	// hotel-query-container 探测、等 hotel-container-response（应答 origin 须过其
+	// isValidHost：含 .meituan./.sankuai./.dianping. 串）。真实世界语义：
+	// ①顶层页自声明 inWhichSystem="me" 并注册监听、应答其【直接子页】的探测；
+	// ②iframe 内的页只探测不监听——其子页（深层业务页 me-spu 等）探测无应答、
+	// 落 unknown，按 eb 旧路径语义渲染（me 变体路径如 /ebooking/merchant/spu/
+	// gift-list 是门户路由、只在 me.meituan.com 存在；深层页若被误答 me 会拼
+	// me 变体相对地址，代理下落到自身代理基（eb.meituan.com）→ 整页 404，线上
+	// 实证）。代理把全部帧同源化到宿主源后：宿主源必挂 isValidHost → 最外层
+	// 页收不到应答（工作台残缺/登录表单空白），且美团顶层分支的子页应答监听
+	//（isValidOrigin 门）在代理内永不触发。本 Hook 分层补全：
+	// ①最外层代理页（宿主 shell 直接子帧 = 真实世界顶层页）：拦截发往父窗的
+	//   探测、以合成 MessageEvent（origin 呈现为本页目标站源）异步自应答；并
+	//   代行容器职责——监听直接子页的探测（真实监听因 isValidOrigin 门失效），
+	//   经 e.source.postMessage 应答（子页侧通用 hook 的接收侧源还原把 e.origin
+	//   呈现为本页目标站源，校验按真实世界语义通过）。
+	// ②其余深层页：不自答不代答，保持真实世界的 unknown 落点与 eb 路径语义。
+	// 应答载荷 origin 一律填本页 location.origin（宿主源）：站点后续
+	// postMessageToParentWindow 以它作 targetOrigin，代理下父窗源正确命中。
+	// 桌面客户端形态的 WebApp onDeskHandshake（SOP 关闭下 e.source.eval 同域源
+	// 投递）只覆盖宿主直接子帧一层，与本方案①的第一段同位。
 	{
 		Name:  "meituan-container-handshake",
 		Hosts: []string{"meituan.com", "meituan.net", "sankuai.com", "dianping.com", "dpfile.com", "51ping.com"},
@@ -199,7 +206,8 @@ try {
         if (pk) own = pk[1].toLowerCase() + '://' + pk[2];
       }
     } catch (e) { }
-    if (own) {
+    if (own && window.parent === window.top) {
+      // ① 最外层代理页（真实世界顶层页）：自声明
       var opm = window.parent.postMessage.bind(window.parent);
       window.parent.postMessage = function (msg, t, tr) {
         try {
@@ -220,7 +228,29 @@ try {
         } catch (e) { }
         return opm(msg, t, tr);
       };
+      // ① 代行顶层分支的容器职责：应答直接子页的探测（原生监听被 isValidOrigin
+      //    门挡死；以「发送者是本窗直接子帧」代校验——能向本窗 postMessage 的
+      //    外部页不构成提权面，应答只影响其渲染分支）
+      window.addEventListener('message', function (ev) {
+        try {
+          var d = ev.data;
+          if (!d || d.eventType !== 'hotel-query-container' || !d.signature) return;
+          var isChild = false;
+          for (var fi = 0; fi < window.frames.length; fi++) {
+            if (window.frames[fi] === ev.source) { isChild = true; break; }
+          }
+          if (!isChild) return;
+          ev.source.postMessage({
+            eventType: 'hotel-container-response',
+            iframeInSystem: 'me',
+            origin: location.origin,
+            signature: d.signature
+          }, '*');
+        } catch (e) { }
+      });
     }
+    // ② 深层页：不自答不代答（保持真实世界 unknown → eb 路径语义），own 仅作
+    //    上面分支的判据，不产生任何行为
   }
 } catch (e) { }`,
 	},
