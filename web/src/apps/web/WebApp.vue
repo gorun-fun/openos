@@ -306,23 +306,36 @@ function refresh() {
 function openExternal() { if (activeTab.value) window.open(activeTab.value.url, '_blank', 'noopener') }
 
 // ---- 清除缓存：按应用边界清扫本源的代理数据后整窗刷新 ----
-// 代理应用落在 OpenOS 源的数据三类，各有明确归属：
+// 代理应用落在 OpenOS 源的数据各有明确归属，多源登记、组合清扫：
 // ① hook 存储隔离门面的 __px_<appid>:: 前缀键（localStorage + sessionStorage）；
-// ② 代理 Cookie：服务端 rewriteSetCookie 把目标站 Cookie 的 Path 收归
-//    /app/<id>/… 作用域（登录态/票据都在这，清掉即回到未登录——配置注入的
-//    MEITUAN_COOKIE 等由服务端每请求重新展开、刷新即恢复）；
+// ② Cookie——浏览器 document.cookie 枚举不了不可见路径上的 Cookie（登录流经
+//    多目标站，票据落在 /app/<id>/https/<其他域>/… 深路径，业务页 iframe 看不到
+//    也删不掉，美团「清了缓存还登录」的根因），三层覆盖：
+//    a. 服务端 Cookie 登记簿端点 /app/<id>/__os_px_clear__：openos 侧登记响应
+//       Set-Cookie 精确路径 + 请求携带的 名字×路径前缀（system_kv 持久化），
+//       整批下发过期头——响应头写 Cookie 不受当前文档路径限制，唯一能清光
+//       深路径的手段；旧版 openos 无此端点（404），静默降级；
+//    b. 当前各 tab iframe（代理同源可读）可见名字 × 其代理路径逐级目录前缀；
+//    c. hook 登记的页面 JS 写入 Cookie（__osPxJsCookies：name\tpath）。
+//    另清根路径 /：站点脚本经顶层桥（pxTopBridge 语境无 hook 改写）把 Cookie
+//    直种宿主源根（美团 WM_* / WEBDFPID 实测）；宿主自身不写 JS 可见 Cookie
+//    （服务端 Cookie 均 HttpOnly 或窄路径），根路径上可见的即站点泄漏。
 // ③ Service Worker：hook 已禁注册，防御性扫掉历史遗留的 /app/<id>/ 作用域注册。
-// Cookie 的 Path 属性不可枚举（document.cookie 只给名字），从各 tab 的 iframe
-// （代理同源可读）收集可见名字，再按其代理路径的逐级目录前缀写过期删除——
-// 命中真实 Path 才有效，写偏是无害空操作。前缀之外还清 Path=/：站点脚本经顶层
-// 桥（pxTopBridge 语境无 hook 改写）会把 Cookie 直接种到宿主源根（美团 WM_* /
-// WEBDFPID 实测如此，设备指纹类不清就不是完整重置）；宿主前端自身不写 JS 可见
-// Cookie（服务端 Cookie 均 HttpOnly 或窄路径），根路径上可见的即站点泄漏，可安全
-// 清除。IndexedDB / CacheStorage 的库名无归属信息且 SW 已禁，不清。
+// ④ IndexedDB：库名无归属信息，hook 对 indexedDB.open 记名（__osPxIdb），
+//    按登记逐库 deleteDatabase。
 async function clearCache() {
   const appId = props.win.appId
-  // ① 前缀存储键
   const ns = `__px_${appId}::`
+  // 先读页面侧登记簿（键在前缀命名空间内，随后的前缀清扫会一并删掉）
+  const readLog = (key: string): string[] => {
+    try {
+      const a = JSON.parse(window.localStorage.getItem(ns + key) || '[]')
+      return Array.isArray(a) ? a.filter((x) => typeof x === 'string') : []
+    } catch { return [] }
+  }
+  const jsCookies = readLog('__osPxJsCookies')
+  const idbNames = readLog('__osPxIdb')
+  // ① 前缀存储键
   for (const store of [window.localStorage, window.sessionStorage]) {
     const keys: string[] = []
     for (let i = 0; i < store.length; i++) {
@@ -334,6 +347,10 @@ async function clearCache() {
   // ② 应用路径作用域 Cookie（含根路径泄漏的）
   const names = new Set<string>()
   const paths = new Set<string>([`/app/${appId}/`, '/'])
+  jsCookies.forEach((e) => {
+    const i = e.indexOf('\t')
+    if (i > 0 && e.slice(i + 1).startsWith('/')) { names.add(e.slice(0, i)); paths.add(e.slice(i + 1)) }
+  })
   for (const t of tabs.value) {
     try {
       const d = winOf(t)?.document
@@ -357,6 +374,25 @@ async function clearCache() {
       regs.forEach((r) => { if (r.scope.startsWith(base)) r.unregister() })
     }
   } catch { /* 无 SW 支持或不可用 */ }
+  // ④ 服务端登记簿端点：不可见深路径 Cookie 整批过期（旧版 openos 无端点则跳过）。
+  //    登记可达数千条（子资源按 default-path 落 Cookie），单响应全量下发超浏览器
+  //    消化能力（dev 经 vite 更有 Node 16KB 响应头上限）——按批循环取到清完
+  //    （80 批×60 条 > 登记上限 4000）
+  for (let i = 0; i < 80; i++) {
+    let remain = -1
+    try {
+      const res = await fetch(`/app/${appId}/__os_px_clear__?n=60`, { method: 'POST', cache: 'no-store' })
+      remain = parseInt(await res.text(), 10)
+    } catch { break /* 端点不可用（旧版 openos）：不阻断，客户端侧清扫仍已生效 */ }
+    if (!(remain > 0)) break
+  }
+  // ⑤ 登记在册的 IndexedDB 逐库删除
+  if (idbNames.length) {
+    await Promise.allSettled(idbNames.map((n) => new Promise<void>((res) => {
+      const rq = indexedDB.deleteDatabase(n)
+      rq.onsuccess = rq.onerror = rq.onblocked = () => res()
+    })))
+  }
   // 整窗重建（全部 tab 重新加载）并反馈
   tabs.value.forEach((t) => { t.seq++; t.loaded = false; t.title = '加载中…' })
   loading.value = true

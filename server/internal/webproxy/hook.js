@@ -25,6 +25,24 @@
   var APPID = PREFIX.split('/')[2] || '';            // /app/<id>/ → <id>
   var PXMARK = sm ? APPID + '~' + SCHEME + '~' + AUTH : ''; // 还原标记（逃逸回捕依据）
 
+  // ---- 「清除缓存」登记面（页面侧写入的记账，WebApp 清除按钮消费）----
+  // 服务端登记簿只覆盖响应 Set-Cookie 与请求携带；页面 JS 写的 Cookie 与打开过
+  // 的 IndexedDB 库不经服务端——这里把名字/路径/库名记进本应用命名空间（原生
+  // 存储引用，不经下方隔离门面；键随 __px_<id>:: 前缀，清除时被前缀清扫收走）。
+  var RAWLS = null; try { RAWLS = window.localStorage; } catch (e) { }
+  function pxLog(key, val) {
+    if (!APPID || !RAWLS) return;
+    try {
+      var K = '__px_' + APPID + '::' + key, cur;
+      try { cur = JSON.parse(RAWLS.getItem(K) || '[]'); } catch (e) { cur = []; }
+      if (cur.indexOf(val) < 0) {
+        if (cur.length > 500) cur.shift();
+        cur.push(val);
+        RAWLS.setItem(K, JSON.stringify(cur));
+      }
+    } catch (e) { }
+  }
+
   // ---- 存储隔离：代理页与宿主桌面同源，localStorage/sessionStorage 原生直写
   // 会与宿主互踩——宿主自身会话键（openos 桌面 openos_token）、被代理的嵌套宿主
   // 登录引导页写 token/openos_token（覆盖外层会话，外层登出 clearToken 又连锁杀
@@ -123,6 +141,32 @@
     } catch (e) { }
     return targetWin.postMessage(msg, targetOrigin, transfer);
   };
+  function pxCallerWindow() {
+    // arguments.callee.caller 对严格模式调用方（现代打包产物普遍 strict）访问即
+    // 抛，识别恒失败回落直投 → source 失真（线上实证：strict 函数调
+    // parent.postMessage，收件侧 source 仍是收件帧、@post-me 握手永不完成）。
+    // 改用 V8 栈帧取调用函数对象：CallSite.getFunction() 不受 strict 限制，
+    // 函数对象的 constructor 在其定义 realm 求值（同源可跨 realm 构造执行），
+    // 返回该 realm 的 window。sites[0] 是本包装器，从 1 起找第一个能解析出
+    // 「非本帧 window」的调用帧。非 V8/解析失败返回 null（回落直投不劣于旧）。
+    try {
+      var orig = Error.prepareStackTrace;
+      Error.prepareStackTrace = function (e, sites) { return sites; };
+      var err = new Error();
+      var sites = err.stack;
+      Error.prepareStackTrace = orig;
+      if (!sites || !sites.length) return null;
+      for (var i = 1; i < sites.length && i < 6; i++) {
+        var fn = null;
+        try { fn = sites[i].getFunction(); } catch (e) { }
+        if (!fn) continue;
+        var cw = null;
+        try { cw = fn.constructor("return window")(); } catch (e) { }
+        if (cw && cw !== window) return cw;
+      }
+      return null;
+    } catch (e) { return null; }
+  }
   window.postMessage = function (msg, targetOrigin, transfer) {
     var to = targetOrigin;
     try {
@@ -131,11 +175,7 @@
       }
     } catch (e) { /* 保持原参数 */ }
     try {
-      // 调用方识别必须在本包装器函数体内做：arguments.callee 在助手函数里指向
-      // 助手自身，caller 会多一层取到包装器（本帧 realm），识别恒为自身、relay
-      // 永不命中；内联时 callee=本包装器、caller=站点调用函数（调用方 realm）
-      var c = arguments.callee.caller;
-      var cw = c ? c.constructor("return window")() : null;
+      var cw = pxCallerWindow();
       if (cw && cw !== window && typeof cw.__osRelaySend === "function") {
         return cw.__osRelaySend(window, msg, to, transfer);
       }
@@ -537,6 +577,17 @@
     }
   } catch (e) { /* 无 SW API 时忽略 */ }
 
+  // ---- IndexedDB 库名登记（清除按钮消费）：库名无归属信息，打开即记账 ----
+  try {
+    if (window.indexedDB && window.IDBFactory && IDBFactory.prototype.open) {
+      var oIdbOpen = IDBFactory.prototype.open;
+      IDBFactory.prototype.open = function (name) {
+        try { pxLog('__osPxIdb', String(name)); } catch (e) { }
+        return oIdbOpen.apply(this, arguments);
+      };
+    }
+  } catch (e) { /* indexedDB 不可用时忽略 */ }
+
   // ---- document.cookie：改写回代理路径 + 剥 domain ----
   // ① 显式 path=/ 会把 cookie 种到整个 OpenOS 源，改写回代理路径；
   // ② domain=<目标站域> 在代理页（host 是 OpenOS 源）会被浏览器整条拒收——
@@ -577,6 +628,12 @@
             }
             v = s;
           } catch (e) { /* 保持原值 */ }
+          // 改写后的最终路径登记（清除按钮消费：JS 写的 Cookie 不经服务端登记簿）
+          try {
+            var cnm = String(v).split('=')[0].trim();
+            var cpm = /(?:^|;\s*)path\s*=\s*(\/[^;]*)/i.exec(String(v));
+            if (cnm && cpm) pxLog('__osPxJsCookies', cnm + '\t' + cpm[1]);
+          } catch (e) { }
           desc.set.call(document, v);
         },
       });

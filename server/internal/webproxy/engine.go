@@ -77,7 +77,7 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request, tu *url.URL
 	defer resp.Body.Close()
 
 	secure := r.TLS != nil
-	copyRespHeaders(w, resp, opts.prefix, tu, secure, r.Host)
+	copyRespHeaders(w, resp, opts.prefix, tu, secure, r.Host, p.ck, opts.appID)
 	// 响应侧适配器钩子：对最终下发给浏览器的响应头做站点修正
 	for _, a := range adapters {
 		if a.OnResponse != nil {

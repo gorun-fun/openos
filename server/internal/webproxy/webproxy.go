@@ -44,6 +44,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -55,6 +56,7 @@ import (
 type Proxy struct {
 	db     *store.DB
 	client *http.Client
+	ck     *cookieReg // Cookie 登记簿（「清除缓存」端点配套，见 cookies.go）
 }
 
 // New 创建应用代理。db 用于逐请求校验应用存在、代理配置与角色授权。
@@ -72,7 +74,7 @@ func New(db *store.DB) *Proxy {
 		MaxIdleConnsPerHost:   8,
 		IdleConnTimeout:       90 * time.Second,
 	}
-	return &Proxy{db: db, client: &http.Client{
+	return &Proxy{db: db, ck: newCookieReg(db), client: &http.Client{
 		Transport: tr,
 		// 不自动跟随重定向：30x 的 Location 重写后交还浏览器，保持地址语义
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -105,6 +107,9 @@ func (p *Proxy) Handler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "无权访问该应用", http.StatusForbidden)
 		return
 	}
+	// 请求侧 Cookie 登记（清除端点配套）：本请求携带的 Cookie 名 × 路径前缀
+	// 入册——升级部署前就已种下的旧 Cookie（登录票据）被携带一次即入册
+	p.ck.recordRequestCookies(id, r)
 	// 用 EscapedPath 重建目标原始地址（保留 %XX 编码），查询串拼回
 	rest := strings.TrimPrefix(r.URL.EscapedPath(), "/app/"+id+"/")
 	if r.URL.RawQuery != "" {
@@ -117,6 +122,15 @@ func (p *Proxy) Handler(w http.ResponseWriter, r *http.Request) {
 		cfgURL, _ := url.Parse(cfg.URL)
 		w.Header().Set("Location", "/app/"+id+"/"+compactTarget(cfgURL))
 		w.WriteHeader(http.StatusFound)
+	case rest == pxClearPath || strings.HasPrefix(rest, pxClearPath+"?"):
+		// 「清除缓存」端点：登记在册 Cookie 整批下发过期头（不可见深路径 Cookie
+		// 的唯一清法，见 cookies.go）。分批：?n= 每批条数（默认 150），响应体为
+		// 剩余条数，调用方循环取批清完
+		n, _ := strconv.Atoi(r.URL.Query().Get("n"))
+		_, remain := p.ck.expireBatch(w, id, n)
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(strconv.Itoa(remain)))
 	case rest == hookPath || strings.HasPrefix(rest, hookPath+"?"):
 		serveHook(w, r, id, cfg)
 	case strings.HasPrefix(rest, "http://") || strings.HasPrefix(rest, "https://"):

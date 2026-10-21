@@ -5,6 +5,7 @@ package webproxy
 import (
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 )
 
@@ -24,7 +25,7 @@ var stripResp = map[string]bool{
 	"keep-alive":                          true,
 }
 
-func copyRespHeaders(w http.ResponseWriter, resp *http.Response, prefix string, target *url.URL, secure bool, selfHost string) {
+func copyRespHeaders(w http.ResponseWriter, resp *http.Response, prefix string, target *url.URL, secure bool, selfHost string, reg *cookieReg, appID string) {
 	h := w.Header()
 	for k, vs := range resp.Header {
 		lk := strings.ToLower(k)
@@ -34,7 +35,12 @@ func copyRespHeaders(w http.ResponseWriter, resp *http.Response, prefix string, 
 		switch lk {
 		case "set-cookie":
 			for _, v := range vs {
-				h.Add("Set-Cookie", rewriteSetCookie(v, prefix, target, secure))
+				c, cp := rewriteSetCookie(v, prefix, target, secure)
+				h.Add("Set-Cookie", c)
+				// 登记精确路径（清除端点消费；app 模式才有 appID）
+				if reg != nil && appID != "" && cp != "" {
+					reg.record(appID, strings.TrimSpace(strings.SplitN(v, "=", 2)[0])+"\t"+cp)
+				}
 			}
 			continue
 		case "location":
@@ -85,11 +91,14 @@ func copyRespHeaders(w http.ResponseWriter, resp *http.Response, prefix string, 
 // epassport/me、消费在 tpt 等）的代理请求永远带不上票据——美团发票接口 403
 //（无权访问）的根因。代价：票据会随 /app/<id>/ 前缀请求发给该应用的全部目标域
 //（含 CDN），是代理同源化的固有放宽；同名跨子域 Cookie 相互覆盖与原生语义一致。
-func rewriteSetCookie(v, prefix string, target *url.URL, secure bool) string {
+// 第二返回值为该 Cookie 在本源的最终 Path（清除端点登记用；无显式 Path 属性时
+// 浏览器按请求目录推导——RFC 6265 default-path，path.Dir 与其语义一致）。
+func rewriteSetCookie(v, prefix string, target *url.URL, secure bool) (string, string) {
 	parts := strings.Split(v, ";")
 	var b strings.Builder
 	b.WriteString(parts[0])
 	hasDomain := false
+	pathAttr := ""
 	for _, p := range parts[1:] {
 		t := strings.TrimSpace(p)
 		lower := strings.ToLower(t)
@@ -100,6 +109,7 @@ func rewriteSetCookie(v, prefix string, target *url.URL, secure bool) string {
 			pv := t[len("path="):]
 			if strings.HasPrefix(pv, "/") && !hasDomain {
 				b.WriteString("; Path=" + prefix + target.Scheme + "/" + target.Host + pv)
+				pathAttr = pv
 			}
 			// 带 Domain 的由下方统一提升到应用级；非法 path 丢弃属性，回落
 			// 按请求目录的默认作用域
@@ -110,10 +120,17 @@ func rewriteSetCookie(v, prefix string, target *url.URL, secure bool) string {
 			b.WriteString("; " + t)
 		}
 	}
-	if hasDomain {
+	recPath := ""
+	switch {
+	case hasDomain:
 		b.WriteString("; Path=" + prefix)
+		recPath = prefix
+	case pathAttr != "":
+		recPath = prefix + target.Scheme + "/" + target.Host + pathAttr
+	default:
+		recPath = prefix + target.Scheme + "/" + target.Host + path.Dir(target.Path)
 	}
-	return b.String()
+	return b.String(), recPath
 }
 
 func rewriteLocation(v, prefix string, target *url.URL, selfHost string) string {

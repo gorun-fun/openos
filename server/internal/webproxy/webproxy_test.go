@@ -171,7 +171,7 @@ func TestRewriteCSSBare(t *testing.T) {
 func TestRewriteSetCookie(t *testing.T) {
 	target := mustURL(t, "https://t.example/a/b")
 	v := "sid=1; Domain=example.com; Path=/; HttpOnly; Secure; SameSite=None"
-	got := rewriteSetCookie(v, "/app/x/", target, false)
+	got, recPath := rewriteSetCookie(v, "/app/x/", target, false)
 	if strings.Contains(got, "Domain=") || strings.Contains(got, "Secure") {
 		t.Errorf("http 部署应剥 Domain/Secure：%s", got)
 	}
@@ -181,16 +181,19 @@ func TestRewriteSetCookie(t *testing.T) {
 	if !strings.Contains(got, "Path=/app/x/") || !strings.Contains(got, "SameSite=Lax") || !strings.Contains(got, "HttpOnly") {
 		t.Errorf("Set-Cookie 跨子域票据应提升到应用级路径：%s", got)
 	}
-	got = rewriteSetCookie(v, "/app/x/", target, true)
+	if recPath != "/app/x/" {
+		t.Errorf("跨子域票据登记路径应为应用根：%s", recPath)
+	}
+	got, _ = rewriteSetCookie(v, "/app/x/", target, true)
 	if !strings.Contains(got, "Secure") || !strings.Contains(got, "SameSite=None") {
 		t.Errorf("https 部署应保留 Secure/SameSite=None：%s", got)
 	}
 	// 无 Domain 声明（host-only）：Path 仍收归目标域代理子路径
-	if got := rewriteSetCookie("sid=2; Path=/acct", "/app/x/", target, true); !strings.Contains(got, "Path=/app/x/https/t.example/acct") {
+	if got, rp := rewriteSetCookie("sid=2; Path=/acct", "/app/x/", target, true); !strings.Contains(got, "Path=/app/x/https/t.example/acct") || rp != "/app/x/https/t.example/acct" {
 		t.Errorf("host-only Cookie 应收归目标域子路径：%s", got)
 	}
 	// 无 Path 属性：回落默认（按请求目录），不追加 Path
-	if got := rewriteSetCookie("a=b", "/app/x/", target, true); got != "a=b" {
+	if got, rp := rewriteSetCookie("a=b", "/app/x/", target, true); got != "a=b" || rp != "/app/x/https/t.example/a" {
 		t.Errorf("无属性 cookie 应原样：%s", got)
 	}
 }
@@ -1148,5 +1151,55 @@ func TestAppConfigHook(t *testing.T) {
 	cfgBig := parseProxyConfig([]byte(big))
 	if cfgBig == nil || cfgBig.Hook != "" {
 		t.Errorf("超限 hook 应置空且应用可用")
+	}
+}
+
+func TestCookieReg(t *testing.T) {
+	r := &cookieReg{m: map[string]map[string]struct{}{}}
+	// 请求侧登记：Cookie 名 × 请求路径的逐级目录前缀（含应用根，不含 /）
+	req, _ := http.NewRequest("GET", "/app/mei/https/e.example.com/settoken/callback?x=1", nil)
+	req.AddCookie(&http.Cookie{Name: "eprt", Value: "t"})
+	req.AddCookie(&http.Cookie{Name: "ssoid", Value: "1"})
+	r.recordRequestCookies("mei", req)
+	other, _ := http.NewRequest("GET", "/", nil) // 非本应用路径：不记
+	r.recordRequestCookies("mei", other)
+	// 响应侧登记：精确路径（Domain 票据 → 应用根）
+	_, cp := rewriteSetCookie("mebsid=1; Domain=.meituan.com; Path=/", "/app/mei/", mustURL(t, "https://me.meituan.com/ebooking/home"), true)
+	r.record("mei", "mebsid\t"+cp)
+	hostReq, _ := http.NewRequest("GET", "/app/mei/x", nil) // 宿主会话 Cookie：排除登记
+	hostReq.AddCookie(&http.Cookie{Name: "openos_token", Value: "x"})
+	hostReq.AddCookie(&http.Cookie{Name: "hotel_refresh", Value: "x"})
+	r.recordRequestCookies("mei", hostReq)
+	w := httptest.NewRecorder()
+	emitted, remain := r.expireBatch(w, "mei", 300)
+	if emitted == 0 {
+		t.Fatalf("应有登记条目")
+	}
+	if remain != 0 {
+		t.Errorf("批内应清完 remain=%d", remain)
+	}
+	var got []string
+	for _, c := range w.Result().Cookies() {
+		if c.Value != "" || c.MaxAge != -1 {
+			t.Errorf("过期头形态不对：%+v", c)
+		}
+		if c.Name == "openos_token" || c.Name == "hotel_refresh" {
+			t.Errorf("宿主会话 Cookie 不应入清扫面：%s", c.Name)
+		}
+		got = append(got, c.Name+"@"+c.Path)
+	}
+	join := strings.Join(got, "\n")
+	for _, want := range []string{
+		"eprt@/app/mei/", "eprt@/app/mei/https/", "eprt@/app/mei/https/e.example.com/",
+		"eprt@/app/mei/https/e.example.com/settoken/",
+		"ssoid@/app/mei/https/e.example.com/settoken/",
+		"mebsid@/app/mei/",
+	} {
+		if !strings.Contains(join, want) {
+			t.Errorf("缺登记 %s（实得 %s）", want, join)
+		}
+	}
+	if strings.Contains(join, "@/\n") || strings.HasSuffix(join, "@/") { // 根路径宿主 Cookie 不入册
+		t.Errorf("不应登记根路径：%s", join)
 	}
 }
