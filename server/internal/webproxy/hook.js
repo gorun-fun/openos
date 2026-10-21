@@ -95,13 +95,54 @@
     } catch (e) { }
     return "";
   }
+  // ---- 发送侧：targetOrigin 放行 + 发送帧身份（source）保持 ----
+  // 代理把目标站的全部帧同源化到本源后有两个真实世界语义破坏：
+  // ① 发送方 targetOrigin 写真实站域名，收件帧真实源已是本源，浏览器按源不符
+  //    【整条丢弃】——须改 '*' 投递；
+  // ② 更隐蔽：投递必经收件帧的 postMessage（即本包装器，定义于收件帧 realm）。
+  //    MessageEvent.source 跟随【执行代码的 realm】（纯净帧三角实测：l1 realm
+  //    定义的函数调原生 → source=l1；l0 realm 函数 → source=l0）——包装器在本
+  //    帧 realm 内重调原生 postMessage，source 即被记为【收件帧自身】而非真实
+  //    发送帧。目标站跨帧协议普遍以 e.source === 期望窗口 作门（美团 @post-me
+  //    Messenger 的 D(e,t,n)、listenChildIframePostMessage 的直接子帧校验），
+  //    source 失真即被静默拒绝：握手死循环、容器路由指令丢弃、菜单点击无响应
+  //    （线上实证：l1 脚本调 parent.postMessage，收件侧 ev.source===l0）。
+  //    修复：每个代理帧的 hook 在自身 realm 预埋 __osRelaySend；包装器识别到
+  //    「外 realm 调用」（arguments.callee.caller 的 Function 构造器在其定义
+  //    realm 求值，返回该 realm 的 window——同源可跨 realm 构造）时，经调用
+  //    方的 relay 投递：relay 在调用方 realm 执行，source 恢复为真实发送帧。
+  //    识别不了（严格模式 caller 不可见/顶层脚本/原生入口）回落直投——不劣于
+  //    旧行为。本 realm 调用（页面对自身发消息）source 本就是自身，直投。
   var opm = window.postMessage.bind(window);
+  window.__osNativePM = opm; // 本帧原生 postMessage（hook 在文档起点捕获，先于一切站点代码）
+  window.__osRelaySend = function (targetWin, msg, targetOrigin, transfer) {
+    try {
+      if (targetWin && targetWin.__osNativePM) {
+        return targetWin.__osNativePM(msg, targetOrigin, transfer);
+      }
+    } catch (e) { }
+    return targetWin.postMessage(msg, targetOrigin, transfer);
+  };
+  function pxCallerWindow() {
+    try {
+      var c = arguments.callee.caller;
+      if (!c) return null;
+      return c.constructor("return window")() || null;
+    } catch (e) { return null; }
+  }
   window.postMessage = function (msg, targetOrigin, transfer) {
+    var to = targetOrigin;
     try {
       if (typeof targetOrigin === "string" && /^https?:\/\//i.test(targetOrigin) && targetOrigin !== location.origin) {
-        return opm(msg, "*", transfer);
+        to = "*";
       }
     } catch (e) { /* 保持原参数 */ }
+    try {
+      var cw = pxCallerWindow();
+      if (cw && cw !== window && typeof cw.__osRelaySend === "function") {
+        return cw.__osRelaySend(window, msg, to, transfer);
+      }
+    } catch (e) { /* 回落直投 */ }
     return opm(msg, targetOrigin, transfer);
   };
   function pxRestoreOrigin(ev) {
