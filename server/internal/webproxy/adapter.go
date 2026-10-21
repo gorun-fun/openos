@@ -167,6 +167,63 @@ try {
   }
 } catch (e) { /* referrer getter 不可重定义时忽略 */ }`,
 	},
+	// 美团 ME 容器握手自应答：门户新工作台（hotel-fe-me）的 iframeMessage 模块
+	// 启动即向父容器发 hotel-query-container 探测、等 hotel-container-response
+	//（应答 origin 须过其 isValidHost：含 .meituan./.sankuai./.dianping. 串），
+	// 3s 无应答落 unknown 嵌入态——页面按 unknown 分支渲染（工作台内容区恒停
+	// 死路径整页 404、登录页商户表单空白；对照实证：顶层打开自声明 me 一切
+	// 正常、iframe 嵌入（无论真实源直连还是本代理）恒残缺）。代理把全部帧
+	// 同源化到宿主源后，宿主桌面无法以美团域源应答（宿主源必挂 isValidHost）。
+	// 浏览器代理形态下本 Hook 在页面自身 realm 自应答：拦截发往父窗的探测，
+	// 以合成 MessageEvent（origin 呈现为本页目标站源，站点校验按真实世界语义
+	// 通过）异步投递应答——桌面客户端形态 WebApp onDeskHandshake（SOP 关闭下
+	// e.source.eval 同域源投递）在浏览器形态的等价物。应答载荷 origin 填本页
+	// location.origin（宿主源）：站点后续 postMessageToParentWindow 以它作
+	// targetOrigin，父窗（宿主）源正确命中。每个被嵌代理页（工作台/容器包装
+	// 页/业务子页）各自自应答，互不依赖父页的容器应答能力（原生 iframe 分支
+	// 只探测不监听子页探测）。
+	{
+		Name:  "meituan-container-handshake",
+		Hosts: []string{"meituan.com", "meituan.net", "sankuai.com", "dianping.com", "dpfile.com", "51ping.com"},
+		Hook: `
+try {
+  if (window.parent !== window && !window.__osMeHandshake) {
+    window.__osMeHandshake = true;
+    // 本页目标站源（与通用 hook 的帧源解析同源逻辑：__os_px 标记 / 代理前缀路径）
+    var own = '';
+    try {
+      var mk = /__os_px=[a-z0-9._-]+~([a-z][a-z0-9+.-]*)~([^&#]+)/i.exec(location.search);
+      if (mk) own = mk[1].toLowerCase() + '://' + decodeURIComponent(mk[2]);
+      else if (location.pathname.indexOf('/app/') === 0) {
+        var pk = /^[a-z0-9._-]+\/([a-z][a-z0-9+.-]*)\/([^/?#]+)/i.exec(location.pathname.slice(5));
+        if (pk) own = pk[1].toLowerCase() + '://' + pk[2];
+      }
+    } catch (e) { }
+    if (own) {
+      var opm = window.parent.postMessage.bind(window.parent);
+      window.parent.postMessage = function (msg, t, tr) {
+        try {
+          if (msg && msg.eventType === 'hotel-query-container' && msg.signature) {
+            var resp = {
+              eventType: 'hotel-container-response',
+              iframeInSystem: 'me',
+              origin: location.origin,
+              signature: msg.signature
+            };
+            // 异步投递：消息事件天然异步，同步合成会干扰「发送后才注册监听」的代码
+            setTimeout(function () {
+              try {
+                window.dispatchEvent(new MessageEvent('message', { data: resp, origin: own }));
+              } catch (e) { }
+            }, 0);
+          }
+        } catch (e) { }
+        return opm(msg, t, tr);
+      };
+    }
+  }
+} catch (e) { }`,
+	},
 	// 美团 SSO 登录跳转代理化：ebooking 商家后台的登录入口（美团员工登录等）在
 	// 前端 JS 里以字面量拼出 SSO 绝对地址（https://ssosv.sankuai.com/sson/login?…
 	// redirect_uri=location.origin+…）并 location.href 直跳——绝对地址导航完全

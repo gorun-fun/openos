@@ -831,6 +831,23 @@ func TestSiteAdapters(t *testing.T) {
 		t.Errorf("未知域不应命中任何适配器，得到 %v", names(got))
 	}
 
+	// meituan-container-handshake：美团系域全命中，Hook 含握手协议关键字段
+	//（探测拦截、合成应答的协议名/iframeInSystem/合成 MessageEvent）
+	mtHooks := ""
+	for _, a := range matchAdapters("me.meituan.com") {
+		if a.Name == "meituan-container-handshake" {
+			mtHooks = a.Hook
+		}
+	}
+	for _, kw := range []string{
+		"hotel-query-container", "hotel-container-response",
+		"iframeInSystem", "MessageEvent", "__os_px",
+	} {
+		if !strings.Contains(mtHooks, kw) {
+			t.Errorf("meituan-container-handshake Hook 应包含 %q", kw)
+		}
+	}
+
 	// origin-strict：无 Origin 时补目标站自身源（不泄露宿主信息），已有则不覆盖
 	out := httptest.NewRequest("POST", "https://me.meituan.com/api/x", nil)
 	out.Header.Del("Origin")
