@@ -28,7 +28,9 @@ export interface AppMenuItem {
 export const shell = reactive<{
   brand: ShellBrand
   login: ShellLogin
-  /** 菜单栏右侧扩展（单个或多个组件，如门店切换器/业务状态角标），渲染在状态 chip 之前 */
+  /** 菜单栏右侧扩展（单个或多个组件，如门店切换器/业务状态角标），渲染在状态 chip 之前。
+   *  移动形态无菜单栏，同一扩展改挂两处导航面：主屏头部（MobileHome 时钟与搜索之间）
+   *  与导航胶囊「更多」操作面板（.os-nav-extras 区）——组件自身按形态决定渲染形态 */
   menubarExtras: Component | Component[] | null
   /** SSO 回跳后经 URL 片段交接令牌的片段名；null 关闭片段交接 */
   tokenFragment: string | null

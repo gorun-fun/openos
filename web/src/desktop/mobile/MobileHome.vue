@@ -2,12 +2,13 @@
 // 移动形态桌面（Home）：单层滚动应用网格（Android launcher 形态），
 // 顶部状态行 = 时钟（点击开通知中心）+ 搜索入口。无 Dock/菜单栏/快捷方式/小组件，
 // 壁纸更换与外观等入口收进系统设置。仅在手机形态渲染（见 Desktop.vue）。
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useApps } from '../../stores/apps'
 import { useDesktop } from '../../stores/desktop'
 import { useWindows } from '../../stores/windows'
 import { useNotifications } from '../../stores/notifications'
 import AppIcon from '../../ui/AppIcon.vue'
+import { shell, type Component } from '../../shell'
 
 const emit = defineEmits<{ spotlight: [] }>()
 
@@ -15,6 +16,11 @@ const apps = useApps()
 const desktop = useDesktop()
 const windows = useWindows()
 const nc = useNotifications()
+
+// 宿主菜单栏扩展（shell.menubarExtras）在移动形态的落点之一：主屏头部（时钟与
+// 搜索之间）；导航胶囊「更多」面板是另一落点（见 MobilePill）——手机形态无
+// 菜单栏，扩展组件自身按形态决定渲染形态。
+const extras = computed(() => (shell.menubarExtras ? ([] as Component[]).concat(shell.menubarExtras) : []))
 
 const now = ref(new Date())
 let timer = 0
@@ -34,15 +40,18 @@ const dateText = () => {
 
 <template>
   <div class="mhome" :style="{ background: desktop.wallpapers[desktop.wallpaper] }">
-    <!-- 状态行：时钟点击唤出通知中心，右侧搜索唤出 Spotlight -->
+    <!-- 状态行：时钟点击唤出通知中心；右侧 = 宿主菜单栏扩展（移动落点）+ 搜索唤出 Spotlight -->
     <header class="mhead">
       <button class="clock" data-os-nc-clock @click="nc.openPanel()">
         <b class="time">{{ hh() }}:{{ mm() }}</b>
         <span class="date">{{ dateText() }}</span>
       </button>
-      <button class="search" title="搜索" @click="emit('spotlight')">
-        <svg viewBox="0 0 20 20" width="19" height="19"><circle cx="8.5" cy="8.5" r="5.6" fill="none" stroke="currentColor" stroke-width="1.9" /><line x1="13" y1="13" x2="17.4" y2="17.4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" /></svg>
-      </button>
+      <div class="mhead-side">
+        <component :is="c" v-for="(c, i) in extras" :key="i" />
+        <button class="search" title="搜索" @click="emit('spotlight')">
+          <svg viewBox="0 0 20 20" width="19" height="19"><circle cx="8.5" cy="8.5" r="5.6" fill="none" stroke="currentColor" stroke-width="1.9" /><line x1="13" y1="13" x2="17.4" y2="17.4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" /></svg>
+        </button>
+      </div>
     </header>
 
     <!-- 单层应用网格：滚动不分页，可见应用全量平铺（hidden 应用不出现） -->
@@ -64,6 +73,8 @@ const dateText = () => {
   flex: none; display: flex; align-items: flex-end; justify-content: space-between;
   padding: calc(env(safe-area-inset-top, 0px) + 18px) 20px 4px;
 }
+/* 右侧组：宿主菜单栏扩展（门店切换器等）与搜索按钮同行 */
+.mhead-side { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .clock {
   border: none; background: none; cursor: pointer;
   display: flex; flex-direction: column; align-items: flex-start; gap: 2px;

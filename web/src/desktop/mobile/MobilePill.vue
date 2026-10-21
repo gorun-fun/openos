@@ -10,11 +10,17 @@ import { useApps } from '../../stores/apps'
 import { useSession } from '../../stores/session'
 import AppIcon from '../../ui/AppIcon.vue'
 import { mobileViewportH } from '../../ui/formfactor'
+import { shell, type Component } from '../../shell'
 
 const emit = defineEmits<{ home: [] }>()
 
 const windows = useWindows()
 const apps = useApps()
+
+// 宿主菜单栏扩展（shell.menubarExtras，如门店切换器）在移动形态的落点之一：
+// 桌面形态渲染在菜单栏右侧，手机形态无菜单栏，改挂「更多」操作面板（主屏头部
+// 是另一落点，见 MobileHome）——组件自身按形态决定渲染形态。
+const extras = computed(() => (shell.menubarExtras ? ([] as Component[]).concat(shell.menubarExtras) : []))
 
 const PILL_H = 54
 const EDGE = 8
@@ -258,6 +264,13 @@ function onCardPointerDown(e: PointerEvent, id: string) {
         <button v-if="mode === 'ball'" class="abtn" @click="mode = 'pill'; save(); actionsOpen = false">
           恢复底部胶囊
         </button>
+        <!-- 宿主菜单栏扩展（移动形态落点）：门店切换器等，组件自带交互 -->
+        <template v-if="extras.length">
+          <div class="nav-extras-sep" />
+          <div class="os-nav-extras">
+            <component :is="c" v-for="(c, i) in extras" :key="i" />
+          </div>
+        </template>
       </div>
     </div>
   </Teleport>
@@ -350,6 +363,9 @@ function onCardPointerDown(e: PointerEvent, id: string) {
 .empty small { font-size: 12px; opacity: .7; }
 
 .actions { display: flex; flex-direction: column; gap: 8px; padding: 14px 14px 6px; }
+/* 宿主扩展区：与内置动作按钮分隔；组件渲染形态（行/胶囊）由宿主组件自决 */
+.nav-extras-sep { height: 1px; margin: 6px 2px; background: var(--os-border); flex: none; }
+.os-nav-extras { display: flex; flex-direction: column; gap: 8px; }
 .abtn {
   height: 50px; border: none; border-radius: 13px; background: var(--os-bg); color: var(--os-text);
   font-size: 14.5px; cursor: pointer; font-family: inherit;
