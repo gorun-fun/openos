@@ -2,13 +2,13 @@
 // 移动形态桌面（Home）：单层滚动应用网格（Android launcher 形态），
 // 顶部状态行 = 时钟（点击开通知中心）+ 搜索入口。无 Dock/菜单栏/快捷方式/小组件，
 // 壁纸更换与外观等入口收进系统设置。仅在手机形态渲染（见 Desktop.vue）。
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, type Component } from 'vue'
 import { useApps } from '../../stores/apps'
 import { useDesktop } from '../../stores/desktop'
 import { useWindows } from '../../stores/windows'
 import { useNotifications } from '../../stores/notifications'
 import AppIcon from '../../ui/AppIcon.vue'
-import { shell, type Component } from '../../shell'
+import { shell } from '../../shell'
 
 const emit = defineEmits<{ spotlight: [] }>()
 

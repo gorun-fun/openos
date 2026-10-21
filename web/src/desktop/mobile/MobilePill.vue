@@ -4,13 +4,13 @@
 // 多任务 = 全部窗口的横滑卡片（上滑关闭、点击恢复）；回桌面语义由 Desktop 统一处理
 // （经 history.back() 走 popstate，Android 系统返回键同路径）。
 // 仅在手机形态且有前台窗口时渲染（见 Desktop.vue）。
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, type Component } from 'vue'
 import { useWindows } from '../../stores/windows'
 import { useApps } from '../../stores/apps'
 import { useSession } from '../../stores/session'
 import AppIcon from '../../ui/AppIcon.vue'
 import { mobileViewportH } from '../../ui/formfactor'
-import { shell, type Component } from '../../shell'
+import { shell } from '../../shell'
 
 const emit = defineEmits<{ home: [] }>()
 
