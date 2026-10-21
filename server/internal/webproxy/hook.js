@@ -123,13 +123,6 @@
     } catch (e) { }
     return targetWin.postMessage(msg, targetOrigin, transfer);
   };
-  function pxCallerWindow() {
-    try {
-      var c = arguments.callee.caller;
-      if (!c) return null;
-      return c.constructor("return window")() || null;
-    } catch (e) { return null; }
-  }
   window.postMessage = function (msg, targetOrigin, transfer) {
     var to = targetOrigin;
     try {
@@ -138,12 +131,16 @@
       }
     } catch (e) { /* 保持原参数 */ }
     try {
-      var cw = pxCallerWindow();
+      // 调用方识别必须在本包装器函数体内做：arguments.callee 在助手函数里指向
+      // 助手自身，caller 会多一层取到包装器（本帧 realm），识别恒为自身、relay
+      // 永不命中；内联时 callee=本包装器、caller=站点调用函数（调用方 realm）
+      var c = arguments.callee.caller;
+      var cw = c ? c.constructor("return window")() : null;
       if (cw && cw !== window && typeof cw.__osRelaySend === "function") {
         return cw.__osRelaySend(window, msg, to, transfer);
       }
     } catch (e) { /* 回落直投 */ }
-    return opm(msg, targetOrigin, transfer);
+    return opm(msg, to, transfer);
   };
   function pxRestoreOrigin(ev) {
     try {
