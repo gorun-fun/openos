@@ -8,7 +8,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { WinState } from '../../stores/windows'
 import { useWindows } from '../../stores/windows'
 import { useApps } from '../../stores/apps'
-import { OsEmpty, icons } from '../../ui'
+import { OsEmpty, icons, toast } from '../../ui'
 import { handleExternalKey } from '../../ui/keys'
 import { installPxTopBridge } from './pxTop'
 import { WEB_APPS } from './registry'
@@ -46,6 +46,10 @@ const pxCompact = (u: string) => u.replace(/^([a-zA-Z][a-zA-Z0-9+.-]*):\/\//, (_
 // 关闭站点隔离启动，跨源 iframe 不被同源策略/X-Frame-Options/CSP frame-ancestors 拦截，
 // 且携带真实浏览器登录态，跨域问题随之消解。惰性读取，晚注入也能生效
 const desktopMode = () => !!(window as any).__OPENOS_DESKTOP__
+// 代理形态（浏览器模式的 proxy 应用，或桌面端声明 desktopProxy 的）：页面经
+// /app/<id>/ 反代落在本源，其数据（存储/Cookie）也在本源、有明确应用边界——
+// 清除缓存按钮只对该形态呈现（直连 iframe 的数据在目标站源，本源无从清起）
+const isProxy = computed(() => dynCfg.value.kind === 'proxy' && (!desktopMode() || !!dynCfg.value.desktopProxy))
 const src = computed(() => {
   if (!url.value) return ''
   if (dynCfg.value.kind === 'proxy' && (!desktopMode() || dynCfg.value.desktopProxy)) return `/app/${props.win.appId}/${pxCompact(url.value)}`
@@ -301,6 +305,65 @@ function refresh() {
 // 代理模式经反代打开（新标签同源携带登录态）；普通模式直开目标站
 function openExternal() { if (activeTab.value) window.open(activeTab.value.url, '_blank', 'noopener') }
 
+// ---- 清除缓存：按应用边界清扫本源的代理数据后整窗刷新 ----
+// 代理应用落在 OpenOS 源的数据三类，各有明确归属：
+// ① hook 存储隔离门面的 __px_<appid>:: 前缀键（localStorage + sessionStorage）；
+// ② 代理 Cookie：服务端 rewriteSetCookie 把目标站 Cookie 的 Path 收归
+//    /app/<id>/… 作用域（登录态/票据都在这，清掉即回到未登录——配置注入的
+//    MEITUAN_COOKIE 等由服务端每请求重新展开、刷新即恢复）；
+// ③ Service Worker：hook 已禁注册，防御性扫掉历史遗留的 /app/<id>/ 作用域注册。
+// Cookie 的 Path 属性不可枚举（document.cookie 只给名字），从各 tab 的 iframe
+// （代理同源可读）收集可见名字，再按其代理路径的逐级目录前缀写过期删除——
+// 命中真实 Path 才有效，写偏是无害空操作。前缀之外还清 Path=/：站点脚本经顶层
+// 桥（pxTopBridge 语境无 hook 改写）会把 Cookie 直接种到宿主源根（美团 WM_* /
+// WEBDFPID 实测如此，设备指纹类不清就不是完整重置）；宿主前端自身不写 JS 可见
+// Cookie（服务端 Cookie 均 HttpOnly 或窄路径），根路径上可见的即站点泄漏，可安全
+// 清除。IndexedDB / CacheStorage 的库名无归属信息且 SW 已禁，不清。
+async function clearCache() {
+  const appId = props.win.appId
+  // ① 前缀存储键
+  const ns = `__px_${appId}::`
+  for (const store of [window.localStorage, window.sessionStorage]) {
+    const keys: string[] = []
+    for (let i = 0; i < store.length; i++) {
+      const k = store.key(i)
+      if (k && k.startsWith(ns)) keys.push(k)
+    }
+    keys.forEach((k) => store.removeItem(k))
+  }
+  // ② 应用路径作用域 Cookie（含根路径泄漏的）
+  const names = new Set<string>()
+  const paths = new Set<string>([`/app/${appId}/`, '/'])
+  for (const t of tabs.value) {
+    try {
+      const d = winOf(t)?.document
+      if (d) d.cookie.split(';').forEach((c: string) => { const n = c.split('=')[0].trim(); if (n) names.add(n) })
+    } catch { /* iframe 尚未挂载或已销毁，尽力而为 */ }
+    let p = ''
+    try { p = new URL(t.url, location.origin).pathname } catch { continue }
+    const segs = p.split('/')
+    if (segs[1] !== 'app' || segs[2] !== appId) continue
+    let acc = ''
+    for (let i = 1; i < segs.length; i++) { acc += `${segs[i]}/`; paths.add(acc) }
+  }
+  names.forEach((n) => paths.forEach((p) => {
+    document.cookie = `${n}=; Path=${p}; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0`
+  }))
+  // ③ 作用域内 SW 注册（防御性，正常应为空）
+  try {
+    if (navigator.serviceWorker?.getRegistrations) {
+      const regs = await navigator.serviceWorker.getRegistrations()
+      const base = `${location.origin}/app/${appId}/`
+      regs.forEach((r) => { if (r.scope.startsWith(base)) r.unregister() })
+    }
+  } catch { /* 无 SW 支持或不可用 */ }
+  // 整窗重建（全部 tab 重新加载）并反馈
+  tabs.value.forEach((t) => { t.seq++; t.loaded = false; t.title = '加载中…' })
+  loading.value = true
+  armLoadFallback()
+  toast('已清除本应用的存储与 Cookie，正在刷新', { type: 'success' })
+}
+
 // ---- 桌面端登录辅助：跨站会话 Cookie（未标注 SameSite）在第三方 iframe 上下文里
 // 无法落地/携带，站内登录常常卡在 settoken 一类环节。桌面端改在顶层独立窗口（第一方
 // 上下文）完成登录/SSO/设 Cookie——桌面客户端会把 jar 统一归一为 SameSite=None，登录
@@ -340,6 +403,7 @@ function desktopLogin() {
         <button v-if="loginAvailable" class="os-tb-btn" title="登录（在独立窗口完成，成功后自动回到本页）" v-html="icons.user" @click="desktopLogin" />
         <button class="os-tb-btn" title="刷新" v-html="icons.refresh" @click="refresh" />
         <button class="os-tb-btn" title="在浏览器中打开" v-html="icons.link" @click="openExternal" />
+        <button v-if="isProxy" class="os-tb-btn" title="清除缓存（本应用的存储与 Cookie）并刷新" v-html="icons.eraser" @click="clearCache" />
       </div>
       <!-- 标签条：多 tab 时出现；空白区域可拖动窗口，tab 自身拦截双击 -->
       <div v-if="tabs.length > 1" class="tabs" data-os-drag>
