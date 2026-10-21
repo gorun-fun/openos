@@ -35,4 +35,14 @@ defineProps<{ merged?: boolean; title?: string }>()
   font-size: 13.5px; font-weight: 600; color: var(--os-text);
   overflow: hidden; text-overflow: ellipsis; max-width: 38%; flex: none;
 }
+/* 移动形态：融合工具栏放开 nowrap 换行堆叠（与全局 .os-tb 移动块同款——
+   scoped 特异性高于全局，此处不覆盖则本组件渲染的融合工具栏仍按 nowrap 裁剪，
+   溢出的工具项在手机端不可达） */
+@media (max-width: 767px) {
+  .os-toolbar.os-tb {
+    height: auto; min-height: 46px; padding: 7px 12px;
+    flex-wrap: wrap; white-space: normal; overflow: visible; row-gap: 6px;
+  }
+  .tb-title { max-width: 100%; }
+}
 </style>

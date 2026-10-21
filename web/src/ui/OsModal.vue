@@ -74,6 +74,17 @@ function trapTab(backward: boolean) {
   animation: modal-in .22s var(--os-ease-spring);
 }
 .os-modal:focus { outline: none; }
+/* 移动形态：弹窗占满可用宽度、超高内容可滚动——
+   ① min-width 320 在 320~372px 窄屏上贴边无留白，降为 0 由 max-width 控制；
+   ② 内容高于窗口时 flex 居中会把上半截裁出滚动区外（经典 flexbox 坑），
+      遮罩改可滚动 + 弹窗 margin:auto（空间够时仍居中、不够时归零可滚） */
+@media (max-width: 767px) {
+  .os-modal-mask { overflow-y: auto; }
+  .os-modal {
+    min-width: 0; max-width: calc(100% - 24px);
+    margin: auto; padding: 16px 14px 12px;
+  }
+}
 @keyframes modal-in {
   from { opacity: 0; transform: scale(.92) translateY(8px); }
   to { opacity: 1; transform: scale(1) translateY(0); }

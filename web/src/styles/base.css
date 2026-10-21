@@ -231,8 +231,16 @@ button { font-family: inherit; }
     display: flex; align-items: center; justify-content: center;
     box-shadow: var(--os-shadow-sm);
   }
-  /* 融合窗体工具栏：移动形态无红绿灯，去掉 84px 悬浮位 */
-  .os-tb { padding-left: 12px; }
+  /* 融合窗体工具栏：移动形态无红绿灯，去掉 84px 悬浮位；同时放开 nowrap——
+     手机宽度装不下一整行工具项时改为换行堆叠（nowrap+overflow:hidden 会把
+     溢出的按钮直接裁掉，而移动形态无菜单栏/窗口菜单兜底，被裁项不可达） */
+  .os-tb {
+    padding-left: 12px; padding-right: 12px;
+    height: auto; min-height: 46px; padding-top: 7px; padding-bottom: 7px;
+    flex-wrap: wrap; white-space: normal; overflow: visible;
+    row-gap: 6px;
+  }
+  .os-tb .os-tb-title { max-width: 100%; }
 }
 
 /* ---- 无障碍基线 ----
