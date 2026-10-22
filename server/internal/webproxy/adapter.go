@@ -208,11 +208,15 @@ try {
     } catch (e) { }
     if (own && window.parent !== window && window.top === window) {
       // ① 最外层代理页（真实世界顶层页；通用 hook 已把 window.top 还原为自身，
-      //    故判定取 top===self 形态）：自声明
-      var opm = window.parent.postMessage.bind(window.parent);
-      window.parent.postMessage = function (msg, t, tr) {
+      //    故判定取 top===self 形态）：自声明。探测可能经 parent / top(=self，
+      //    hook 已还原) / self 任意一个 postMessage 发出（线上实证：WsIframeMessage
+      //    走 top=自身时若只包 parent 会 3s 无应答落 unknown，master 应用随之不挂
+      //    桥监听），三处都挂拦截，幂等标记防重复应答。
+      var osMeAnswered = {};
+      var osMeSelfAnswer = function (msg) {
         try {
-          if (msg && msg.eventType === 'hotel-query-container' && msg.signature) {
+          if (msg && msg.eventType === 'hotel-query-container' && msg.signature && !osMeAnswered[msg.signature]) {
+            osMeAnswered[msg.signature] = 1;
             var resp = {
               eventType: 'hotel-container-response',
               iframeInSystem: 'me',
@@ -227,7 +231,16 @@ try {
             }, 0);
           }
         } catch (e) { }
+      };
+      var opm = window.parent.postMessage.bind(window.parent);
+      window.parent.postMessage = function (msg, t, tr) {
+        osMeSelfAnswer(msg);
         return opm(msg, t, tr);
+      };
+      var ospm = window.postMessage;
+      window.postMessage = function (msg, t, tr) {
+        osMeSelfAnswer(msg);
+        return ospm.call(window, msg, t, tr);
       };
       // ① 代行顶层分支的容器职责：应答直接子页的探测（原生监听被 isValidOrigin
       //    门挡死；以「发送者是本窗直接子帧」代校验——能向本窗 postMessage 的
