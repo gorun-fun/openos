@@ -43,6 +43,7 @@
     } catch (e) { }
   }
 
+
   // ---- 存储隔离：代理页与宿主桌面同源，localStorage/sessionStorage 原生直写
   // 会与宿主互踩——宿主自身会话键（openos 桌面 openos_token）、被代理的嵌套宿主
   // 登录引导页写 token/openos_token（覆盖外层会话，外层登出 clearToken 又连锁杀
@@ -182,6 +183,36 @@
     } catch (e) { /* 回落直投 */ }
     return opm(msg, to, transfer);
   };
+  // ---- 发送方协作：子帧把父窗的 postMessage 包一层【本帧 realm】的放行器 ----
+  // 目标侧包装器（上面）对严格模式调用方的 realm 识别不可靠（arguments.callee.
+  // caller 对 strict 抛、V8 CallSite.getFunction() 对 eval/优化帧返回 null，双路
+  // 线上实证均失败）——source 恒失真、@post-me 握手永不完成（美团 slave 应用
+  // 空白 20 秒后被「无容器」重定向默认页）。子帧的 hook 主动包父窗（同源可写）：
+  // 放行器定义于本帧 realm，经父窗 hook 预埋的 __osNativePM 原生引用投递，
+  // source=本帧（真实发送者）✓。①绝对源 targetOrigin 同时放行为 '*'；②父窗
+  // 自发（targetOrigin 非绝对源）转交父窗原目标侧包装器（父 realm 执行，
+  // source=父窗自身 ✓）。幂等标记防多子帧叠加（后装子帧的发送经先装者的
+  // realm，source 失真但不劣于旧；美团拓扑为单子链，先装者即唯一活跃子帧）。
+  try {
+    if (window.parent !== window) {
+      var pxpw = window.parent;
+      if (!pxpw.__osPxParentRelax) {
+        pxpw.__osPxParentRelax = true;
+        var pxpnat = pxpw.__osNativePM || pxpw.postMessage.bind(pxpw);
+        var pxpwrap = pxpw.postMessage; // 父窗的目标侧包装器（父 realm，自发消息经此）
+        pxpw.postMessage = function (msg, t, tr) {
+          var to2 = t;
+          try {
+            if (typeof t === "string" && /^https?:\/\//i.test(t) && t !== pxpw.location.origin) {
+              to2 = "*";
+              return pxpnat(msg, to2, tr); // 跨帧协议投递：本帧 realm → source=本帧
+            }
+          } catch (e) { }
+          return pxpwrap.call(pxpw, msg, t, tr); // 父窗自身语义（'*'/同源）：交回父侧包装器
+        };
+      }
+    }
+  } catch (e) { /* 父窗跨源或不可写时忽略（本形态必同源，防御性兜底） */ }
   function pxRestoreOrigin(ev) {
     try {
       if (!ev || ev.origin !== location.origin) return ev;

@@ -176,6 +176,19 @@ onMounted(() => {
         const t = tabs.value.find(x => winOf(x) === source)
         if (t) closeTab(t.id)
       },
+      // 登录页自嵌套自愈（hook 检出裸 login 页挂进登录壳时调用）：整建回入口
+      // URL——入口直载是已知良好拓扑（美团 ebooking 登录成功后「降级默认容器
+      // 流」的嵌套壳会掐死工作台初始化并再渲染一层登录表单）
+      reloadEntry() {
+        const tab = tabs.value.find(t => t.id === activeId.value)
+        if (!tab) return
+        tab.url = src.value
+        tab.seq++
+        tab.loaded = false
+        tab.title = '加载中…'
+        loading.value = true
+        armLoadFallback()
+      },
     }
   }
 })
@@ -231,7 +244,34 @@ function restoreAnchor() {
   armLoadFallback()
 }
 function checkAnchorNow() {
-  if (!desktopMode() || !anchorHost.value || !src.value) return
+  if (!anchorHost.value || !src.value) return
+  // 登录页自嵌套自愈（浏览器模式，2026-10-22）：美团登录成功后门户会把裸
+  // login/index.html 挂进登录壳内（无 redirect、经既有 iframe 的 src 赋值——
+  // 无导航无新元素，服务端日志实证登录全链成功但工作台被嵌套壳掐死；嵌套发生
+  // 时壳内常同时存在 oauth 表单帧与裸登录帧多个 iframe，任一命中即算）。检出
+  // 即整建回入口——入口直载是已知良好拓扑（容器探测由适配器应答、会话 Cookie
+  // 全程携带）。5s 冷却防循环重建
+  if (!desktopMode() && dynCfg.value.kind === 'proxy' && Date.now() - lastRestore >= 5000) {
+    const f = rootEl.value?.querySelector<HTMLIFrameElement>('iframe.frame')
+    let outerLogin = false
+    let innerLogin = false
+    try {
+      const w = f?.contentWindow
+      outerLogin = !!w && /\/login\/index\.html$/.test(w.location.pathname)
+      w?.document.querySelectorAll('iframe').forEach((sub) => {
+        try {
+          const sw = sub.contentWindow
+          if (sw && /\/login\/index\.html$/.test(sw.location.pathname) && sw.location.search.indexOf('redirect=') < 0) innerLogin = true
+        } catch { /* 子帧读取失败忽略 */ }
+      })
+    } catch { /* 跨源读不到（理论上代理同源恒可读），跳过 */ }
+    if (outerLogin && innerLogin) {
+      lastRestore = Date.now()
+      restoreAnchor()
+      return
+    }
+  }
+  if (!desktopMode()) return
   // 身份全局桥自愈：注入 shim 捕获到该站新的身份全局（partnerId 等）时置脏，
   // 刷新一次本窗让依赖它的初始化（美团菜单 saga 等）拿到数据
   const G = (window as any).__OSD_GLOBALS__
