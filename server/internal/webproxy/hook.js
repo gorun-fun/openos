@@ -43,6 +43,38 @@
     } catch (e) { }
   }
 
+  // ---- 文档起点错误捕获器（排障基础设施）----
+  // 页面早期异常（微前端框架把 mount 错误吞成 minified 告警、详情无从获取）是
+  // 代理排障的最大盲区。hook 在文档起点捕获 window error / unhandledrejection /
+  // console.error 存入 window.__osPageErrors（同源桌面侧可读，上限 60 条），不
+  // 改变任何页面行为。
+  try {
+    var ERRS = [];
+    Object.defineProperty(window, '__osPageErrors', { configurable: true, get: function () { return ERRS.slice(); } });
+    function osTrap(kind, detail) {
+      try {
+        if (ERRS.length < 60) ERRS.push(Date.now() + ' ' + kind + ' ' + String(detail).slice(0, 500));
+      } catch (e) { }
+    }
+    window.addEventListener('error', function (e) {
+      osTrap('error', (e.message || '') + ' @' + String(e.filename || '').slice(-90) + ':' + (e.lineno || '') + ' :: ' + String((e.error && e.error.stack) || '').slice(0, 300));
+    });
+    window.addEventListener('unhandledrejection', function (e) {
+      var r = e.reason;
+      osTrap('reject', String((r && (r.stack || r.message)) || r).slice(0, 350));
+    });
+    var osCE = console.error;
+    console.error = function () {
+      var a = [];
+      for (var i = 0; i < arguments.length; i++) {
+        var x = arguments[i];
+        try { a.push(x && x.stack ? String(x.stack).slice(0, 250) : JSON.stringify(x)); } catch (e) { a.push(String(x)); }
+      }
+      osTrap('console.error', a.join(' | ').slice(0, 350));
+      return osCE.apply(console, arguments);
+    };
+  } catch (e) { /* 不破坏页面 */ }
+
 
   // ---- 存储隔离：代理页与宿主桌面同源，localStorage/sessionStorage 原生直写
   // 会与宿主互踩——宿主自身会话键（openos 桌面 openos_token）、被代理的嵌套宿主
