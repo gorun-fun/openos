@@ -206,8 +206,9 @@ try {
         if (pk) own = pk[1].toLowerCase() + '://' + pk[2];
       }
     } catch (e) { }
-    if (own && window.parent === window.top) {
-      // ① 最外层代理页（真实世界顶层页）：自声明
+    if (own && window.parent !== window && window.top === window) {
+      // ① 最外层代理页（真实世界顶层页；通用 hook 已把 window.top 还原为自身，
+      //    故判定取 top===self 形态）：自声明
       var opm = window.parent.postMessage.bind(window.parent);
       window.parent.postMessage = function (msg, t, tr) {
         try {

@@ -1083,3 +1083,24 @@
     mo.observe(document.documentElement || document, { childList: true, subtree: true });
   } catch (e) { /* Observer 不可用时维持现状 */ }
 })();
+
+// ---- 最外层代理页的 top 语义还原 ----
+// 目标站的顶层页（如美团门户新工作台的 ebIframe 宿主）被代理嵌进宿主桌面后
+// window.top 指向桌面，页面代码里整类「本页即顶层」分支（微前端宿主自居、
+// 首屏上报广播、免密登录提示条、菜单/桥服务的顶层条件挂载）整体走偏——线上
+// 实证：master 桥对子页 _HANDSHAKE_ 永不回话（监听链未按顶层语义挂载），slave
+// 全家空白后被降级跳默认页。还原语义：最外层代理页（parent 即真实 top）把
+// window.top 呈现为自身，页面恢复真实世界顶层行为；真实 top 备份于
+// __osRealTop。本段置于 hook 尾部：hook 自身各段落（快捷键转发的 top 判定等）
+// 均已按真实 top 执行完毕，不受影响。页面借 top.location 的逃逸导航因此落在
+// 自身窗口内（被本窗既有的地址改写链接管），回捕语义不受损。
+try {
+  if (window.parent !== window && window.parent === window.top) {
+    var osRealTop = window.top;
+    Object.defineProperty(window, 'top', {
+      configurable: true,
+      get: function () { return window; }
+    });
+    window.__osRealTop = osRealTop;
+  }
+} catch (e) { /* 不可覆盖时保持现状 */ }
