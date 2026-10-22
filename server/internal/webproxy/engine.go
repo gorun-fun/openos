@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // forwardOpts 一次转发的模式参数。
@@ -39,9 +40,12 @@ type forwardOpts struct {
 // URL 立即重取恒 200——新连接即好）。已开始写响应（流式透传段）不可重试。
 func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request, tu *url.URL, opts forwardOpts) {
 	for try := 0; ; try++ {
-		if !p.serveForwardOnce(w, r, tu, opts) && try == 0 {
+		if !p.serveForwardOnce(w, r, tu, opts) && try < 2 {
 			// 重试前清空首次尝试积累的未发送响应头（copyRespHeaders 全 Add 语义，
-			// 不清会双份 Set-Cookie 等）
+			// 不清会双份 Set-Cookie 等）。带退避：首请求集中失败实证为冷 DNS 并发
+			// 解析雪崩（容器初起/空闲后首轮突发，瞬时再试仍在冷窗内），150/250ms
+			// 让解析落地。
+			time.Sleep(time.Duration(100+try*100) * time.Millisecond)
 			h := w.Header()
 			for k := range h {
 				delete(h, k)
