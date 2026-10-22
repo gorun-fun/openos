@@ -223,10 +223,13 @@ try {
               origin: location.origin,
               signature: msg.signature
             };
-            // 异步投递：消息事件天然异步，同步合成会干扰「发送后才注册监听」的代码
+            // 异步投递：消息事件天然异步，同步合成会干扰「发送后才注册监听」的代码。
+            // source 补 window.parent（宿主桌面窗）：新版 WsIframeMessage（美团
+            // 2026-10-22 上线的 hotel-fe-me 11305747）应答校验除 origin 外还核
+            // source===父容器窗，缺 source 的合成应答被静默拒收（3s 未回应实证）。
             setTimeout(function () {
               try {
-                window.dispatchEvent(new MessageEvent('message', { data: resp, origin: own }));
+                window.dispatchEvent(new MessageEvent('message', { data: resp, origin: own, source: window.parent }));
               } catch (e) { }
             }, 0);
           }
