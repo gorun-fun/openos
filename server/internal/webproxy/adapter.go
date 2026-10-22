@@ -206,12 +206,11 @@ try {
         if (pk) own = pk[1].toLowerCase() + '://' + pk[2];
       }
     } catch (e) { }
-    if (own && window.parent !== window && window.top === window) {
-      // ① 最外层代理页（真实世界顶层页；通用 hook 已把 window.top 还原为自身，
-      //    故判定取 top===self 形态）：自声明。探测可能经 parent / top(=self，
-      //    hook 已还原) / self 任意一个 postMessage 发出（线上实证：WsIframeMessage
-      //    走 top=自身时若只包 parent 会 3s 无应答落 unknown，master 应用随之不挂
-      //    桥监听），三处都挂拦截，幂等标记防重复应答。
+    if (own && window.parent === window.top) {
+      // ① 最外层代理页（真实世界顶层页）：自声明。探测可能经 parent / self 任意
+      //    一个 postMessage 发出（新版 WsIframeMessage 走 parent，留 self 拦截作
+      //    兜底），两处都挂拦截，幂等标记防重复应答。（不可用 top===self 判定：
+      //    本浏览器 iframe 的 top 为 Unforgeable 不可重定义，假 top 方案无效。）
       var osMeAnswered = {};
       var osMeSelfAnswer = function (msg) {
         try {
