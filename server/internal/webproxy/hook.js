@@ -209,6 +209,43 @@
       return null;
     } catch (e) { return null; }
   }
+  // pxStackFromParent：栈字符串 URL 分类——调用是否来自父帧 realm。getFunction
+  // 对压缩优化帧返回 null（识别恒败），但栈字符串里的 URL 永远在。资产 URL 不带
+  // realm 归属，故以【本帧与父帧各自的 document+脚本资源清单】匹配（同源可读父
+  // 帧 performance；父帧与子帧的脚本集合不相交——同宿主源下不同目标页各自加载）。
+  // 返回 true 表示调用帧命中父帧清单。
+  function pxStackScripts(win) {
+    var out = [];
+    try { out.push(win.location.href.split('#')[0]); } catch (e) { }
+    try {
+      win.performance.getEntriesByType('resource').forEach(function (r) {
+        if (r.initiatorType === 'script' || /\.js/.test(r.name)) out.push(String(r.name).split('#')[0]);
+      });
+    } catch (e) { }
+    return out;
+  }
+  function pxStackFromParent() {
+    try {
+      if (window.parent === window) return false;
+      var st = new Error().stack || "";
+      if (!st) return false;
+      var own = pxStackScripts(window);
+      var pp = pxStackScripts(window.parent);
+      if (!pp.length) return false;
+      var lines = st.split("\n");
+      for (var i = 1; i < lines.length && i < 8; i++) {
+        var m = /https?:\/\/[^\s()]+/.exec(lines[i]);
+        if (!m) continue;
+        var u = m[0].replace(/:\d+:\d+$/, "").split('#')[0];
+        var k;
+        var isOwn = false;
+        for (k = 0; k < own.length; k++) { if (own[k] === u || own[k].indexOf(u) === 0 || u.indexOf(own[k]) === 0) { isOwn = true; break; } }
+        if (isOwn) continue;
+        for (k = 0; k < pp.length; k++) { if (pp[k] === u || pp[k].indexOf(u) === 0 || u.indexOf(pp[k]) === 0) return true; }
+      }
+      return false;
+    } catch (e) { return false; }
+  }
   window.postMessage = function (msg, targetOrigin, transfer) {
     var to = targetOrigin;
     var abs = false;
@@ -233,12 +270,19 @@
     // 消息不会写外部绝对源——写了也按源不符丢弃），此时经父窗 __osRelaySend（父
     // realm 执行）投递：source=父窗=真实发送方（美团拓扑 master 直答子帧；万一真
     // 发送方是兄弟帧则 source 失真，但不劣于旧的恒为收件帧自身）。
-    if (abs && window.parent !== window) {
-      try {
-        if (typeof window.parent.__osRelaySend === "function") {
-          return window.parent.__osRelaySend(window, msg, to, transfer);
-        }
-      } catch (e) { /* 回落直投 */ }
+    if ((abs || to === "*") && window.parent !== window) {
+      // '*' 消息先做栈分类：master 总线对子帧的握手/指令也用 '*' 投递（线上实证：
+      // 每秒重试的 @post-me handshake-request 恒被 @post-me 门拒——source 恒为收件
+      // 帧自身）；仅当调用确实来自父帧 realm 才经父窗 relay（自发 '*' 消息保持
+      // 直投，source=自身不被破坏）。
+      var fromParent = abs || pxStackFromParent();
+      if (fromParent) {
+        try {
+          if (typeof window.parent.__osRelaySend === "function") {
+            return window.parent.__osRelaySend(window, msg, to, transfer);
+          }
+        } catch (e) { /* 回落直投 */ }
+      }
     }
     return opm(msg, to, transfer);
   };
