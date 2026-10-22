@@ -73,6 +73,15 @@
       osTrap('console.error', a.join(' | ').slice(0, 350));
       return osCE.apply(console, arguments);
     };
+    var osCW = console.warn;
+    console.warn = function () {
+      var a = [];
+      for (var i = 0; i < arguments.length; i++) {
+        try { a.push(String(arguments[i]).slice(0, 160)); } catch (e) { }
+      }
+      osTrap('console.warn', a.join(' | ').slice(0, 300));
+      return osCW.apply(console, arguments);
+    };
   } catch (e) { /* 不破坏页面 */ }
 
 
