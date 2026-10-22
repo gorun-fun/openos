@@ -32,7 +32,29 @@ type forwardOpts struct {
 
 // serveForward 统一转发主链路：清洗请求 → 拨号上游 → 头改写 →（模式开启时）
 // 文本响应读入重写 → 回写；非文本与不可重写响应流式透传。
+// 幂等 GET 的传输层失败（拨号错误/读体中途连接重置）在写响应头前单次透明重试
+// （见 serveForwardOnce 的返回值语义）：长连接池空闲超时后首个请求常撞死连接
+// （H2 GOAWAY 未及感知/RST），上游 ~200ms 返回连接错误 → 502，页面侧无重试即
+// 整轮启动失败（线上实证：每轮子页启动首请求 menus/chunk-vendors 恒 502、同一
+// URL 立即重取恒 200——新连接即好）。已开始写响应（流式透传段）不可重试。
 func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request, tu *url.URL, opts forwardOpts) {
+	for try := 0; ; try++ {
+		if !p.serveForwardOnce(w, r, tu, opts) && try == 0 {
+			// 重试前清空首次尝试积累的未发送响应头（copyRespHeaders 全 Add 语义，
+			// 不清会双份 Set-Cookie 等）
+			h := w.Header()
+			for k := range h {
+				delete(h, k)
+			}
+			continue
+		}
+		return
+	}
+}
+
+// serveForwardOnce 单次转发尝试；返回 false 表示幂等 GET 在写响应头前遭遇传输
+// 错误、可整段安全重试（此时未向 w 写入任何字节）。
+func (p *Proxy) serveForwardOnce(w http.ResponseWriter, r *http.Request, tu *url.URL, opts forwardOpts) (retryable bool) {
 	var cfgURL string
 	if opts.cfg != nil {
 		cfgURL = opts.cfg.URL
@@ -71,8 +93,12 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request, tu *url.URL
 
 	resp, err := p.client.Do(outReq)
 	if err != nil {
+		// 上下文已取消（页面导航走了）不重试；非幂等 GET 不重试
+		if r.Method == http.MethodGet && r.Context().Err() == nil && outReq.Body == nil {
+			return false
+		}
 		http.Error(w, "代理请求失败："+err.Error(), http.StatusBadGateway)
-		return
+		return true
 	}
 	defer resp.Body.Close()
 
@@ -105,21 +131,25 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request, tu *url.URL
 	if !opts.rewrite || (!isHTML && !isCSS && !isJS) {
 		w.WriteHeader(resp.StatusCode)
 		streamCopy(w, resp.Body)
-		return
+		return true
 	}
 
 	enc := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
 	body, rewritable, err := readRewritable(resp, enc)
 	if err != nil {
+		// 读体中途连接重置：GET 未写出任何字节，可整段重试一次
+		if r.Method == http.MethodGet && r.Context().Err() == nil {
+			return false
+		}
 		http.Error(w, "读取上游响应失败", http.StatusBadGateway)
-		return
+		return true
 	}
 	if !rewritable {
 		// 超限或无法解压的编码：原文透传（已读入前段 + 剩余流），不重写不注入。
 		// 不设 Content-Length（改写不了长度，截断回写会让浏览器拿到残缺文档）
 		w.WriteHeader(resp.StatusCode)
 		streamCopy(w, io.MultiReader(bytes.NewReader(body), resp.Body))
-		return
+		return true
 	}
 	if enc == "gzip" {
 		w.Header().Del("Content-Encoding")
@@ -141,6 +171,7 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request, tu *url.URL
 	wh.Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)
+	return true
 }
 
 // serveHTTPProxy 应用模式入口（/app/<id>/）：HTML/CSS 重写 + hook 注入。
