@@ -170,9 +170,11 @@
   }
   window.postMessage = function (msg, targetOrigin, transfer) {
     var to = targetOrigin;
+    var abs = false;
     try {
       if (typeof targetOrigin === "string" && /^https?:\/\//i.test(targetOrigin) && targetOrigin !== location.origin) {
         to = "*";
+        abs = true;
       }
     } catch (e) { /* 保持原参数 */ }
     try {
@@ -181,6 +183,22 @@
         return cw.__osRelaySend(window, msg, to, transfer);
       }
     } catch (e) { /* 回落直投 */ }
+    // 绝对源跨帧协议消息（master→slave 回复等）识别失败时的父窗协作回落：
+    // 站点 master 以还原态真实源（如 https://eb.meituan.com）回调子帧时经本包装器
+    // 投递，识别失败回落 opm 会在本帧 realm 执行 → MessageEvent.source=收件帧自身，
+    // 子帧 @post-me 门（e.source===父窗 && e.origin===me源）恒拒——握手每秒重试、
+    // 桥永不建立、slave 空白后被降级重定向（线上实证：工作台 getBridgeDescriptors
+    // 10s 超时→空白→跳默认页）。绝对源 targetOrigin 只出现在跨帧协议消息里（自发
+    // 消息不会写外部绝对源——写了也按源不符丢弃），此时经父窗 __osRelaySend（父
+    // realm 执行）投递：source=父窗=真实发送方（美团拓扑 master 直答子帧；万一真
+    // 发送方是兄弟帧则 source 失真，但不劣于旧的恒为收件帧自身）。
+    if (abs && window.parent !== window) {
+      try {
+        if (typeof window.parent.__osRelaySend === "function") {
+          return window.parent.__osRelaySend(window, msg, to, transfer);
+        }
+      } catch (e) { /* 回落直投 */ }
+    }
     return opm(msg, to, transfer);
   };
   // ---- 发送方协作：子帧把父窗的 postMessage 包一层【本帧 realm】的放行器 ----
