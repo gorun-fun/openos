@@ -773,7 +773,12 @@ SSRF 拨号防线、响应改写、站点适配器、WS 泵转），解决两类
 请求头修正）、`OnResponse`（最终响应头修正）、`Hook`（按站点追加注入的 JS
 片段，serveHook 按 hook.js 请求的 Referer 解析目标主机后拼接）、`RewriteJS`
 （JS 响应体定点改写，含配套的缓存校验器处理）。内置适配器：origin-strict
-（美团系/金山文档/微信/网易系写接口严判 Origin 的兜底补源）、weixin-double-ct
+（美团系/金山文档/微信/网易系写接口严判 Origin 的兜底补源——优先取还原后
+Referer 的源即发起方页面源：真实世界跨域请求的 Origin 是发起方而非目标站
+自身，直连实测美团滑块校验（epassport 页面发往 verify.meituan.com）的
+CORS 回显即 epassport 源；一律补目标站自身会产出「目标站自己向自己发起
+跨域校验」的真实世界不存在形态，被风控最严的滑块 check 拒绝——拖完滑块
+报「请求异常，拒绝操作」，2026-10 线上实证）、weixin-double-ct
 （微信 jslogin 重复 Content-Type 收敛）、music163-top-bridge（网易云登录体系的
 top 桥接与 QA 环境改写）。新增站点特殊处理改这个文件，勿动统一链路。
 

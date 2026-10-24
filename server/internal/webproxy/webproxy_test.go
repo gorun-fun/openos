@@ -870,7 +870,10 @@ func TestSiteAdapters(t *testing.T) {
 		}
 	}
 
-	// origin-strict：无 Origin 时补目标站自身源（不泄露宿主信息），已有则不覆盖
+	// origin-strict：无 Origin 时按「还原后 Referer 的源 > 目标站自身源」兜底
+	//（跨域请求的真实 Origin 是发起方页面的源——美团滑块校验请求由
+	// epassport 页面发往 verify.meituan.com，补目标站自身会产出真实世界不存在
+	// 的「自己向自己发起跨域校验」形态被风控拒绝），已有则不覆盖
 	out := httptest.NewRequest("POST", "https://me.meituan.com/api/x", nil)
 	out.Header.Del("Origin")
 	for _, a := range matchAdapters("me.meituan.com") {
@@ -879,7 +882,30 @@ func TestSiteAdapters(t *testing.T) {
 		}
 	}
 	if v := out.Header.Get("Origin"); v != "https://me.meituan.com" {
-		t.Errorf("origin-strict 应补 Origin=目标站自身源，得到 %q", v)
+		t.Errorf("无 Referer 时应补 Origin=目标站自身源，得到 %q", v)
+	}
+	// 跨域形态：Referer 是另一美团系域（epassport 页面），目标 verify——
+	// 真实世界浏览器原生 Origin 即发起方源，兜底须与其一致
+	out.Header.Set("Referer", "https://epassport.meituan.com/portal/oauth-login?service=x")
+	out.Header.Del("Origin")
+	for _, a := range matchAdapters("verify.meituan.com") {
+		if a.OnRequest != nil {
+			a.OnRequest(out, nil)
+		}
+	}
+	if v := out.Header.Get("Origin"); v != "https://epassport.meituan.com" {
+		t.Errorf("跨域形态应补 Origin=Referer 源（发起方），得到 %q", v)
+	}
+	// 同源形态：Referer 与目标同主机——原生同源 POST 的 Origin 即自身
+	out.Header.Set("Referer", "https://me.meituan.com/other/page")
+	out.Header.Del("Origin")
+	for _, a := range matchAdapters("me.meituan.com") {
+		if a.OnRequest != nil {
+			a.OnRequest(out, nil)
+		}
+	}
+	if v := out.Header.Get("Origin"); v != "https://me.meituan.com" {
+		t.Errorf("同源形态应补 Origin=目标站自身源，得到 %q", v)
 	}
 	out.Header.Set("Origin", "https://custom.example")
 	for _, a := range matchAdapters("me.meituan.com") {

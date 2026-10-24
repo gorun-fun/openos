@@ -20,7 +20,9 @@ package webproxy
 import (
 	"bytes"
 	"net/http"
+	"net/url"
 	"regexp"
+	"strings"
 )
 
 // reTopGuard 美团 master 引导的顶层守卫（见 meituan-sso-rewrite 注释）。
@@ -51,13 +53,33 @@ var adapters = []SiteAdapter{
 	// 写接口无 Origin/Referer 直接 403 SessionDeleted）、微信系（OAuth 授权链风控）、
 	// 网易云音乐（接口风控）。原生页面自身的 POST 会携带自家 Origin，反代后源
 	// 关系失真被剥除——这些站点要求「Origin/Referer 至少一个匹配自家域」，兜底
-	// 补目标站自身源（值是目标站自己的，不泄露宿主信息）。未命中站点维持原生
-	// 语义（GET 本就不带 Origin，不凭空补）。
+	// 补源（值是目标站自己的，不泄露宿主信息）。未命中站点维持原生语义（GET 本就
+	// 不带 Origin，不凭空补）。
+	//
+	// 补源优先取还原后 Referer 的源（发起方页面）：真实世界跨域请求的 Origin 是
+	// 发起页面的源而非目标站自身——美团 epassport 登录页（epassport.meituan.com）
+	// 的滑块校验请求发往 verify.meituan.com，浏览器原生携带
+	// Origin: https://epassport.meituan.com（直连实测响应 CORS 回
+	// access-control-allow-origin: https://epassport.meituan.com 证实）。代理下
+	// 浏览器视角全是同源请求、Origin 被剥除，兜底若一律补目标站自身
+	// （verify.meituan.com）会产出「目标站自己向自己发起跨域校验」的真实世界
+	// 不存在形态——风控最严的滑块 check 接口据此拒绝（拖完滑块报「请求异常，
+	// 拒绝操作」，线上实证 2026-10）。Referer 已在 sanitize 阶段还原为目标站系
+	// 绝对地址，其源即发起方源：与目标主机不同（跨域）时按它补，相同（同源
+	// POST，原生 Origin 即自身）或缺失时回落目标站自身——两种形态都在站点
+	// 自家域白名单内，kdocs 等的「至少一个匹配」语义不受影响。
 	{
 		Name:  "origin-strict",
 		Hosts: []string{"meituan.com", "meituan.net", "sankuai.com", "dianping.com", "kdocs.cn", "wps.cn", "163.com", "126.net", "weixin.qq.com", "wx.qq.com"},
 		OnRequest: func(out, orig *http.Request) {
 			if out.Header.Get("Origin") == "" {
+				if ref := out.Header.Get("Referer"); ref != "" {
+					if u, err := url.Parse(ref); err == nil && u.Scheme != "" && u.Host != "" &&
+						!strings.EqualFold(u.Hostname(), out.URL.Hostname()) {
+						out.Header.Set("Origin", u.Scheme+"://"+u.Host)
+						return
+					}
+				}
 				out.Header.Set("Origin", out.URL.Scheme+"://"+out.URL.Host)
 			}
 		},
