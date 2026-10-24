@@ -302,16 +302,17 @@
       if (!pxpw.__osPxParentRelax) {
         pxpw.__osPxParentRelax = true;
         var pxpnat = pxpw.__osNativePM || pxpw.postMessage.bind(pxpw);
-        var pxpwrap = pxpw.postMessage; // 父窗的目标侧包装器（父 realm，自发消息经此）
         pxpw.postMessage = function (msg, t, tr) {
           var to2 = t;
           try {
-            if (typeof t === "string" && /^https?:\/\//i.test(t) && t !== pxpw.location.origin) {
-              to2 = "*";
-              return pxpnat(msg, to2, tr); // 跨帧协议投递：本帧 realm → source=本帧
-            }
+            if (typeof t === "string" && /^https?:\/\//i.test(t) && t !== pxpw.location.origin) to2 = "*";
           } catch (e) { }
-          return pxpwrap.call(pxpw, msg, t, tr); // 父窗自身语义（'*'/同源）：交回父侧包装器
+          // 一律经父窗原生引用直投：bind 原生函数不切换 JS 执行上下文，source 恒=
+          // 真实调用方（本子帧调用 → source=本帧 ✓；父窗自身代码调用 → source=父窗
+          // ✓）。此前 '*' 消息转交父侧包装器（父帧 realm 的 JS 函数），子页发往父窗
+          // 的 @post-me 握手请求 source 被记为父窗，master 门（e.source===子帧）恒拒
+          // → master 永不回应答、握手每秒重试（线上实证）。
+          return pxpnat(msg, to2, tr);
         };
       }
     }
