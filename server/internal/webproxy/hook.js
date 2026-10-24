@@ -526,10 +526,24 @@
   }
 
   // ---- fetch / XMLHttpRequest ----
+  // 网络记录（排障）：页面 POST 调用记入 window.__osPxNet 与 pxLog（跨导航持久），
+  // 用于定位「上次访问」类上报接口（服务端记忆恢复死锁排障）。
+  var pxNet = [];
+  try { Object.defineProperty(window, '__osPxNet', { configurable: true, get: function () { return pxNet.slice(-80); } }); } catch (e) { }
+  function pxNetLog(m, u, b) {
+    try {
+      var line = m + ' ' + String(u).slice(0, 130) + (b ? ' :: ' + String(b).slice(0, 180) : '');
+      pxNet.push(Date.now() + ' ' + line);
+      pxLog('__osPxNet', line);
+    } catch (e) { }
+  }
   var of = window.fetch;
   if (of) {
     window.fetch = function (input, init) {
       try {
+        var u0 = typeof input === 'string' ? input : (input && input.url) || '';
+        var m0 = (init && init.method) || (input && input.method) || 'GET';
+        if (String(m0).toUpperCase() === 'POST') pxNetLog('F:' + m0, u0, init && init.body);
         if (typeof input === 'string') input = toProxy(input);
         else if (input instanceof URL) input = toProxy(input.href);
         else if (input && typeof input.url === 'string') {
@@ -569,11 +583,19 @@
 
   var oo = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function () {
-    try { arguments[1] = toProxy(arguments[1]); } catch (e) { /* 保持原参数 */ }
+    try {
+      this.__osPxMethod = String(arguments[0] || '');
+      this.__osPxUrl = String(arguments[1] || '');
+      arguments[1] = toProxy(arguments[1]);
+    } catch (e) { /* 保持原参数 */ }
     return oo.apply(this, arguments);
   };
   var oSend = XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.send = function (body) {
+    try {
+      var xu = String(this.__osPxUrl || '');
+      if ((this.__osPxMethod || '').toUpperCase() === 'POST' || /report|record|visit|browse|history/i.test(xu)) pxNetLog('X:' + (this.__osPxMethod || '?'), xu, body);
+    } catch (e) { }
     try { body = restoreBody(body); } catch (e) { /* 保持原参数 */ }
     return oSend.call(this, body);
   };
