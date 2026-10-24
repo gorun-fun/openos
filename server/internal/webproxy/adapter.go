@@ -269,6 +269,48 @@ try {
         } catch (e) { }
       });
     }
+    // ③ 恢复性 me-spu 导航拦截（上次访问死锁解）：门户按账号服务端记忆恢复
+    //    「上次访问」，记录被 me-spu 自锁（每次恢复访问又刷新记录），入口
+    //    iUrl 意图（merchant/home 最终跳 ebIframe?iUrl=new-workbench；顶层直开
+    //    可带任意 iUrl）被无条件覆盖。wrapper 重建内容 iframe（Vue 换 src/换
+    //    元素，非消息指令）落 me-spu 时，改写回 iUrl 意图目标。iUrl 空或本身
+    //    指向 me-spu 时不干预。
+    try {
+      var im = /(?:\?|&)iUrl=([^&#]*)/.exec(location.search);
+      var iUrl = im ? decodeURIComponent(im[1]) : '';
+      if (iUrl && iUrl.indexOf('me-spu') < 0) {
+        var osIUrlTarget = /^https?:\/\//i.test(iUrl)
+          ? PREFIX + 'https/' + iUrl.replace(/^https?:\/\//i, function (m2) { return m2.toLowerCase(); })
+          : PREFIX + 'https/eb.meituan.com' + (iUrl.charAt(0) === '/' ? iUrl : '/' + iUrl);
+        var osFixSpuFrame = function (fr) {
+          try {
+            var s = fr.getAttribute('src') || '';
+            if (s.indexOf('me-spu') >= 0 && s.indexOf(osIUrlTarget.split('?')[0].split('#')[0]) < 0) {
+              fr.setAttribute('src', osIUrlTarget);
+            }
+          } catch (e2) { }
+        };
+        var osScanFrames = function (root) {
+          try {
+            var frs = root.querySelectorAll ? root.querySelectorAll('iframe') : [];
+            for (var fi = 0; fi < frs.length; fi++) osFixSpuFrame(frs[fi]);
+          } catch (e2) { }
+        };
+        osScanFrames(document);
+        var osMo = new MutationObserver(function (muts) {
+          for (var mi = 0; mi < muts.length; mi++) {
+            var nodes = muts[mi].addedNodes;
+            for (var nk = 0; nk < nodes.length; nk++) {
+              var n = nodes[nk];
+              if (n.nodeType !== 1) continue;
+              if (n.tagName === 'IFRAME') osFixSpuFrame(n);
+              else osScanFrames(n);
+            }
+          }
+        });
+        osMo.observe(document.documentElement || document, { childList: true, subtree: true });
+      }
+    } catch (e3) { }
     // ② 深层页：不自答不代答（保持真实世界 unknown → eb 路径语义），own 仅作
     //    上面分支的判据，不产生任何行为
   }
