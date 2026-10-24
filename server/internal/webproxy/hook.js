@@ -271,11 +271,15 @@
     // realm 执行）投递：source=父窗=真实发送方（美团拓扑 master 直答子帧；万一真
     // 发送方是兄弟帧则 source 失真，但不劣于旧的恒为收件帧自身）。
     if ((abs || to === "*") && window.parent !== window) {
-      // '*' 消息先做栈分类：master 总线对子帧的握手/指令也用 '*' 投递（线上实证：
-      // 每秒重试的 @post-me handshake-request 恒被 @post-me 门拒——source 恒为收件
-      // 帧自身）；仅当调用确实来自父帧 realm 才经父窗 relay（自发 '*' 消息保持
-      // 直投，source=自身不被破坏）。
-      var fromParent = abs || pxStackFromParent();
+      // '*' 消息先做来源判定：master 总线对子帧的握手/指令也用 '*' 投递（线上
+      // 实证：每秒重试的 @post-me handshake-request 恒被 @post-me 门拒——source
+      // 恒为收件帧自身）。三重判据任一命中即经父窗 relay（source=父帧）：①绝对
+      // 源；②栈 URL×父子资源清单匹配；③@post-me 协议信封特判——跨帧协议消息
+      // 不存在「自发给自己」的场景（master 老 SDK 主动握 slave 用 '*'，栈分类
+      // 对 Vue/压缩调用帧常失手，协议信封是最稳特征）。
+      var osIsPostMe = false;
+      try { osIsPostMe = !!(msg && msg.type === "@post-me"); } catch (e2) { }
+      var fromParent = abs || osIsPostMe || pxStackFromParent();
       if (fromParent) {
         try {
           if (typeof window.parent.__osRelaySend === "function") {
