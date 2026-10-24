@@ -280,8 +280,8 @@ try {
       var iUrl = im ? decodeURIComponent(im[1]) : '';
       if (iUrl && iUrl.indexOf('me-spu') < 0) {
         var osIUrlTarget = /^https?:\/\//i.test(iUrl)
-          ? PREFIX + 'https/' + iUrl.replace(/^https?:\/\//i, function (m2) { return m2.toLowerCase(); })
-          : PREFIX + 'https/eb.meituan.com' + (iUrl.charAt(0) === '/' ? iUrl : '/' + iUrl);
+          ? '__PREFIX__' + 'https/' + iUrl.replace(/^https?:\/\//i, function (m2) { return m2.toLowerCase(); })
+          : '__PREFIX__' + 'https/eb.meituan.com' + (iUrl.charAt(0) === '/' ? iUrl : '/' + iUrl);
         var osIUrlKey = osIUrlTarget.split('?')[0].split('#')[0];
         window.__osSpuBlock = 0;
         var osMapSpu = function (v) {
