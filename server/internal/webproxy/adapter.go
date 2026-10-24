@@ -282,18 +282,47 @@ try {
         var osIUrlTarget = /^https?:\/\//i.test(iUrl)
           ? PREFIX + 'https/' + iUrl.replace(/^https?:\/\//i, function (m2) { return m2.toLowerCase(); })
           : PREFIX + 'https/eb.meituan.com' + (iUrl.charAt(0) === '/' ? iUrl : '/' + iUrl);
-        var osFixSpuFrame = function (fr) {
+        var osIUrlKey = osIUrlTarget.split('?')[0].split('#')[0];
+        window.__osSpuBlock = 0;
+        var osMapSpu = function (v) {
           try {
-            var s = fr.getAttribute('src') || '';
-            if (s.indexOf('me-spu') >= 0 && s.indexOf(osIUrlTarget.split('?')[0].split('#')[0]) < 0) {
-              fr.setAttribute('src', osIUrlTarget);
+            if (typeof v === 'string' && v.indexOf('me-spu') >= 0 && v.indexOf(osIUrlKey) < 0) {
+              window.__osSpuBlock++;
+              return osIUrlTarget;
             }
           } catch (e2) { }
+          return v;
         };
+        // 三路覆盖 iframe src 的设置路径：property setter（Vue/程序赋值）、
+        // setAttribute（模板属性）、MutationObserver（innerHTML/解析器注入）。
+        try {
+          var osD = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'src');
+          if (osD && osD.set) {
+            Object.defineProperty(HTMLIFrameElement.prototype, 'src', {
+              configurable: true, enumerable: osD.enumerable,
+              get: function () { return osD.get.call(this); },
+              set: function (v) { return osD.set.call(this, osMapSpu(v)); }
+            });
+          }
+        } catch (e2) { }
+        try {
+          var osSA = Element.prototype.setAttribute;
+          Element.prototype.setAttribute = function (n, v) {
+            if ((n === 'src' || n === 'SRC') && this.tagName === 'IFRAME') v = osMapSpu(v);
+            return osSA.call(this, n, v);
+          };
+        } catch (e2) { }
         var osScanFrames = function (root) {
           try {
             var frs = root.querySelectorAll ? root.querySelectorAll('iframe') : [];
-            for (var fi = 0; fi < frs.length; fi++) osFixSpuFrame(frs[fi]);
+            for (var fi = 0; fi < frs.length; fi++) {
+              var fr = frs[fi];
+              var s = fr.getAttribute('src') || '';
+              if (s.indexOf('me-spu') >= 0 && s.indexOf(osIUrlKey) < 0) {
+                window.__osSpuBlock++;
+                fr.setAttribute('src', osIUrlTarget);
+              }
+            }
           } catch (e2) { }
         };
         osScanFrames(document);
@@ -303,7 +332,7 @@ try {
             for (var nk = 0; nk < nodes.length; nk++) {
               var n = nodes[nk];
               if (n.nodeType !== 1) continue;
-              if (n.tagName === 'IFRAME') osFixSpuFrame(n);
+              if (n.tagName === 'IFRAME') osScanFrames(n.parentElement || document);
               else osScanFrames(n);
             }
           }
