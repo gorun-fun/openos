@@ -20,7 +20,11 @@ package webproxy
 import (
 	"bytes"
 	"net/http"
+	"regexp"
 )
+
+// reTopGuard 美团 master 引导的顶层守卫（见 meituan-sso-rewrite 注释）。
+var reTopGuard = regexp.MustCompile(`window\.top!==window\.self\|\|([a-zA-Z_$][\w$]*)\(`)
 
 type SiteAdapter struct {
 	Name string
@@ -296,6 +300,17 @@ try {
 				to := prefix + "https/" + h
 				body = bytes.ReplaceAll(body, []byte("https://"+h), []byte(to))
 			}
+			// 门户新工作台 master 引导（slave-bootstrap-master）的 ME 容器初始化
+			// 被顶层守卫禁用：`window.top!==window.self||b(E)` —— 真实世界 ebIframe
+			// 宿主页是顶层页（守卫假 → 执行 b(E) 装配 window.me 容器、挂菜单处理、
+			// @post-me master 侧）；代理把它嵌进宿主桌面后 top=桌面（守卫真 → 短路
+			// 跳过 b(E)）→ 菜单点击无响应、@post-me 握手 master 永不应答、single-spa
+			// 子应用超时死亡（线上实证）。window.top 为 Unforgeable 不可运行时伪造，
+			// 唯一通道是此处字节改写：守卫改恒假，让容器初始化在嵌套语境照常执行。
+			// 变量名（b/E 为压缩产物）随版本变，模式锚定 window.top!==window.self||
+			// 后随函数调用；仅命中此一处形态（证书检查的同形判定是独立 if 语句，
+			// 无 || 函数调用尾，不受影响）。
+			body = reTopGuard.ReplaceAll(body, []byte("!1||$1("))
 			return body
 		},
 	},
