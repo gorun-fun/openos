@@ -173,6 +173,15 @@ export const APP_ICONS: Record<string, IconDef> = {
     })(),
   },
   goder: { src: '/icons/goder.svg', label: 'goder' },
+  // 代码管家：青绿渐变底 + 扳手斜置 + 上方一枚已修复的分支节点
+  steward: {
+    label: '代码管家',
+    svg: shell('st', '#2fbfa7', '#0e7d6f', `
+      <path d="M39.5 17.5 a8.5 8.5 0 0 1 8 11.3 l-15.7 15.7 a5.4 5.4 0 1 1 -7.6 -7.6 l15.7 -15.7 a8.5 8.5 0 0 1 -.4 -3.7 Z" fill="#fff" transform="rotate(45 32 32)"/>
+      <circle cx="21" cy="21" r="3.2" fill="#eafff8"/>
+      <path d="M24 21 h6.5 M27.2 21 v6" stroke="#eafff8" stroke-width="2.4" stroke-linecap="round"/>
+      <circle cx="27.2" cy="29.5" r="3" fill="#eafff8"/>`),
+  },
   // 应用商店：蓝色渐变底 + 白色字母 A（圆角笔画）
   store: {
     label: '应用商店',

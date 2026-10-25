@@ -4,6 +4,7 @@
 //   update —— (patch) 合并字段并立即持久化
 import type { Component } from 'vue'
 import CalendarWidget from './widgets/CalendarWidget.vue'
+import StewardWidget from '../apps/steward/StewardWidget.vue'
 
 export interface WidgetDef {
   /** 类型标识（持久化用，保持稳定） */
@@ -47,3 +48,6 @@ registerWidget({ type: 'clock', label: '时钟', icon: '🕐', singleton: true }
 registerWidget({ type: 'note', label: '便签', icon: '📝' })
 registerWidget({ type: 'monitor', label: '系统监控', icon: '📊', singleton: true })
 registerWidget({ type: 'calendar', label: '日历', icon: '📅', singleton: true, component: CalendarWidget })
+// 代码管家小组件（自 grf-os 宿主上游化）：待确认/修复中/已修复/失败四数，
+// 点标题直达 steward App（有待确认进问题页，否则看修复记录）。
+registerWidget({ type: 'steward', label: '代码管家', icon: '🛠', singleton: true, component: StewardWidget })

@@ -1,0 +1,61 @@
+/* shell-theme.css — grf-os 业务 App 通用主题补丁（各 App 壳 <script setup> 引入，
+   随 App bundle 生效；openos 壳不感知）。五件事：
+   1) 补齐壳未定义的 --os-text-tertiary（功能页大量次级文字引用，缺失时整段
+      回退主文字色，明暗两态都失去层次）；
+   2) 语义状态色明暗两套（挂在 .grf-app 上由各 App 壳根节点声明，tab 页内的
+      badge / 状态文字引用 var(--grf-*)，替代写死的浅色系文本色）；
+   3) OsTable 操作列按钮间距（OsButton 无外边距，多按钮零间距贴死）；
+   4) color-scheme 跟随暗色：原生 select 下拉 / 日期选择 / 滚动条转暗，
+      否则暗色下弹出的原生控件仍是白底且图标不可见；
+   5) OsModal 统一尺寸体系（宽度两档 + 高度上限 + 左对齐），替代内容自适应——
+      跨应用同类弹窗不再割裂、多层弹窗与内容切换时尺寸不再反复跳动
+      （详见文末规则注释）。 */
+
+:root { --os-text-tertiary: #8e8e93; }
+html.dark { --os-text-tertiary: #808086; }
+
+html:not(.dark) { color-scheme: light; }
+html.dark { color-scheme: dark; }
+
+.grf-app {
+  --grf-ok: #248a3d;    /* 成功 / 正常（绿） */
+  --grf-bad: #c43127;   /* 错误 / 危险（红） */
+  --grf-warn: #a36700;  /* 警告 / 提醒（琥珀） */
+  --grf-violet: #5e35b1; /* token-hub 品牌紫（套餐/思考档位标签） */
+  --grf-mint: #0a9168;  /* grf-log 品牌绿（info 级别） */
+}
+html.dark .grf-app {
+  --grf-ok: #4cc365;
+  --grf-bad: #ff7b72;
+  --grf-warn: #ffb03a;
+  --grf-violet: #c3a4f8;
+  --grf-mint: #3fd0a4;
+}
+
+/* OsTable 操作列（td.ops 由 OsTable scoped 提供 width:1%/nowrap，此处只补间距） */
+.os-table td.ops .os-btn + .os-btn { margin-left: 6px; }
+
+/* 5) OsModal 统一尺寸体系。OsModal 无宽度参数、按内容自适应，多层弹窗与
+      内容切换（表格↔表单、加载↔结果、tab 切换）时尺寸反复跳动；且各 App
+      曾各自手写内容 min-width / 内部滚动，同类弹窗跨应用宽度不一致。统一为：
+      - 宽度两档：标准 560（表单/确认/结果类，默认即生效）；宽 860（列表/
+        详情类，在 <OsModal class="dlg-lg"> 声明，class 经透传落在遮罩根节点上）。
+      - 高度：弹窗整体相对**窗口**（非视口，openos 窗口可小于视口——vh 在小窗
+        里会算大）限高 max-height: calc(100% - 40px)，卡片转纵向 flex，超出时
+        仅 .content 区滚动，标题与底部按钮始终可见；各弹窗不再自带整体滚动。
+      - 对齐：内容左对齐（OsModal 默认 center 是给小确认框的，表单/列表/日志
+        居中既怪异也让输入框文字居中）。
+      窄窗口仍受 OsModal 自身 max-width:86% 收缩。选择器带 .grf-app 前缀
+      抬高优先级压过 OsModal scoped 规则，且只影响业务 App 不影响 openos 壳。 */
+.grf-app .os-modal-mask .os-modal {
+  width: 560px;
+  display: flex; flex-direction: column;
+  max-height: calc(100% - 40px);
+}
+.grf-app .os-modal-mask.dlg-lg .os-modal { width: 860px; }
+.grf-app .os-modal > h3, .grf-app .os-modal > footer { flex: none; }
+.grf-app .os-modal .content { min-height: 0; overflow-y: auto; text-align: left; }
+@media (max-width: 767px) {
+  .grf-app .os-modal-mask .os-modal { min-width: 0; width: 92%; }
+  .grf-app .os-modal-mask.dlg-lg .os-modal { width: 94%; }
+}

@@ -319,6 +319,17 @@ openos-server 进程内 osmcp 包（os_* 工具，gh 侧全名 mcp__openos__os_*
 
 **与 `sys:cmd` 的关系**：`sys:cmd` 是轻量指令通道（见下节），适合脚本与简单场景；openos MCP 插件是面向 AI 的完整控制面（带状态查询与结构化应答），两者并存互补。
 
+## 代码管家（内置应用 steward）
+
+git 仓库接管 → 问题队列 → AI 修复 → 直推可选发版的一站式工作面（自 grf-os 宿主上游化，默认仅 admin）：
+
+- **问题四路入口**：GitLab / GitHub issue 周期同步（接管即同步）、外部系统上报（`POST /api/steward/report`，`X-Report-Key` 共享密钥自鉴权）、流水线失败一键转修、App 内手动录入；仓库分手动（待确认）/ 自动（直接入队）两种模式。
+- **修复执行**：单 worker 串行，prepare（clone/fetch + stash 备份用户手改）→ **Goder 会话修复**（默认执行器：代操作者创建无头会话，落其 goder「代码管家」分组，可跟进续聊；`OPENOS_STEWARD_EXECUTOR=gh` 可退本地 gh 子进程）→ 提交直推配置分支 → 可选 tag 末位+1 发版交各仓 CI。工作区在操作者 home「代码管家」目录（文件应用可见）。
+- **平台账号连接**：GitLab（账密 password grant / PAT，活动连接兼流水线数据源）与 GitHub（PAT）；凭据只存服务端 state.json，API 输出一律掩码，git 推送凭据仅命令行注入。
+- **流水线工作面**：`/api/steward/pipe/*` —— GitLab 全项目版本（tag）× CI 健康聚合、job 日志增量、失败转修桥、job 运行控制（manual 播放=发版/回滚、终态重试=重新部署、取消）。
+- **AI 转制上架（实验）**：公开项目 → openos 应用 → 货架（引擎确定性脚手架 + Goder 会话包装 + GitLab CI 构建 + catalog 原子合并；需 `OPENOS_STEWARD_MARKET_DIR`）。
+- 数据落 `<data>/steward/`（state.json 原子写 + runs/*.log），宿主保持无数据库惯例不变。`OPENOS_STEWARD=off` 整体下架；全部 `OPENOS_STEWARD_*` 配置见 AGENTS.md 环境变量清单（grf-os 宿主部署的 `GRF_OS_STEWARD_*` 兼容名同读）。
+
 ## 通知中心与日历
 
 ### 通知中心（系统级通知，仿 macOS）

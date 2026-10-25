@@ -89,6 +89,55 @@ func hostTaskContext(uid string) string {
 		uid)
 }
 
+// TaskStatus 任务状态快照（内部消费方——如 steward 代码管家引擎轮询终态用；
+// 字段与 HTTP Get 端点投影一致）。
+type TaskStatus struct {
+	Status     string `json:"status"`
+	Error      string `json:"error,omitempty"`
+	Incomplete string `json:"incomplete_reason,omitempty"`
+	OutputText string `json:"output_text,omitempty"`
+}
+
+// taskErr 带状态码的任务错误（HTTP 面按码应答；内部面按文案上抛）。
+type taskErr struct {
+	code int
+	msg  string
+}
+
+func (e *taskErr) Error() string { return e.msg }
+
+// CreateTask 内部创建面：与 POST /api/host/goder/tasks 同流程，供进程内消费方
+//（steward 引擎）直调，跳过 HTTP 层。
+func (h *HostTasks) CreateTask(ctx context.Context, req HostTaskCreateRequest) (sessionID, respID, model string, err error) {
+	res, te := h.createCore(ctx, req)
+	if te != nil {
+		return "", "", "", te
+	}
+	return res.SessionID, res.ID, res.model, nil
+}
+
+// PollTask 内部轮询面：与 GET /api/host/goder/tasks/{uid}/{id} 同投影。
+func (h *HostTasks) PollTask(ctx context.Context, uid, respID string) (TaskStatus, error) {
+	st, te := h.pollCore(ctx, uid, respID)
+	if te != nil {
+		return TaskStatus{}, te
+	}
+	return *st, nil
+}
+
+// CancelTask 内部取消面（幂等）。
+func (h *HostTasks) CancelTask(ctx context.Context, uid, respID string) error {
+	return h.cancelCore(ctx, uid, respID)
+}
+
+// createResult createCore 的产物（model 与响应体投影解耦）。
+type createResult struct {
+	SessionID string
+	ID        string
+	model     string
+	status    string
+}
+
 // Create 代用户创建并后台启动一个 goder 会话任务。
 func (h *HostTasks) Create(w http.ResponseWriter, r *http.Request) {
 	var req HostTaskCreateRequest
@@ -96,31 +145,42 @@ func (h *HostTasks) Create(w http.ResponseWriter, r *http.Request) {
 		webres.Error(w, 400, "请求体解析失败: "+err.Error())
 		return
 	}
+	res, te := h.createCore(r.Context(), req)
+	if te != nil {
+		webres.Error(w, te.code, te.msg)
+		return
+	}
+	webres.WriteJSON(w, map[string]any{
+		"session_id":  res.SessionID,
+		"response_id": res.ID,
+		"model":       res.model,
+		"status":      res.status,
+		"uid":         req.UID,
+	})
+}
+
+// createCore 创建主流程（HTTP 面与进程内 CreateTask 共用）。
+func (h *HostTasks) createCore(ctx context.Context, req HostTaskCreateRequest) (*createResult, *taskErr) {
 	req.UID = strings.TrimSpace(req.UID)
 	req.Workspace = strings.TrimSpace(req.Workspace)
 	if req.UID == "" || req.Workspace == "" || strings.TrimSpace(req.Task) == "" {
-		webres.Error(w, 400, "uid / workspace / task 必填")
-		return
+		return nil, &taskErr{400, "uid / workspace / task 必填"}
 	}
 	if !filepath.IsAbs(req.Workspace) {
-		webres.Error(w, 400, "workspace 必须是绝对路径")
-		return
+		return nil, &taskErr{400, "workspace 必须是绝对路径"}
 	}
 	if st, err := os.Stat(req.Workspace); err != nil || !st.IsDir() {
-		webres.Error(w, 400, "workspace 目录不存在: "+req.Workspace)
-		return
+		return nil, &taskErr{400, "workspace 目录不存在: " + req.Workspace}
 	}
 	if !h.ready() {
-		webres.Error(w, 503, "goder 服务未就绪（未部署或未启用，见 GET /api/goder/status）")
-		return
+		return nil, &taskErr{503, "goder 服务未就绪（未部署或未启用，见 GET /api/goder/status）"}
 	}
 	// 供应商就位（幂等，先于 gh 懒启动；不装 osmcp 插件，见文件头说明）
 	h.m.EnsureAIUser(req.UID)
 
-	model, err := h.resolveModel(r.Context(), req.UID, req.Model)
+	model, err := h.resolveModel(ctx, req.UID, req.Model)
 	if err != nil {
-		webres.Error(w, 400, err.Error())
-		return
+		return nil, &taskErr{400, err.Error()}
 	}
 
 	title := strings.TrimSpace(req.Title)
@@ -151,8 +211,7 @@ func (h *HostTasks) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	// 宿主环境简报（gh ≥ host_context 版本独立拼段，与 system_prompt 叠加；
 	// 旧 gh 忽略未知字段不受影响）：无人值守语义是环境事实而非任务指令，
-	// 放这里而不是塞进调用方的 system_prompt——调用方（如 grf-os fixer）
-	// 的提示词保持纯业务。
+	// 放这里而不是塞进调用方的 system_prompt——调用方的提示词保持纯业务。
 	sessCfg["host_context"] = hostTaskContext(req.UID)
 	if sp := strings.TrimSpace(req.SystemPrompt); sp != "" {
 		sessCfg["system_prompt"] = sp
@@ -164,25 +223,17 @@ func (h *HostTasks) Create(w http.ResponseWriter, r *http.Request) {
 		"grf:session": sessCfg,
 	})
 	var created ghResponse
-	if err := h.loopback(r.Context(), http.MethodPost, "/goder-api/v1/responses", body, req.UID, actor, &created); err != nil {
-		webres.Error(w, 502, "创建 goder 会话失败: "+err.Error())
-		return
+	if err := h.loopback(ctx, http.MethodPost, "/goder-api/v1/responses", body, req.UID, actor, &created); err != nil {
+		return nil, &taskErr{502, "创建 goder 会话失败: " + err.Error()}
 	}
 	if created.SessionID == "" || created.ID == "" {
-		webres.Error(w, 502, "goder 会话创建响应异常（缺 grf:session_id / id）")
-		return
+		return nil, &taskErr{502, "goder 会话创建响应异常（缺 grf:session_id / id）"}
 	}
 	// 归组（best-effort：失败不影响任务执行，会话回落「未分组」仍可见）
-	if err := h.indexSession(r.Context(), req.UID, created.SessionID, projectID, group, title, model, created.ID); err != nil {
+	if err := h.indexSession(ctx, req.UID, created.SessionID, projectID, group, title, model, created.ID); err != nil {
 		h.log("[goder] host 任务归组失败(%s/%s): %v", req.UID, created.SessionID, err)
 	}
-	webres.WriteJSON(w, map[string]any{
-		"session_id":  created.SessionID,
-		"response_id": created.ID,
-		"model":       model,
-		"status":      created.Status,
-		"uid":         req.UID,
-	})
+	return &createResult{SessionID: created.SessionID, ID: created.ID, model: model, status: created.Status}, nil
 }
 
 // Get GET /api/host/goder/tasks/{uid}/{id} — 轮询任务终态。
@@ -228,6 +279,47 @@ func (h *HostTasks) Cancel(w http.ResponseWriter, r *http.Request) {
 		webres.WriteJSON(w, map[string]any{"ok": true})
 		return nil
 	})
+}
+
+// pollCore 内部轮询主流程（PollTask 用；Get 端点的富投影含 model/usage，
+// 各自实现）。就绪/网络错误按 503/502 合成 taskErr。
+func (h *HostTasks) pollCore(ctx context.Context, uid, respID string) (*TaskStatus, *taskErr) {
+	if uid == "" || respID == "" {
+		return nil, &taskErr{400, "uid / id 必填"}
+	}
+	if !h.ready() {
+		return nil, &taskErr{503, "goder 服务未就绪"}
+	}
+	h.m.EnsureAIUser(uid)
+	var res ghResponse
+	if err := h.loopback(ctx, http.MethodGet, "/goder-api/v1/responses/"+respID, nil, uid, fixerGroupName, &res); err != nil {
+		return nil, &taskErr{502, "查询 goder 任务失败: " + err.Error()}
+	}
+	st := &TaskStatus{Status: res.Status}
+	if res.Error != nil {
+		st.Error = res.Error.Message
+	}
+	if res.IncompleteDetails != nil {
+		st.Incomplete = res.IncompleteDetails.Reason
+	}
+	st.OutputText = res.assistantText()
+	return st, nil
+}
+
+// cancelCore 内部取消主流程（CancelTask 用；幂等）。
+func (h *HostTasks) cancelCore(ctx context.Context, uid, respID string) *taskErr {
+	if uid == "" || respID == "" {
+		return &taskErr{400, "uid / id 必填"}
+	}
+	if !h.ready() {
+		return &taskErr{503, "goder 服务未就绪"}
+	}
+	h.m.EnsureAIUser(uid)
+	var res json.RawMessage
+	if err := h.loopback(ctx, http.MethodPost, "/goder-api/v1/responses/"+respID+"/cancel", []byte("{}"), uid, fixerGroupName, &res); err != nil {
+		return &taskErr{502, "取消 goder 任务失败: " + err.Error()}
+	}
+	return nil
 }
 
 // withTask Get/Cancel 的公共前言：uid/id 必填校验 + ready 检查后以 uid/id

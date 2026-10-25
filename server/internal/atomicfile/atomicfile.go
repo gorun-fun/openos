@@ -4,7 +4,10 @@
 // 附件落盘共用（整体写用 Write，流式写用 Stage/Commit/Abort）。
 package atomicfile
 
-import "os"
+import (
+	"encoding/json"
+	"os"
+)
 
 // Write 原子写文件：数据整体写入同目录 <path>.tmp 后 rename 到 path。perm 为
 // 目标文件权限（同时作用于临时文件，rename 后即最终权限）。
@@ -59,4 +62,14 @@ func (s *Staged) Commit() error {
 func (s *Staged) Abort() {
 	_ = s.f.Close()
 	_ = os.Remove(s.tmp)
+}
+
+// WriteJSON 便捷形态：缩进 Marshal（尾带换行）后原子写（steward 状态文件与
+// 转制货架 catalog 共用）。
+func WriteJSON(path string, v any, perm os.FileMode) error {
+	raw, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	return Write(path, append(raw, '\n'), perm)
 }

@@ -221,6 +221,10 @@ var builtinApps = []AppDef{
 	{ID: "welcome", Name: "使用指南", Icon: "welcome", Category: "系统", Builtin: true, Width: 760, Height: 580},
 	{ID: "store", Name: "应用商店", Icon: "store", Category: "系统", Builtin: true, Width: 980, Height: 640},
 	{ID: "feedback", Name: "反馈", Icon: "feedback", Category: "系统", Builtin: true, Width: 860, Height: 600},
+	// 代码管家（自 grf-os 宿主上游化）：git 仓库接管 → 问题队列（issue 同步/
+	// 上报/流水线转修）→ Goder 会话修复 → 提交直推可选发版；含 GitLab 版本×CI
+	// 流水线工作面与 AI 转制上架。默认仅 admin（见 defaultRoleApps）。
+	{ID: "steward", Name: "代码管家", Icon: "steward", Category: "AI", Builtin: true, Width: 1280, Height: 800},
 }
 
 // vfsAppIDs 依赖虚拟文件系统/终端的内置应用（OPENOS_VFS=off 时整体下架，
@@ -235,9 +239,12 @@ const goderAppID = "goder"
 // marketAppID 应用商店（OPENOS_MARKET=off 时下架，自维护应用列表的宿主无需商店）。
 const marketAppID = "store"
 
+// stewardAppID 代码管家（OPENOS_STEWARD=off 时下架：纯轻量宿主无需代码修复面）。
+const stewardAppID = "steward"
+
 // 默认角色 → 应用授权矩阵。
 var defaultRoleApps = map[string][]string{
-	"admin": {"terminal", "files", "calculator", "settings", "docs", "sheets", "slides", "pdf", "goder", "notes", "calendar", "welcome", "store", "feedback"},
+	"admin": {"terminal", "files", "calculator", "settings", "docs", "sheets", "slides", "pdf", "goder", "notes", "calendar", "welcome", "store", "feedback", "steward"},
 	"user":  {"terminal", "files", "calculator", "docs", "sheets", "slides", "pdf", "goder", "notes", "calendar", "welcome", "store", "feedback"},
 	"guest": {"calculator", "notes", "calendar", "welcome", "feedback"},
 }
@@ -251,11 +258,15 @@ type config struct {
 	withoutVFS       bool
 	withoutGoder     bool
 	withoutMarket    bool
+	withoutSteward   bool
 	externalIdentity bool
 }
 
 // Option 功能裁剪选项，配合 Open 使用。
 type Option func(*config)
+
+// WithoutSteward 下架代码管家（OPENOS_STEWARD=off 时由 main 传入）。
+func WithoutSteward() Option { return func(c *config) { c.withoutSteward = true } }
 
 // WithoutVFS 下架 VFS/终端类内置应用（OPENOS_VFS=off 时由 main 传入）。
 func WithoutVFS() Option { return func(c *config) { c.withoutVFS = true } }
@@ -358,6 +369,9 @@ func (db *DB) seed(cfg *config) error {
 			continue
 		}
 		if cfg.withoutMarket && a.ID == marketAppID {
+			continue
+		}
+		if cfg.withoutSteward && a.ID == stewardAppID {
 			continue
 		}
 		apps = append(apps, a)

@@ -455,6 +455,8 @@ export function findView(appId: string, name: string): CapViewDef | null {
 
 const noteRow = (n: Note) => ({ id: n.id, color: n.color, updated: n.updated, preview: n.text.slice(0, 80) })
 
+import { stewardCaps } from '../apps/steward/capabilities'
+
 function calendarCaps(): AppCapabilities {
   return {
     appId: 'calendar',
@@ -598,8 +600,11 @@ function notesCaps(): AppCapabilities {
   }
 }
 
-/** 安装内置应用示范能力（installAgentBridge 时调用，幂等）。 */
+/** 安装内置应用能力（installAgentBridge 时调用，幂等）。calendar/notes 为
+ * 首批示范；steward（代码管家，自 grf-os 宿主上游化）为首个带后端 REST 面
+ * 的内置能力——run 回调直调 /api/steward/*，服务端角色校验照常。 */
 export function installBuiltinCapabilities() {
   registerCapabilities(calendarCaps(), 'builtin')
   registerCapabilities(notesCaps(), 'builtin')
+  registerCapabilities(stewardCaps(), 'builtin')
 }

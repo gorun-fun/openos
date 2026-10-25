@@ -35,6 +35,7 @@ import (
 	"openos/server/internal/goder"
 	"openos/server/internal/market"
 	"openos/server/internal/osmcp"
+	"openos/server/internal/stewardapi"
 	"openos/server/internal/store"
 	"openos/server/internal/vfs"
 	"openos/server/internal/webproxy"
@@ -59,6 +60,11 @@ func main() {
 	}
 	if envOr("OPENOS_MARKET", "") == "off" {
 		storeOpts = append(storeOpts, store.WithoutMarket())
+	}
+	// 代码管家（自 grf-os 宿主上游化；宿主部署可用 GRF_OS_STEWARD_OFF=1 兼容关闭）
+	stewardOff := envOr("OPENOS_STEWARD", "") == "off" || envOr("GRF_OS_STEWARD_OFF", "") == "1"
+	if stewardOff {
+		storeOpts = append(storeOpts, store.WithoutSteward())
 	}
 	// 外部身份模式（身份托管宿主/IdP）：user/guest 退化为宿主机制角色，角色目录不收录
 	if os.Getenv("OPENOS_AUTH_MODE") == "external" {
@@ -488,6 +494,23 @@ func main() {
 	// goder 无头任务（宿主业务系统代用户创建会话并后台执行，见 internal/goder/hosttasks.go；
 	// grf-os 的自动修复引擎经此把修复会话落到操作者 goder 的「自动修复」分组下）
 	goderHostTasks := goder.NewHostTasks(goderMgr)
+
+	// 代码管家引擎（自 grf-os 宿主上游化）：worker + 双平台 issue 同步循环；
+	// goder 执行器直调 hosttasks 内部面（进程内，不绕 HTTP 回环）。env 凭证
+	// 首启种子为平台连接（存量部署无感）。停用时引擎为 nil，App 与 API 提示未启用。
+	stewardEng := stewardapi.NewEngine(dataDir, goderHostTasks)
+	stewardCtx, stewardCancel := context.WithCancel(context.Background())
+	defer stewardCancel()
+	if stewardEng != nil {
+		stewardapi.SeedEnvConnections(stewardEng, stewardapi.ReadGlEnv(dataDir),
+			os.Getenv("OPENOS_STEWARD_GITHUB_TOKEN"))
+		go stewardEng.Run(stewardCtx)
+	}
+	stewardAPI := &stewardapi.Handler{
+		Eng: stewardEng, GL: stewardapi.NewGitLabClient(stewardapi.ReadGlEnv(dataDir)),
+		GitLabURL: stewardapi.ReadGlEnv(dataDir).URL,
+	}
+
 	mux.HandleFunc("POST /api/host/goder/tasks", hostOnly(goderHostTasks.Create))
 	mux.HandleFunc("GET /api/host/goder/tasks/{uid}/{id}", hostOnly(goderHostTasks.Get))
 	mux.HandleFunc("POST /api/host/goder/tasks/{uid}/{id}/cancel", hostOnly(goderHostTasks.Cancel))
@@ -505,6 +528,8 @@ func main() {
 
 	// ---- 需要登录的接口 ----
 	authed := http.NewServeMux()
+	// 代码管家（/api/steward/*：管理面 admin 专属；上报入口公开 + 密钥自鉴权）
+	stewardAPI.Register(authed, mux)
 	// 统一代理状态（登录即可读）：前端与网络请求类应用据此判定 /px/ 通用转发
 	// 通道是否可用（OPENOS_PROXY=off 时 enabled=false，应用回落浏览器直连）
 	proxyEnabled := envOr("OPENOS_PROXY", "") != "off"
@@ -1271,6 +1296,7 @@ func main() {
 	hub.Close()
 	goderMgr.Stop()
 	osmcpMgr.Stop()
+	stewardCancel() // 代码管家 worker：ctx 取消后当前步中断标记可重试
 	srv.Shutdown(ctx)
 	log.Println("已退出")
 }

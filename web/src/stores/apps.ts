@@ -18,6 +18,7 @@ export const builtinComponents: Record<string, () => Promise<any>> = {
   welcome: () => import('../apps/welcome/WelcomeApp.vue'),
   store: () => import('../apps/store/StoreApp.vue'),
   feedback: () => import('../apps/feedback/FeedbackApp.vue'),
+  steward: () => import('../apps/steward/StewardApp.vue'),
 }
 
 // 第三方在页面运行时通过 window.OpenOS.registerApp() 动态注册的组件
@@ -38,6 +39,7 @@ export const appChrome: Record<string, 'default' | 'merged'> = {
   store: 'merged',
   welcome: 'merged',
   feedback: 'merged',
+  steward: 'merged',
 }
 
 interface State {
