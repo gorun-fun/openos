@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"time"
 )
 
 // Store 状态存储。
@@ -103,15 +102,13 @@ func (s *Store) saveLocked() error {
 	return atomicfile.WriteJSON(s.path, &s.st, 0o600)
 }
 
-// randHex 密钥/ID 随机源。
+// randHex 密钥/ID 随机源。crypto/rand 失败 = 系统熵池故障，此时生成「时间熵
+// 可预测值」的密钥比失败更危险（安全审计 2026-10 第二轮）——直接 panic 快速
+// 暴露故障，绝不产出弱密钥。
 func randHex(n int) string {
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
-		// crypto/rand 失败极罕见（系统熵池），退化用时间兜底，仅影响可猜性
-		now := time.Now().UnixNano()
-		for i := range b {
-			b[i] = byte(now >> (uint(i%8) * 8))
-		}
+		panic("steward: crypto/rand 失败（系统熵池故障），拒绝生成弱密钥: " + err.Error())
 	}
 	return hex.EncodeToString(b)
 }

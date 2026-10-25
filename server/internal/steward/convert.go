@@ -23,10 +23,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"openos/server/internal/atomicfile"
 	"io"
 	"net/http"
 	"net/url"
+	"openos/server/internal/atomicfile"
 	"os"
 	"path"
 	"path/filepath"
@@ -385,8 +385,8 @@ func (e *Engine) executeConvert(ctx context.Context, id string) {
 	}
 	// 目标项目带 AutoInit 初始提交，源历史直推 main 需 force（项目为转制专属私有仓）
 	gitUser, gitTok := e.repoAuth(rctx, &Repo{ConnectionID: cred.ConnID, Platform: PlatformGitLab})
-	if _, err := e.runCmd(rctx, ws, lg, e.gitBin(), "push", "--quiet", "--force",
-		authURL(target.CloneURL, gitUser, gitTok), commit+":refs/heads/main"); err != nil {
+	if _, err := e.runCmdEnv(rctx, ws, lg, envGitAuth(gitUser, gitTok), []string{gitTok}, e.gitBin(), "push", "--quiet", "--force",
+		target.CloneURL, commit+":refs/heads/main"); err != nil {
 		finish(CFailed, "推送目标项目失败: "+err.Error())
 		return
 	}

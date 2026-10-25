@@ -163,11 +163,16 @@ func (h *Hub) dispatch(from *Client, env Envelope) {
 	if err != nil {
 		return
 	}
+	// 客户端发布的「本人跨端」主题只投递给同一用户（见 acl.go pubSelfDeliver）
+	selfOnly := from != nil && pubSelfDeliver[env.Topic]
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for c := range h.clients {
 		if c == from {
 			continue // 不回声给发布者，前端本地总线已做即时分发
+		}
+		if selfOnly && c.User != from.User {
+			continue
 		}
 		if c.matches(env.Topic) {
 			c.deliver(data)

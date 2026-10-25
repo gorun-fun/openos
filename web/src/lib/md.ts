@@ -3,6 +3,17 @@
 const ESC: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ESC[c])
 
+// URL scheme 白名单：文档可经分享链接来自其他用户，v-html 渲染的链接/图片
+// 必须拒绝 javascript:/data:(非图片)/vbscript: 等可执行 scheme（相对地址天然安全）。
+function safeLinkUrl(v: string): boolean {
+  if (/^[a-z][a-z0-9+.-]*:/i.test(v)) return /^(https?:|mailto:)/i.test(v)
+  return true
+}
+function safeImgUrl(v: string): boolean {
+  if (/^[a-z][a-z0-9+.-]*:/i.test(v)) return /^(https?:|data:image\/(png|jpeg|gif|webp|bmp|avif);)/i.test(v)
+  return true
+}
+
 /** 行内语法：代码 / 加粗 / 斜体 / 删除线 / 链接 / 图片 / 自动链接。 */
 function inline(src: string): string {
   const codes: string[] = []
@@ -13,8 +24,10 @@ function inline(src: string): string {
     return `\u0000${codes.length - 1}\u0000`
   })
   s = s
-    .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, '<img alt="$1" src="$2" loading="lazy">')
-    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+    .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_, alt, url) =>
+      safeImgUrl(url) ? `<img alt="${alt}" src="${url}" loading="lazy">` : alt)
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, text, url) =>
+      safeLinkUrl(url) ? `<a href="${url}" target="_blank" rel="noopener">${text}</a>` : text)
     .replace(/(https?:\/\/[^\s<]+)$/gm, '<a href="$1" target="_blank" rel="noopener">$1</a>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/~~([^~]+)~~/g, '<del>$1</del>')

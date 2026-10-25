@@ -40,7 +40,7 @@ func newFakeGitLab(t *testing.T) *fakePlatform {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"username": "wenjun", "name": "Wenjun", "avatar_url": "https://x/a.png"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"username": "octocat", "name": "Octo Cat", "avatar_url": "https://x/a.png"})
 	})
 	mux.HandleFunc("GET /api/v4/projects", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Next-Page", "")
@@ -71,7 +71,7 @@ func newFakeGitHub(t *testing.T) *fakePlatform {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"login": "wenjun", "avatar_url": "https://x/b.png"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"login": "octocat", "avatar_url": "https://x/b.png"})
 	})
 	mux.HandleFunc("GET /api/v3/user/repos", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Link", `<`+f.srv.URL+`/api/v3/user/repos?page=2>; rel="next"`)
@@ -104,11 +104,11 @@ func TestGitLabConnPasswordFlow(t *testing.T) {
 	eng := newConnEngine(t)
 	ctx := context.Background()
 
-	v, err := eng.AddConnection(ctx, ConnInput{Platform: PlatformGitLab, BaseURL: gl.srv.URL, User: "wenjun", Password: "pw"})
+	v, err := eng.AddConnection(ctx, ConnInput{Platform: PlatformGitLab, BaseURL: gl.srv.URL, User: "octocat", Password: "pw"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v.Login != "wenjun" || v.Active != true || v.PATSet || !v.PasswordSet {
+	if v.Login != "octocat" || v.Active != true || v.PATSet || !v.PasswordSet {
 		t.Fatalf("连接视图异常: %+v", v)
 	}
 	cred, err := eng.ActiveGitLab(ctx)

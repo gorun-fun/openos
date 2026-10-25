@@ -20,7 +20,8 @@ func TestPubAllowed(t *testing.T) {
 		{"agent:resp", true},
 		{"sys:open", true},
 		{"sys:notify", true},
-		{"sys:key", true},
+		// sys:key 已收归本地（恒 remote:false，远程发布无合法消费方=纯注入面）
+		{"sys:key", false},
 		// 自有终端主题（虚拟/真实终端输入）
 		{"term:alice", true},
 		{"term:alice:real:in", true},
@@ -77,5 +78,19 @@ func TestSubAllowed(t *testing.T) {
 		if got := subAllowed("alice", c.pattern); got != c.want {
 			t.Errorf("subAllowed(alice, %q) = %v, want %v", c.pattern, got, c.want)
 		}
+	}
+}
+
+// TestClientSysPublishSelfDeliver 客户端发布的 sys:open/sys:notify/fs:changed
+// 只投递给同一用户（本人跨端语义），跨用户不可达（安全审计 2026-10 第二轮）。
+func TestClientSysPublishSelfDeliver(t *testing.T) {
+	for _, topic := range []string{"sys:open", "sys:notify", "fs:changed"} {
+		if !pubSelfDeliver[topic] {
+			t.Errorf("%s 应在 pubSelfDeliver 集合内", topic)
+		}
+	}
+	// 服务端发布（from=nil）不受限
+	if pubSelfDeliver["sys:agent"] || pubSelfDeliver["app:calc"] || pubSelfDeliver["term:alice"] {
+		t.Error("仅 sys:open/sys:notify/fs:changed 走同用户投递")
 	}
 }

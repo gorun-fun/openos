@@ -103,10 +103,59 @@ export function parseDeck(text: string): string[] {
   }
   const doc = new DOMParser().parseFromString(t, 'text/html')
   const sections = [...doc.querySelectorAll('.slide')]
-  if (sections.length) return sections.map((s) => s.innerHTML)
+  if (sections.length) return sections.map((s) => sanitizeSlideHtml(s.innerHTML))
   // 无 section 结构的普通 HTML：整体作为一页
   const body = doc.body?.innerHTML?.trim()
-  return body ? [body] : ['<h1>空演示</h1>']
+  return body ? [sanitizeSlideHtml(body)] : ['<h1>空演示</h1>']
+}
+
+// —— 净化：幻灯片页内容在编辑器/缩略图/演示三处以同源 innerHTML 渲染，——
+// 文件可经分享链接来自其他用户，故解析边界必须剥掉全部执行面：
+//   * 脚本/嵌入类元素整棵移除（script/style/iframe/svg/object/…，内容不保留）；
+//   * 白名单外标签解包（保留子节点文本与结构，如 <font>、自定义标签）；
+//   * 属性只留少量排版属性；a[href]/img[src] 做 scheme 白名单（防 javascript:）；
+//   * style 属性、on* 事件属性、注释一律剥除。
+const SLIDE_DROP_TAGS = new Set(['script', 'style', 'iframe', 'object', 'embed', 'link', 'meta', 'base', 'form', 'input', 'button', 'textarea', 'select', 'option', 'video', 'audio', 'source', 'track', 'svg', 'math', 'canvas', 'template', 'frame', 'frameset', 'applet'])
+const SLIDE_KEEP_TAGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'div', 'span', 'br', 'hr', 'ul', 'ol', 'li', 'blockquote', 'pre', 'code', 'b', 'strong', 'i', 'em', 'u', 's', 'del', 'ins', 'sub', 'sup', 'mark', 'small', 'a', 'img', 'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'caption', 'colgroup', 'col', 'dl', 'dt', 'dd'])
+const SLIDE_KEEP_ATTRS: Record<string, Set<string>> = {
+  a: new Set(['href']),
+  img: new Set(['src', 'alt', 'width', 'height']),
+  td: new Set(['colspan', 'rowspan']),
+  th: new Set(['colspan', 'rowspan']),
+  ol: new Set(['start']),
+}
+const SAFE_URL = /^(https?:|mailto:|data:image\/(png|jpeg|gif|webp|bmp|avif);)/i
+
+function safeUrl(v: string): boolean {
+  // 相对地址与锚点天然安全；绝对地址走 scheme 白名单
+  if (/^[a-z][a-z0-9+.-]*:/i.test(v)) return SAFE_URL.test(v)
+  return !v.trim().startsWith('//')
+}
+
+/** 白名单净化一页幻灯片 innerHTML（同源渲染前的唯一入口）。 */
+export function sanitizeSlideHtml(html: string): string {
+  const doc = new DOMParser().parseFromString(`<body>${html}</body>`, 'text/html')
+  const walk = (parent: Node) => {
+    for (const child of [...parent.childNodes]) {
+      if (child.nodeType === Node.COMMENT_NODE) { child.remove(); continue }
+      if (child.nodeType !== Node.ELEMENT_NODE) continue
+      const el = child as Element
+      const tag = el.tagName.toLowerCase()
+      if (SLIDE_DROP_TAGS.has(tag)) { el.remove(); continue }
+      if (!SLIDE_KEEP_TAGS.has(tag)) { el.replaceWith(...el.childNodes); walk(parent); continue }
+      for (const attr of [...el.attributes]) {
+        const name = attr.name.toLowerCase()
+        if (attr.name.startsWith('on') || name === 'style') { el.removeAttribute(attr.name); continue }
+        if (!SLIDE_KEEP_ATTRS[tag]?.has(name)) { el.removeAttribute(attr.name); continue }
+        if ((tag === 'a' && name === 'href') || (tag === 'img' && name === 'src')) {
+          if (!safeUrl(attr.value)) el.removeAttribute(attr.name)
+        }
+      }
+      walk(el)
+    }
+  }
+  walk(doc.body)
+  return doc.body.innerHTML
 }
 
 /** 新建空白演示（一页标题页）。 */

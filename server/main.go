@@ -61,11 +61,6 @@ func main() {
 	if envOr("OPENOS_MARKET", "") == "off" {
 		storeOpts = append(storeOpts, store.WithoutMarket())
 	}
-	// 代码管家（自 grf-os 宿主上游化；宿主部署可用 GRF_OS_STEWARD_OFF=1 兼容关闭）
-	stewardOff := envOr("OPENOS_STEWARD", "") == "off" || envOr("GRF_OS_STEWARD_OFF", "") == "1"
-	if stewardOff {
-		storeOpts = append(storeOpts, store.WithoutSteward())
-	}
 	// 外部身份模式（身份托管宿主/IdP）：user/guest 退化为宿主机制角色，角色目录不收录
 	if os.Getenv("OPENOS_AUTH_MODE") == "external" {
 		storeOpts = append(storeOpts, store.ExternalIdentity())
@@ -78,6 +73,8 @@ func main() {
 	authSvc := auth.New(db, os.Getenv("OPENOS_JWT_SECRET"))
 	authSvc.SetAuthMode(os.Getenv("OPENOS_AUTH_MODE"))
 	authSvc.SetExchangeSecret(os.Getenv("OPENOS_EXCHANGE_SECRET"))
+	// OPENOS_TRUST_PROXY=1：反代部署下按 X-Forwarded-For 分桶防爆破计数（默认关）
+	authSvc.SetTrustProxy(os.Getenv("OPENOS_TRUST_PROXY") == "1" || strings.EqualFold(os.Getenv("OPENOS_TRUST_PROXY"), "true"))
 	authSvc.SetExchangeRoleWhitelist(os.Getenv("OPENOS_EXCHANGE_ROLES"))
 	// 令牌有效期可配（默认 24h；宿主长会话场景可设 168h 等，前端按响应 tokenTtl
 	// 自适应续期间隔）
@@ -248,9 +245,8 @@ func main() {
 		webres.WriteJSON(w, out)
 	})
 	mux.HandleFunc("POST /api/auth/login", authSvc.Login)
-	mux.HandleFunc("GET /api/auth/logout", authSvc.Logout)
-	// 登出改 POST（GET 保留兼容期，前端与宿主切换完成后移除）——GET 副作用端点
-	// 是 CSRF 面（跨站 <img> 即可登出他人），安全审计 2026-10。
+	// 登出仅 POST（GET 形态已移除，安全审计 2026-10 落地）——GET 副作用端点是
+	// CSRF 面（跨站 <img> 即可登出他人）；前端 session.ts 已同步改 POST。
 	mux.HandleFunc("POST /api/auth/logout", authSvc.Logout)
 	// 宿主应用令牌交换（仅 OPENOS_EXCHANGE_SECRET 配置后可用）
 	mux.HandleFunc("POST /api/auth/exchange", authSvc.Exchange)
@@ -495,7 +491,7 @@ func main() {
 	// grf-os 的自动修复引擎经此把修复会话落到操作者 goder 的「自动修复」分组下）
 	goderHostTasks := goder.NewHostTasks(goderMgr)
 
-	// 代码管家引擎（自 grf-os 宿主上游化）：worker + 双平台 issue 同步循环；
+	// 代码管家引擎（服务端内置；App 为商店 bundle 应用，openos-apps 仓分发）：
 	// goder 执行器直调 hosttasks 内部面（进程内，不绕 HTTP 回环）。env 凭证
 	// 首启种子为平台连接（存量部署无感）。停用时引擎为 nil，App 与 API 提示未启用。
 	stewardEng := stewardapi.NewEngine(dataDir, goderHostTasks)

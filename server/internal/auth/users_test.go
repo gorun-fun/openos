@@ -212,6 +212,74 @@ func TestSyncUsersStableSync(t *testing.T) {
 	}
 }
 
+// TestNonAdminUsersManageCannotEscalate REST 侧持 users.manage 的非 admin 操作者
+// 不得经 create/sync/delete 三条路径触及 admin 语义（开通/授予/删除均拒绝）。
+func TestNonAdminUsersManageCannotEscalate(t *testing.T) {
+	db := testDB(t)
+	s := New(db, "test-secret")
+	mustExec(t, db, `INSERT INTO users(username,password_hash,salt,role,display_name,token_version) VALUES('bob','h','s','user','Bob',7)`)
+	mustExec(t, db, `INSERT INTO users(username,password_hash,salt,role,display_name,token_version) VALUES('root','h','s','admin','Root',1)`)
+	nonAdmin := func(r *http.Request) *http.Request {
+		return WithIdentity(r, &Identity{Username: "boss", Role: "manager"})
+	}
+
+	// 1) 单独创建 admin 账号 → 403
+	req := httptest.NewRequest("POST", "/api/users", strings.NewReader(`{"username":"evil","password":"passw0rd123","role":"admin"}`))
+	req = nonAdmin(req)
+	w := httptest.NewRecorder()
+	s.CreateUser(w, req)
+	if w.Code != 403 {
+		t.Fatalf("non-admin create admin should 403, got %d %s", w.Code, w.Body.String())
+	}
+	if info, _ := db.GetUserAuth("evil"); info.Exists {
+		t.Fatal("rejected create must not insert user")
+	}
+
+	// 2) 批量同步：新建 admin 账号 → skipped；已有用户提权为 admin → skipped
+	body := `{"users":[{"username":"evil2","role":"admin"},{"username":"bob","role":"admin"}]}`
+	req = httptest.NewRequest("POST", "/api/users/sync", strings.NewReader(body))
+	req = nonAdmin(req)
+	w = httptest.NewRecorder()
+	s.SyncUsers(w, req)
+	if w.Code != 200 {
+		t.Fatalf("sync should 200 with skips, got %d %s", w.Code, w.Body.String())
+	}
+	var out struct {
+		Created int      `json:"created"`
+		Updated int      `json:"updated"`
+		Skipped []string `json:"skipped"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &out)
+	if out.Created != 0 || out.Updated != 0 || len(out.Skipped) != 2 {
+		t.Fatalf("both entries must be skipped: %s", w.Body.String())
+	}
+	if info, _ := db.GetUserAuth("evil2"); info.Exists {
+		t.Fatal("sync must not create admin for non-admin operator")
+	}
+	if userField(t, db, "bob", "role") != "user" {
+		t.Fatal("sync must not promote bob to admin for non-admin operator")
+	}
+
+	// 3) 删除 admin 用户 → 403
+	req = httptest.NewRequest("DELETE", "/api/users/root", nil)
+	req.SetPathValue("name", "root")
+	req = nonAdmin(req)
+	w = httptest.NewRecorder()
+	s.DeleteUser(w, req)
+	if w.Code != 403 {
+		t.Fatalf("non-admin delete admin should 403, got %d %s", w.Code, w.Body.String())
+	}
+
+	// 4) 对照：admin 操作者照常可建 admin（无回归）
+	req = httptest.NewRequest("POST", "/api/users", strings.NewReader(`{"username":"root2","password":"passw0rd123","role":"admin"}`))
+	req = WithIdentity(req, &Identity{Username: "root", Role: "admin"})
+	w = httptest.NewRecorder()
+	s.CreateUser(w, req)
+	if w.Code != 200 {
+		t.Fatalf("admin create admin should succeed, got %d %s", w.Code, w.Body.String())
+	}
+}
+
 // TestHostAPIGuard /api/host/* 密钥守护与全字段列表。
 func TestHostAPIGuard(t *testing.T) {
 	db := testDB(t)

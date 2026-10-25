@@ -1,6 +1,8 @@
 node_modules/
 web/dist/
 server/data/
+# 仓库根 data/：OPENOS_DATA 相对路径落在根目录时的运行时数据（含 openos.db/homes/attachments），根锚定防误提交
+/data/
 server/openos-server
 .DS_Store
 *.log

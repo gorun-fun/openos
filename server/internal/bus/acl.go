@@ -7,13 +7,24 @@ import "strings"
 // 广播）。本文件把客户端可见面收敛为白名单；服务端自身（Publish/PublishTo）
 // 不受限制。
 
-// clientPubSys 客户端允许发布的 sys 精确主题——均为现存合法跨端功能面：
+// clientPubSys 客户端允许发布的 sys 精确主题——均为现存合法**本人跨端**功能面：
 //
 //	sys:open    设置-应用注册表「打开」按钮跨端拉起（SettingsApp）
-//	sys:notify  通知中心 broadcast 路径（notifications store）
-//	sys:key     统一键盘未消费按键分发（实际恒 remote:false，仅本地）
+//	sys:notify  通知中心 broadcast 路径（notifications store，语义=本人其他端弹出）
+//
+// sys:key 已移出（安全审计 2026-10 第二轮）：统一键盘的按键分发恒 {remote:false}
+// 仅本地，服务端放行远程发布没有任何合法消费方，只构成跨用户合成按键注入面。
 var clientPubSys = map[string]bool{
-	"sys:open": true, "sys:notify": true, "sys:key": true,
+	"sys:open": true, "sys:notify": true,
+}
+
+// pubSelfDeliver 客户端发布的这些主题只投递给**同一用户**的连接（安全审计
+// 2026-10 第二轮）：三个主题的消费语义都是「本人其他端」——多标签页/多设备同步
+// （sys:open 拉起 / sys:notify 广播弹通知 / fs:changed 文件变更刷新），此前按
+// 订阅全员投递，任意登录用户可冒充任意 appId 给他人弹通知/拉应用/伪造文件事件。
+// 服务端 PublishTo 定向推送不受影响（From=system 不走此分支）。
+var pubSelfDeliver = map[string]bool{
+	"sys:open": true, "sys:notify": true, "fs:changed": true,
 }
 
 // clientPubPrefixes 客户端允许发布的公开业务前缀。

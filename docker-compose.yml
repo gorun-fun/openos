@@ -4,10 +4,10 @@ services:
     # 服务器部署：CI 已推送同名镜像，compose 检测到本地镜像存在不会重新构建
     build: .
     # 镜像来源；registry/tag 由变量注入（CI 发布时传 OPENOS_TAG=v1.0.0）
-    image: ${OPENOS_REGISTRY:-10.8.0.6:5000}/openos:${OPENOS_TAG:-latest}
+    image: ${OPENOS_REGISTRY:-registry.internal:5000}/openos:${OPENOS_TAG:-latest}
     container_name: openos
     ports:
-      # 宿主 8091：10.8.0.6 上 8081 被 auto-web(Auto Studio) 占用、8090 是 grf-bridge；
+      # 宿主 8091 端口映射（具体主机端口分配见部署环境说明）；
       # 容器内仍是 8081（OPENOS_ADDR 不变）
       - "8091:8081"
     volumes:

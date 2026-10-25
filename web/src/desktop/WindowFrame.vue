@@ -100,7 +100,9 @@ async function resolveComp() {
           appChrome[appId] = 'merged'
           comp.value = WebAppComp
         } else if (cfg.kind === 'bundle') {
-          // 商店 bundle 应用：标准标题栏 + BundleApp 容器动态加载组件
+          // 商店 bundle 应用：BundleApp 容器动态加载组件；config.chrome='merged'
+          // 时用融合工具栏窗体（应用自绘标题行，与内置 merged 应用同款）
+          if (cfg.chrome === 'merged') appChrome[appId] = 'merged'
           comp.value = BundleAppComp
         } else {
           comp.value = { render: () => h(SchemaApp, { schema: cfg, win: props.win }) }

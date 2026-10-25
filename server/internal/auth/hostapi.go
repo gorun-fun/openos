@@ -212,7 +212,7 @@ func (s *Service) HostCreateUser(w http.ResponseWriter, r *http.Request) {
 	if !s.requireHostSecret(w, r, "host") {
 		return
 	}
-	s.createUserCore(w, r, "host", true)
+	s.createUserCore(w, r, "host", true, true)
 }
 
 // HostSyncUsers POST /api/host/users/sync —— 批量幂等同步（语义同 REST 版）。
@@ -220,7 +220,7 @@ func (s *Service) HostSyncUsers(w http.ResponseWriter, r *http.Request) {
 	if !s.requireHostSecret(w, r, "host") {
 		return
 	}
-	s.syncUsersCore(w, r, "host")
+	s.syncUsersCore(w, r, "host", true)
 }
 
 // HostUpdateUser PUT /api/host/users/{name} —— 字段级更新（含 perms，语义同 REST 版）。
@@ -236,7 +236,7 @@ func (s *Service) HostDeleteUser(w http.ResponseWriter, r *http.Request) {
 	if !s.requireHostSecret(w, r, "host") {
 		return
 	}
-	s.deleteUserCore(w, r, "host")
+	s.deleteUserCore(w, r, "host", true)
 }
 
 // HostRoles GET /api/host/roles —— 角色目录 + 权限点目录（宿主侧对账/展示用；

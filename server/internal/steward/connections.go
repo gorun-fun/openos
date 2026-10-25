@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -239,6 +240,12 @@ func (e *Engine) AddConnection(ctx context.Context, in ConnInput) (ConnView, err
 	}
 	if u, err := url.Parse(in.BaseURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return ConnView{}, errors.New("实例地址必须是 http(s) URL")
+	}
+	// 非回环 http 明文提示（内网 GitLab 自签/明文属合法形态，仅告警不阻断——
+	// 凭据与 PAT 会明文过网，安全审计 2026-10 第二轮）
+	if u, _ := url.Parse(in.BaseURL); u != nil && u.Scheme == "http" &&
+		u.Hostname() != "localhost" && u.Hostname() != "127.0.0.1" && u.Hostname() != "::1" {
+		log.Printf("steward: 警告——GitLab 连接 %s 为非回环 http 明文地址，凭据将明文传输", in.BaseURL)
 	}
 	c := &Connection{
 		Platform: in.Platform, BaseURL: in.BaseURL,

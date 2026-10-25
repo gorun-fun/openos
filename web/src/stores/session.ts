@@ -109,7 +109,7 @@ export const useSession = defineStore('session', {
       clearToken()
       this.user = null
       // 同步清除 goder 等嵌入组件使用的 Cookie
-      fetch('/api/auth/logout').catch(() => {})
+      fetch('/api/auth/logout', { method: 'POST' }).catch(() => {})
     },
   },
 })

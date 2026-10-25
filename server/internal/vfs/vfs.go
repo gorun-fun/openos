@@ -534,13 +534,20 @@ func (f *FS) Read(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "文件不存在", 404)
 		return
 	}
+	if st, err := os.Stat(real); err == nil && st.IsDir() {
+		http.Error(w, "这是一个目录", 400)
+		return
+	}
+	// 读入上限：REST 写入面恒 ≤8MB，但终端/goder 可直写超大文件——全量 ReadFile
+	// 会被超大文件放大成内存耗尽，超限给可读错误（编辑器本来也打不开）
+	const readCap = 64 << 20
+	if st, err := os.Stat(real); err == nil && st.Size() > readCap {
+		http.Error(w, "文件过大（超过 64MB，无法在线打开）", 400)
+		return
+	}
 	data, err := os.ReadFile(real)
 	if err != nil {
 		http.Error(w, "文件不存在", 404)
-		return
-	}
-	if st, err := os.Stat(real); err == nil && st.IsDir() {
-		http.Error(w, "这是一个目录", 400)
 		return
 	}
 	content := string(data)
@@ -563,16 +570,22 @@ func (f *FS) Raw(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "文件不存在", 404)
 		return
 	}
-	data, err := os.ReadFile(real)
+	if st, err := os.Stat(real); err == nil && st.IsDir() {
+		http.Error(w, "这是一个目录", 400)
+		return
+	}
+	file, err := os.Open(real)
 	if err != nil {
 		http.Error(w, "文件不存在", 404)
 		return
 	}
+	defer file.Close()
 	name := path.Base(p)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", name))
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Write(data)
+	// 流式输出：下载/预览不落内存（大文件全量 ReadFile 会放大成内存峰值）
+	io.Copy(w, file)
 }
 
 // Usage GET /api/fs/usage 个人空间用量。
@@ -584,8 +597,12 @@ func (f *FS) Usage(w http.ResponseWriter, r *http.Request) {
 // Upload POST /api/fs/upload（multipart：dir + 一个或多个 file）
 func (f *FS) Upload(w http.ResponseWriter, r *http.Request) {
 	user := auth.FromContext(r).Username
+	// 请求体硬限：多文件合法总量以配额为上界（单文件 8MB 检查在其后），
+	// MaxBytesReader 让超限体在读盘阶段即被拒——否则 ParseMultipartForm 会把
+	// 超限 file part 全量落盘临时目录，登录用户可借此耗尽磁盘（配额不覆盖 temp 区）
+	r.Body = http.MaxBytesReader(w, r.Body, store.StorageQuota+8<<20)
 	if err := r.ParseMultipartForm(maxFileSize); err != nil {
-		http.Error(w, "上传失败：单文件不能超过 8MB", 400)
+		http.Error(w, "上传失败：单文件不能超过 8MB 或总量超过配额", 400)
 		return
 	}
 	dirRaw := r.FormValue("dir")
@@ -644,6 +661,8 @@ func (f *FS) Upload(w http.ResponseWriter, r *http.Request) {
 // Write PUT /api/fs/write {path, content}
 func (f *FS) Write(w http.ResponseWriter, r *http.Request) {
 	user := auth.FromContext(r).Username
+	// 请求体硬限（content 8MB 检查在 jsonDecode 全量读入之后，先拦超限体防内存放大）
+	r.Body = http.MaxBytesReader(w, r.Body, maxFileSize+1<<20)
 	var req struct{ Path, Content string }
 	if err := jsonDecode(r, &req); err != nil {
 		http.Error(w, "参数错误", 400)
@@ -725,9 +744,11 @@ func (f *FS) Mkdir(w http.ResponseWriter, r *http.Request) {
 	webres.WriteJSON(w, ok())
 }
 
-// Touch POST /api/fs/touch {path}
+// Touch POST /api/fs/touch {path, content?}
 func (f *FS) Touch(w http.ResponseWriter, r *http.Request) {
 	user := auth.FromContext(r).Username
+	// 请求体硬限（同 Write：content 检查在 jsonDecode 全量读入之后）
+	r.Body = http.MaxBytesReader(w, r.Body, maxFileSize+1<<20)
 	var req struct{ Path, Content string }
 	if err := jsonDecode(r, &req); err != nil {
 		http.Error(w, "参数错误", 400)
@@ -1037,6 +1058,12 @@ func (f *FS) ensureRealHome(user string) string {
 // realCD 解析 cd 单命令的目标目录并做沙箱校验：成功返回新 cwd，不允许时返回
 // 错误文案（cwd 原样退回）。与 resolveReal 的边界校验是两套独立实现，不合并：
 // cd 面向 shell 会话语义（符号链接解析后按前缀校验），resolveReal 面向 REST
+// withinHome 带分隔符边界的沙箱判定：home=/…/homes/adm 不得命中 /…/homes/admin
+// （裸 HasPrefix 的前缀串台，REST 层 clean() 早已处理，终端护栏此前漏配）。
+func withinHome(p, home string) bool {
+	return p == home || strings.HasPrefix(p, home+"/")
+}
+
 // 读写（最深存在父链逐级解析），两者的失败语义与调用时机都不同。
 func (f *FS) realCD(home, cwd, arg string) (string, string) {
 	var target string
@@ -1054,7 +1081,7 @@ func (f *FS) realCD(home, cwd, arg string) (string, string) {
 	if resolved, err := filepath.EvalSymlinks(target); err == nil {
 		target = resolved
 	}
-	if !strings.HasPrefix(target, home) {
+	if !withinHome(target, home) {
 		return cwd, "cd: 受限模式仅允许在个人沙箱内移动：~（OPENOS_REAL_SHELL=full 可解除）"
 	}
 	if st, err := os.Stat(target); err != nil || !st.IsDir() {
@@ -1072,7 +1099,7 @@ func (f *FS) execReal(user, line string, reply func(string, any)) {
 	f.realMu.Lock()
 	cwd := f.realCwd[user]
 	f.realMu.Unlock()
-	if cwd == "" || !strings.HasPrefix(cwd, home) {
+	if cwd == "" || !withinHome(cwd, home) {
 		cwd = home
 	}
 	line = strings.TrimSpace(line)
@@ -1101,7 +1128,7 @@ func (f *FS) execReal(user, line string, reply func(string, any)) {
 
 	// 沙箱护栏：工作目录不在沙箱时拉回（full 模式除外）
 	full := f.realShellFull
-	if !full && !strings.HasPrefix(cwd, home) {
+	if !full && !withinHome(cwd, home) {
 		cwd = home
 	}
 

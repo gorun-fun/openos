@@ -61,6 +61,9 @@ type Service struct {
 	// externalAuth 外部身份模式（OPENOS_AUTH_MODE=external）：身份托管于宿主/IdP，
 	// 账密登录与本地自助改密整体下线、演示账号种子跳过；用户只能经 exchange 开通。
 	externalAuth bool
+	// trustProxy 信任 X-Forwarded-For（OPENOS_TRUST_PROXY=1，默认关）：防爆破计数
+	// 与审计按真实客户端 IP 分桶，缓解反代/NAT 部署下的共享桶锁号 DoS。
+	trustProxy bool
 
 	// 用户态缓存（角色/token_version/禁用态），TTL 10s
 	cacheMu sync.Mutex
@@ -187,6 +190,13 @@ func (s *Service) SetTokenTTL(d time.Duration) {
 func (s *Service) SetAuthMode(mode string) {
 	s.externalAuth = strings.EqualFold(strings.TrimSpace(mode), "external")
 }
+
+// SetTrustProxy 信任反代头（OPENOS_TRUST_PROXY=1，默认关）：开启后 clientIP 取
+// X-Forwarded-For 末位（单层反代视角下即真实客户端；多层代理链请自行保证末位
+// 可信）。默认关 = 恒取 RemoteAddr——反代/NAT 部署（compose 端口映射等）下全部
+// 外部用户共享一个计数桶，攻击者可对任意用户名输错 8 次定向锁号 15 分钟；
+// 显式开启是把计数粒度还给真实来源 IP 的运维选择（安全审计 2026-10 第二轮）。
+func (s *Service) SetTrustProxy(v bool) { s.trustProxy = v }
 
 // SetExchangeSecret 配置令牌交换密钥（宿主应用服务端持有，用于换取 OpenOS 身份）；
 // 为空（默认）时交换端点返回 503，保持独立部署的安全面不变。
@@ -405,7 +415,17 @@ func (s *Service) notifyIdentityChanged(username string, roleChanged bool) {
 func (s *Service) clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
+	}
+	if s.trustProxy {
+		// X-Forwarded-For 末位 = 紧邻反代写入的客户端地址（单层反代语义）；
+		// 直接连接的客户端伪造不了末位（反代会追加自己的观测值）
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.Split(xff, ",")
+			if v := strings.TrimSpace(parts[len(parts)-1]); v != "" {
+				return v
+			}
+		}
 	}
 	return host
 }
@@ -467,6 +487,10 @@ func hashPassword(password, salt string) string {
 
 // legacyIters 历史迭代参数（新→旧），checkPassword 逐级兼容并触发透明升级。
 var legacyIters = []int{20000, 4096}
+
+// 哑哈希（用户不存在路径的等成本 PBKDF2，抹平用户名枚举时延差）。
+const dummySalt = "openos-timing-pad"
+var dummyHash = hashPassword("openos-timing-pad", dummySalt)
 
 // checkPassword 校验密码，兼容历史参数的存量 hash；返回命中的迭代参数
 //（0 = 不匹配）。Login 以「命中参数 ≠ 当前参数」判定是否需要透明升级——
@@ -682,6 +706,10 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request) {
 	matchedIters := 0
 	if err == nil && info.Exists {
 		matchedIters = checkPassword(req.Password, info.Salt, info.PasswordHash)
+	} else if err == nil {
+		// 用户不存在也跑一次等成本 PBKDF2（安全审计 2026-10 第二轮）：600k 轮耗时
+		// 显著，失败路径响应时延差是免费的用户名枚举探针——哑哈希抹平两侧时延
+		checkPassword(req.Password, dummySalt, dummyHash)
 	}
 	if err != nil || !info.Exists || matchedIters == 0 {
 		s.fail(key)

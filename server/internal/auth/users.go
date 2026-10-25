@@ -219,10 +219,10 @@ func (s *Service) listUsersCore(w http.ResponseWriter) {
 
 // CreateUser POST /api/users —— hostMode=false（REST）；宿主通道见 hostapi.go。
 func (s *Service) CreateUser(w http.ResponseWriter, r *http.Request) {
-	s.createUserCore(w, r, FromContext(r).Username, false)
+	s.createUserCore(w, r, FromContext(r).Username, false, FromContext(r).Role == "admin")
 }
 
-func (s *Service) createUserCore(w http.ResponseWriter, r *http.Request, operator string, hostMode bool) {
+func (s *Service) createUserCore(w http.ResponseWriter, r *http.Request, operator string, hostMode, operatorAdmin bool) {
 	var req struct {
 		Username, Password, Role, DisplayName string
 		Perms                                 []string // 可选：初始权限快照
@@ -246,6 +246,11 @@ func (s *Service) createUserCore(w http.ResponseWriter, r *http.Request, operato
 		webres.Error(w, 400, "非法角色")
 		return
 	}
+	// 防提权：REST 侧持 users.manage 的非 admin 操作者不得开通 admin 账号
+	if !operatorAdmin && req.Role == "admin" {
+		webres.Error(w, 403, "开通 admin 账号需要管理员权限")
+		return
+	}
 	if err := s.insertUser(req.Username, req.Password, req.Role, req.DisplayName, false, req.Perms); err != nil {
 		webres.Error(w, 400, "创建失败（用户名可能已存在）")
 		return
@@ -260,10 +265,10 @@ func (s *Service) createUserCore(w http.ResponseWriter, r *http.Request, operato
 //（变化即时生效不吊销）。不在名单内的用户不动（单向同步语义，删除走
 // DELETE /api/users/{name}）。拒绝项（末位管理员/非法字段等）进 skipped 不中断整批。
 func (s *Service) SyncUsers(w http.ResponseWriter, r *http.Request) {
-	s.syncUsersCore(w, r, FromContext(r).Username)
+	s.syncUsersCore(w, r, FromContext(r).Username, FromContext(r).Role == "admin")
 }
 
-func (s *Service) syncUsersCore(w http.ResponseWriter, r *http.Request, operator string) {
+func (s *Service) syncUsersCore(w http.ResponseWriter, r *http.Request, operator string, operatorAdmin bool) {
 	var req struct {
 		Users []struct {
 			Username    string   `json:"username"`
@@ -297,6 +302,11 @@ func (s *Service) syncUsersCore(w http.ResponseWriter, r *http.Request, operator
 			continue
 		}
 		if !info.Exists {
+			// 防提权：非 admin 操作者（REST 侧 users.manage 委派）不得经批量同步开通 admin 账号
+			if !operatorAdmin && u.Role == "admin" {
+				skipped = append(skipped, u.Username+"（开通 admin 账号需要管理员权限）")
+				continue
+			}
 			pw := randomHex(24)
 			disabled := u.Disabled != nil && *u.Disabled
 			if err := s.insertUser(u.Username, pw, u.Role, u.DisplayName, disabled, u.Perms); err != nil {
@@ -308,7 +318,7 @@ func (s *Service) syncUsersCore(w http.ResponseWriter, r *http.Request, operator
 			continue
 		}
 		p := userPatch{Role: &u.Role, DisplayName: &u.DisplayName, Disabled: u.Disabled, Perms: u.Perms}
-		changed, err := s.patchUser(u.Username, p, operator, ip, true)
+		changed, err := s.patchUser(u.Username, p, operator, ip, operatorAdmin)
 		if err != nil {
 			skipped = append(skipped, u.Username+"（"+err.Error()+"）")
 			continue
@@ -354,14 +364,19 @@ func (s *Service) updateUserCore(w http.ResponseWriter, r *http.Request, operato
 
 // DeleteUser DELETE /api/users/{name} —— 级联清理该用户全部数据（行级 + 钩子）。
 func (s *Service) DeleteUser(w http.ResponseWriter, r *http.Request) {
-	s.deleteUserCore(w, r, FromContext(r).Username)
+	s.deleteUserCore(w, r, FromContext(r).Username, FromContext(r).Role == "admin")
 }
 
-func (s *Service) deleteUserCore(w http.ResponseWriter, r *http.Request, operator string) {
+func (s *Service) deleteUserCore(w http.ResponseWriter, r *http.Request, operator string, operatorAdmin bool) {
 	name := r.PathValue("name")
 	info, _ := s.db.GetUserAuth(name)
 	if !info.Exists {
 		webres.Error(w, 404, "用户不存在")
+		return
+	}
+	// 防提权：非 admin 操作者不得删除 admin 用户（与 patchUser 约束对齐）
+	if !operatorAdmin && info.Role == "admin" {
+		webres.Error(w, 403, "删除 admin 用户需要管理员权限")
 		return
 	}
 	if info.Role == "admin" && !info.Disabled && s.db.CountAdmins() <= 1 {

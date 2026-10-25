@@ -8,7 +8,9 @@
 #            宿主 CI 经 hostsdk/预编译消费，免每次源码编译 modernc sqlite——P7；
 #            tag 同时发布桌面客户端六平台 → download.gorun.fun/openos/cli/<平台>/
 #            <版本>/，平台/版本/运行文件布局，桌面客户端自动更新消费同一通道）
-# 镜像仓库：10.8.0.6:5000（Registry 容器仅绑定该地址；构建/推送与发布机拉取共用）
+# 镜像仓库 / 部署主机等内网地址一律不在本文件出现——经 GitLab CI/CD 变量注入：
+#   REGISTRY   镜像仓库地址（含端口）   DEPLOY_HOSTS  部署目标主机（空格分隔）
+#   DIST_HOST  dist/cli 产物发布机      DEPLOY_SSH_PRIVATE_KEY（文件型，原有）
 # ============================================================================
 
 # 同分支新流水线自动取消旧流水线（main 连推场景省 Runner 时间）
@@ -23,18 +25,14 @@ workflow:
 image: docker:29.7.2-cli-alpine3.24
 
 variables:
-  # 镜像仓库地址（Registry 容器仅绑定 10.8.0.6:5000，docker0 网关地址 172.17.0.1:5000 已不可达）
-  REGISTRY: 10.8.0.6:5000
-  # 镜像名（不含 tag）
+  # 镜像名（不含 tag）；REGISTRY 由 CI/CD 变量注入（内网地址不入库）
   IMAGE_BASE: ${REGISTRY}/openos
   # 直接复用主机 Docker 守护进程（Runner 需挂载 /var/run/docker.sock:ro）
   DOCKER_HOST: unix:///var/run/docker.sock
   # Dockerfile 为多阶段构建（node → go → alpine）。Docker 23+ 默认即 BuildKit，
   # 此处显式声明，防将来基础镜像版本回退
   DOCKER_BUILDKIT: "1"
-  # 发布目标主机（内网，通过 SSH 登录），多台以空格分隔
-  DEPLOY_HOSTS: 10.8.0.6
-  # 发布机拉取镜像的仓库地址（与构建/推送为同一仓库）
+  # 发布机拉取镜像的仓库地址（与构建/推送为同一仓库，= REGISTRY）
   DEPLOY_REGISTRY: ${REGISTRY}
   # 发布机上的应用工作目录
   DEPLOY_APP_DIR: /app/openos
@@ -101,7 +99,7 @@ push-image:
   stage: push
   tags:
     - docker
-  # 内网仓库（10.8.0.6:5000）不启用认证，无需 login
+  # 内网仓库不启用认证，无需 login（地址 = CI/CD 变量 REGISTRY）
   script:
     - docker push ${IMAGE_BASE}:${CI_COMMIT_TAG}
   rules:
@@ -145,7 +143,7 @@ deploy:
 # ---- dist 产物发布（tag；宿主预编译消费通道，P7） ----
 # 多平台 openos-server 二进制（darwin/linux × amd64/arm64，CGO_ENABLED=0）+
 # goder 三件套（goder-serve/goder.js/gh，从当次镜像提取，与部署产物严格同源）+
-# manifest.json（各文件 sha256）→ scp 到 10.8.0.5:/data/download/openos/dist/<tag>/。
+# manifest.json（各文件 sha256）→ scp 到 ${DIST_HOST}:/data/download/openos/dist/<tag>/。
 # 宿主 CI/ensure 脚本按 tag 下载（校验 sha256）替代源码编译 openos-server。
 publish-dist:
   stage: dist
@@ -158,7 +156,7 @@ publish-dist:
     - mkdir -p ~/.ssh && chmod 700 ~/.ssh
     - cp "$DEPLOY_SSH_PRIVATE_KEY" ~/.ssh/id_rsa
     - chmod 600 ~/.ssh/id_rsa
-    - ssh-keyscan -H 10.8.0.5 >> ~/.ssh/known_hosts 2>/dev/null
+    - ssh-keyscan -H ${DIST_HOST} >> ~/.ssh/known_hosts 2>/dev/null
   script:
     - mkdir -p dist-out
     # 1) 多平台服务端二进制（版本号注入；Go 具名卷缓存）
@@ -185,9 +183,9 @@ publish-dist:
         printf '  "%s": "%s"' "$f" "$(sha256sum "$f" | cut -d" " -f1)"
         FIRST=0
       done; echo; echo '}'; } > manifest.json && cat manifest.json )
-    # 4) 上传（货架机同源：download.gorun.fun = 10.8.0.5:/data/download）
-    - ssh ${DEPLOY_USER}@10.8.0.5 "mkdir -p /data/download/openos/dist/${CI_COMMIT_TAG}"
-    - scp dist-out/* ${DEPLOY_USER}@10.8.0.5:/data/download/openos/dist/${CI_COMMIT_TAG}/
+    # 4) 上传（货架机同源：download.gorun.fun = ${DIST_HOST}:/data/download）
+    - ssh ${DEPLOY_USER}@${DIST_HOST} "mkdir -p /data/download/openos/dist/${CI_COMMIT_TAG}"
+    - scp dist-out/* ${DEPLOY_USER}@${DIST_HOST}:/data/download/openos/dist/${CI_COMMIT_TAG}/
   rules:
     - if: '$CI_COMMIT_TAG'
 
@@ -195,7 +193,7 @@ publish-dist:
 # 交叉编译全部 6 平台（darwin/linux/windows × amd64/arm64，平台目录沿用 goder
 # 约定：macos=amd64、macos-arm64、linux、linux-arm64、windows、windows-arm64；
 # Windows 构建 GUI 子系统 + rsrc 图标）→ 版本注入（tag 去 v 前缀）+ .sha256 校验
-# 文件 + notes.txt（发布说明）→ 上传 10.8.0.5:/data/download/openos/cli/<平台>/
+# 文件 + notes.txt（发布说明）→ 上传 ${DIST_HOST}:/data/download/openos/cli/<平台>/
 # <版本>/。布局 = 平台/版本/运行文件（goder 同款）；桌面客户端的自动更新
 #（desktop/update.go）消费同一通道。本地等价命令：make desktop-upload。
 publish-cli:
@@ -209,7 +207,7 @@ publish-cli:
     - mkdir -p ~/.ssh && chmod 700 ~/.ssh
     - cp "$DEPLOY_SSH_PRIVATE_KEY" ~/.ssh/id_rsa
     - chmod 600 ~/.ssh/id_rsa
-    - ssh-keyscan -H 10.8.0.5 >> ~/.ssh/known_hosts 2>/dev/null
+    - ssh-keyscan -H ${DIST_HOST} >> ~/.ssh/known_hosts 2>/dev/null
   script:
     - VER="${CI_COMMIT_TAG#v}"
     - mkdir -p cli-out
@@ -236,12 +234,12 @@ publish-cli:
       done
       git log -1 --pretty=%B > cli-out/notes.txt
       cat cli-out/notes.txt
-    # 3) 上传（download.gorun.fun = 10.8.0.5:/data/download）
+    # 3) 上传（download.gorun.fun = ${DIST_HOST}:/data/download）
     - |
       for PLAT in macos macos-arm64 linux linux-arm64 windows windows-arm64; do
-        ssh ${DEPLOY_USER}@10.8.0.5 "mkdir -p /data/download/openos/cli/${PLAT}/${VER}"
-        scp cli-out/${PLAT}/* ${DEPLOY_USER}@10.8.0.5:/data/download/openos/cli/${PLAT}/${VER}/
-        scp cli-out/notes.txt ${DEPLOY_USER}@10.8.0.5:/data/download/openos/cli/${PLAT}/${VER}/notes.txt
+        ssh ${DEPLOY_USER}@${DIST_HOST} "mkdir -p /data/download/openos/cli/${PLAT}/${VER}"
+        scp cli-out/${PLAT}/* ${DEPLOY_USER}@${DIST_HOST}:/data/download/openos/cli/${PLAT}/${VER}/
+        scp cli-out/notes.txt ${DEPLOY_USER}@${DIST_HOST}:/data/download/openos/cli/${PLAT}/${VER}/notes.txt
       done
   rules:
     - if: '$CI_COMMIT_TAG'

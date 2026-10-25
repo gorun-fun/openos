@@ -120,6 +120,17 @@ func (m *Manager) Start() {
 	if err != nil {
 		host, port = "127.0.0.1", "7712"
 	}
+	// 回环强制（安全审计 2026-10 第二轮）：MCP 面持有「令牌↔用户成对校验」的
+	// 桌面控制权，错配非回环地址即暴露到网络——与 goder 的硬拒绝对齐；确需跨
+	// 网络访问（如分容器部署 goder-serve）显式 OPENOS_OSMCP_ALLOW_REMOTE=1 并
+	// 自行保证网络边界。0.0.0.0/[::] 同拒（监听全网比指定外网地址更宽）。
+	if ip := net.ParseIP(host); (ip != nil && !ip.IsLoopback()) || host == "" || host == "0.0.0.0" || host == "::" {
+		if os.Getenv("OPENOS_OSMCP_ALLOW_REMOTE") != "1" {
+			log.Printf("osmcp: 拒绝非回环监听地址 %q（MCP 桌面控制面仅限本机；跨网络部署显式设置 OPENOS_OSMCP_ALLOW_REMOTE=1 并保证网络边界）", host)
+			return
+		}
+		log.Printf("osmcp: 警告——MCP 监听非回环地址 %q（OPENOS_OSMCP_ALLOW_REMOTE=1），请确保该网络面完全受信", host)
+	}
 	ln, err := net.Listen("tcp", net.JoinHostPort(host, port))
 	if err != nil {
 		// 端口被占：回退随机端口并回写（wrapper 每次安装都烙当前端点）

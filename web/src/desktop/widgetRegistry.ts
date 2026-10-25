@@ -4,7 +4,6 @@
 //   update —— (patch) 合并字段并立即持久化
 import type { Component } from 'vue'
 import CalendarWidget from './widgets/CalendarWidget.vue'
-import StewardWidget from '../apps/steward/StewardWidget.vue'
 
 export interface WidgetDef {
   /** 类型标识（持久化用，保持稳定） */
@@ -26,9 +25,15 @@ export interface WidgetDef {
 
 const defs = new Map<string, WidgetDef>()
 
-/** 注册一个小组件类型（内置三件在模块加载时注册；宿主经 createOpenOS({widgets}) 注册）。 */
+/** 注册一个小组件类型（内置三件在模块加载时注册；宿主经 createOpenOS({widgets})
+ * 注册；商店应用经 SDK OpenOS.registerWidget 运行期注册）。 */
 export function registerWidget(def: WidgetDef) {
   defs.set(def.type, def)
+}
+
+/** 注销小组件类型（商店应用卸载/反注册用）。 */
+export function unregisterWidget(type: string) {
+  defs.delete(type)
 }
 
 /** 全部已注册的小组件定义（右键菜单/渲染用）。 */
@@ -48,6 +53,3 @@ registerWidget({ type: 'clock', label: '时钟', icon: '🕐', singleton: true }
 registerWidget({ type: 'note', label: '便签', icon: '📝' })
 registerWidget({ type: 'monitor', label: '系统监控', icon: '📊', singleton: true })
 registerWidget({ type: 'calendar', label: '日历', icon: '📅', singleton: true, component: CalendarWidget })
-// 代码管家小组件（自 grf-os 宿主上游化）：待确认/修复中/已修复/失败四数，
-// 点标题直达 steward App（有待确认进问题页，否则看修复记录）。
-registerWidget({ type: 'steward', label: '代码管家', icon: '🛠', singleton: true, component: StewardWidget })

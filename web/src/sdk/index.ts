@@ -29,6 +29,7 @@ import { api, fsApi, getToken, fetchWsTicket, proxyUrl, type SessionUser } from 
 import { notify } from '../stores/notifications'
 import { useCalendar, todayStr, REMIND_OPTIONS, type CalMark, type RemindOffset } from '../stores/calendar'
 import { registerDialog, unregisterDialog, openDialog, dialogRegistry, type DialogDef } from '../ui/dialogService'
+import { registerWidget, unregisterWidget } from '../desktop/widgetRegistry'
 import { registerAgentTool, unregisterAgentTool, agentTools, type AgentToolDef } from '../desktop/agentTools'
 import {
   registerCapabilities, unregisterCapabilities, listCapabilities,
@@ -199,6 +200,14 @@ export const OpenOS = {
   unregisterCapabilities,
   /** 当前全量能力清单（诊断用；与 os_caps 同源）。 */
   capabilities: listCapabilities,
+  /**
+   * 注册桌面小组件（桌面右键「添加小组件」钉选）：component 认
+   * { widget, update } props（widget 为持久化字段对象，update(patch) 回写）。
+   * 商店 bundle 应用在 setup 里注册；卸载应用请 unregisterWidget。
+   */
+  registerWidget,
+  /** 注销桌面小组件（按 type）。 */
+  unregisterWidget,
   /** 基础 UI 组件库。 */
   ui,
   /** API 客户端（自动携带登录态）。 */

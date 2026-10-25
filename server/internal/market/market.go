@@ -32,7 +32,9 @@ package market
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -78,6 +80,7 @@ type Entry struct {
 	Changelog   string          `json:"changelog,omitempty"`
 	Perms       []string        `json:"perms,omitempty"`    // 权限声明（安装确认页展示）
 	Versions    []EntryVersion  `json:"versions,omitempty"` // bundle 历史版本（新到旧，供按版本切换/回滚）
+	Sha256      string          `json:"sha256,omitempty"`   // 最新版组件文件的 sha256（hex，可选；声明即校验）
 	Width       int             `json:"width,omitempty"`
 	Height      int             `json:"height,omitempty"`
 }
@@ -88,6 +91,7 @@ type Entry struct {
 type EntryVersion struct {
 	Version string `json:"version"`
 	URL     string `json:"url"`
+	Sha256  string `json:"sha256,omitempty"` // 该版本组件文件的 sha256（hex，可选；声明即校验）
 }
 
 // State 目录条目 + 本机安装状态（GET /api/market/apps 的响应单元）。
@@ -171,6 +175,17 @@ func marketGet(rawURL string) (*http.Response, error) {
 			return nil, lastErr
 		},
 	}}
+	// 重定向逐跳复检（安全审计 2026-10）：默认 http.Client 跟随 ≤10 跳，而 trusted
+	// 只按初始 URL 判一次、DialContext 闭包又捕获了它——可信源 302 到任意主机/内网
+	// 时豁免被沿用；https→http 明文降级同样无人拦截。这里每跳重算 trusted（闭包读
+	// 同一变量）并强制 https，跨源内网跳转随之失去豁免（公网 CDN 预签名跳转不受影响）。
+	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if req.URL.Scheme != "https" && !isLoopbackHost(req.URL.Hostname()) {
+			return fmt.Errorf("market: 重定向目标非 https（%s）", req.URL.Host)
+		}
+		trusted = isSourceHost(req.URL.Hostname())
+		return nil
+	}
 	return c.Get(rawURL)
 }
 
@@ -191,9 +206,31 @@ func isLoopbackHost(h string) bool {
 }
 
 func isPublicIP(ip net.IP) bool {
-	return !(ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified())
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return false
+	}
+	// 特殊网段补充（安全审计 2026-10）：CGNAT/保留/基准网段与 IPv6 site-local
+	// 不在上述标准谓词内，但同样不是公网可达地址
+	for _, c := range reservedCIDRs {
+		if c.Contains(ip) {
+			return false
+		}
+	}
+	return true
 }
+
+// reservedCIDRs：与 webproxy/guard.go 同步维护的特殊网段清单。
+var reservedCIDRs = func() []*net.IPNet {
+	list := []string{"100.64.0.0/10", "240.0.0.0/4", "192.0.0.0/24", "198.18.0.0/15", "fec0::/10"}
+	out := make([]*net.IPNet, 0, len(list))
+	for _, s := range list {
+		if _, n, err := net.ParseCIDR(s); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}()
 
 // Catalog 返回当前生效目录：远程源合并结果（任一源成功即整体以成功源为准），
 // 全部失败沿用现行（不回退内置——现行可能已是更早的成功结果）；初始 = 内置清单。
@@ -844,7 +881,7 @@ func installEntry(db *store.DB, e Entry, roles []string, version, bundleAddr str
 		return ErrProtected
 	}
 	if e.Type == "bundle" {
-		if err := fetchBundle(e.ID, version, bundleAddr); err != nil {
+		if err := fetchBundle(e.ID, version, bundleAddr, bundleSha(e, version)); err != nil {
 			return fmt.Errorf("组件下载失败: %w", err)
 		}
 	}
@@ -939,7 +976,8 @@ func bundleURL(e Entry) string {
 // /api/market/bundle 的版本化长缓存语义一致），离线也能切换/回滚到曾装过的版本。
 // 旧版本文件不再清理（升级换代保留历史文件，作为按版本回滚的本地根基；
 // 卸载时经 RemoveBundles 全清）。
-func fetchBundle(id, version, addr string) error {
+// sha256 非空时校验下载内容（目录可选声明完整性指纹，防货架/源站静默篡改）。
+func fetchBundle(id, version, addr, wantSHA string) error {
 	if bundleDir == "" {
 		return fmt.Errorf("bundle 目录未初始化")
 	}
@@ -955,11 +993,31 @@ func fetchBundle(id, version, addr string) error {
 	if len(raw) == 0 {
 		return fmt.Errorf("组件文件为空")
 	}
+	if wantSHA != "" {
+		sum := sha256.Sum256(raw)
+		if got := hex.EncodeToString(sum[:]); got != strings.ToLower(wantSHA) {
+			return fmt.Errorf("sha256 校验失败：目录声明 %s，实际 %s", wantSHA, got)
+		}
+	}
 	if err := atomicfile.Write(dst, raw, 0o644); err != nil {
 		return err
 	}
 	log.Printf("market: bundle %s@%s 已落盘（%d 字节）", id, version, len(raw))
 	return nil
+}
+
+// bundleSha 取目录为该版本声明的 sha256（顶层 sha256 对应最新版，历史版本查
+// versions 表；目录未声明返回空串=跳过校验，存量货架零影响）。
+func bundleSha(e Entry, version string) string {
+	if version == e.Version {
+		return e.Sha256
+	}
+	for _, v := range e.Versions {
+		if v.Version == version {
+			return v.Sha256
+		}
+	}
+	return ""
 }
 
 // bundleFileExists 本地是否已有该版本的组件文件。

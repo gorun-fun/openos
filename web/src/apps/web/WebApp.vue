@@ -52,6 +52,9 @@ const desktopMode = () => !!(window as any).__OPENOS_DESKTOP__
 const isProxy = computed(() => dynCfg.value.kind === 'proxy' && (!desktopMode() || !!dynCfg.value.desktopProxy))
 const src = computed(() => {
   if (!url.value) return ''
+  // scheme 防护（安全审计 2026-10）：iframe src 拒绝可执行 scheme——url 可来自
+  // 商店目录/宿主声明/编程打开，javascript:/data: 在 allow-scripts 帧里直达脚本执行
+  if (/^\s*(javascript|data|vbscript):/i.test(url.value)) return ''
   if (dynCfg.value.kind === 'proxy' && (!desktopMode() || dynCfg.value.desktopProxy)) return `/app/${props.win.appId}/${pxCompact(url.value)}`
   return url.value
 })

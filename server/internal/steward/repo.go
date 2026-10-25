@@ -64,6 +64,12 @@ func (e *Engine) UpsertRepo(in *Repo) (Repo, error) {
 		u.User = nil
 		in.CloneURL = u.String()
 	}
+	// scheme 白名单（安全审计 2026-10 第二轮）：**带 scheme** 的地址仅允许
+	// http(s)——`ext::sh -c …` 等传输协议形态会让 git 把地址当命令执行；
+	// 无 scheme = 本地路径（测试/本机裸仓库），放行。ssh 形态 v1 本就不支持凭据注入
+	if u, err := url.Parse(in.CloneURL); err != nil || (u.Scheme != "" && u.Scheme != "http" && u.Scheme != "https") {
+		return Repo{}, errors.New("clone 地址仅支持 http(s) URL 或本地路径")
+	}
 	in.GHOwner = strings.TrimSpace(in.GHOwner)
 	in.GHRepo = strings.TrimSpace(in.GHRepo)
 	if in.Platform != PlatformGitLab && in.Platform != PlatformGitHub {

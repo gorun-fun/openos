@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -104,7 +105,9 @@ func (e *Engine) fetchGitHubIssues(ctx context.Context, owner, repo string) ([]g
 	}
 	var out []ghIssue
 	for page := 1; page <= ghIssuePagesMax; page++ {
-		u := fmt.Sprintf("%s/repos/%s/%s/issues?state=open&per_page=100&page=%d", api, owner, repo, page)
+		// owner/repo 来自管理面输入，PathEscape 防 '/'/'?' 改写请求路径与查询
+		//（对照 gitlab.go 同款处理，安全审计 2026-10 第二轮）
+		u := fmt.Sprintf("%s/repos/%s/%s/issues?state=open&per_page=100&page=%d", api, url.PathEscape(owner), url.PathEscape(repo), page)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 		if err != nil {
 			return nil, err

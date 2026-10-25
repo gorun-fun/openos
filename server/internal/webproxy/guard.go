@@ -68,9 +68,31 @@ func resolveGuarded(ctx context.Context, host, cfgHost string) ([]net.IP, error)
 }
 
 func isPublicIP(ip net.IP) bool {
-	return !(ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified())
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return false
+	}
+	// 特殊网段补充（安全审计 2026-10，与 market 包同步维护）：CGNAT/保留/基准
+	// 网段与 IPv6 site-local 不在标准谓词内，但同样不是公网可达地址
+	for _, c := range reservedCIDRs {
+		if c.Contains(ip) {
+			return false
+		}
+	}
+	return true
 }
+
+// reservedCIDRs：/px/ 仅公网语义下的补充拒拨网段（与 market 包同名清单同步维护）。
+var reservedCIDRs = func() []*net.IPNet {
+	list := []string{"100.64.0.0/10", "240.0.0.0/4", "192.0.0.0/24", "198.18.0.0/15", "fec0::/10"}
+	out := make([]*net.IPNet, 0, len(list))
+	for _, s := range list {
+		if _, n, err := net.ParseCIDR(s); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}()
 
 // isSelfHost 判断地址 host 是否 OpenOS 宿主自身：与请求 Host 头相等，或同为回环
 // 形态且端口一致（localhost ↔ 127.0.0.1 ↔ [::1]——页面读到的 origin 与请求 Host

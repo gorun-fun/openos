@@ -38,11 +38,11 @@ func newFakeGHIssues(t *testing.T) (*httptest.Server, *int32) {
 		}
 		_ = json.NewEncoder(w).Encode([]map[string]any{
 			{"number": 11, "title": "崩溃", "body": "打开就崩", "html_url": "http://x/11",
-				"labels": []map[string]any{{"name": "bug"}}, "user": map[string]any{"login": "wenjun"}},
+				"labels": []map[string]any{{"name": "bug"}}, "user": map[string]any{"login": "octocat"}},
 			{"number": 12, "title": "带 PR 的条目", "html_url": "http://x/12",
 				"pull_request": map[string]any{"url": "http://x/12/pull"}, "user": map[string]any{"login": "li"}},
 			{"number": 13, "title": "文档", "html_url": "http://x/13",
-				"labels": []map[string]any{{"name": "docs"}}, "user": map[string]any{"login": "wenjun"}},
+				"labels": []map[string]any{{"name": "docs"}}, "user": map[string]any{"login": "octocat"}},
 		})
 	})
 	mux.HandleFunc("GET /repos/oct/none/issues", func(w http.ResponseWriter, r *http.Request) {
@@ -103,7 +103,7 @@ func TestGitHubSync映射去重与PR过滤(t *testing.T) {
 		byKey[p.ExtKey] = p
 	}
 	p := byKey["gh:oct/demo#11"]
-	if p == nil || p.Title != "崩溃" || p.Body != "打开就崩" || p.Reporter != "wenjun" ||
+	if p == nil || p.Title != "崩溃" || p.Body != "打开就崩" || p.Reporter != "octocat" ||
 		p.Source != SrcGitHub || p.State != PNew || p.ExtURL != "http://x/11" {
 		t.Fatalf("#11 字段映射不对: %+v", p)
 	}

@@ -13,10 +13,12 @@ import (
 )
 
 // allowlist 是子进程允许继承的环境变量名（大小写不敏感；代理变量按原大小写
-// 双写以兼容大小写敏感的工具）。
+// 双写以兼容大小写敏感的工具）。SSL_CERT_*：内网自签 CA 部署需要子进程
+//（git/gh 等）信任企业根证书——非秘密，放行。
 var allowlist = map[string]bool{
 	"PATH": true, "HOME": true, "TERM": true, "LANG": true, "LC_ALL": true,
 	"TZ": true, "TMPDIR": true, "USER": true, "LOGNAME": true, "SHELL": true,
+	"SSL_CERT_FILE": true, "SSL_CERT_DIR": true,
 	"http_proxy": true, "https_proxy": true, "all_proxy": true,
 	"HTTP_PROXY": true, "HTTPS_PROXY": true, "ALL_PROXY": true,
 	"NO_PROXY": true, "no_proxy": true,

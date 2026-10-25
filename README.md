@@ -319,9 +319,9 @@ openos-server 进程内 osmcp 包（os_* 工具，gh 侧全名 mcp__openos__os_*
 
 **与 `sys:cmd` 的关系**：`sys:cmd` 是轻量指令通道（见下节），适合脚本与简单场景；openos MCP 插件是面向 AI 的完整控制面（带状态查询与结构化应答），两者并存互补。
 
-## 代码管家（内置应用 steward）
+## 代码管家（steward：服务端引擎 + 商店应用）
 
-git 仓库接管 → 问题队列 → AI 修复 → 直推可选发版的一站式工作面（自 grf-os 宿主上游化，默认仅 admin）：
+git 仓库接管 → 问题队列 → AI 修复 → 直推可选发版的一站式工作面（自 grf-os 宿主上游化；引擎与 `/api/steward/*` 在服务端，**App 经应用商店安装**——openos-apps 仓货架的构建型 bundle 应用，默认仅 admin）：
 
 - **问题四路入口**：GitLab / GitHub issue 周期同步（接管即同步）、外部系统上报（`POST /api/steward/report`，`X-Report-Key` 共享密钥自鉴权）、流水线失败一键转修、App 内手动录入；仓库分手动（待确认）/ 自动（直接入队）两种模式。
 - **修复执行**：单 worker 串行，prepare（clone/fetch + stash 备份用户手改）→ **Goder 会话修复**（默认执行器：代操作者创建无头会话，落其 goder「代码管家」分组，可跟进续聊；`OPENOS_STEWARD_EXECUTOR=gh` 可退本地 gh 子进程）→ 提交直推配置分支 → 可选 tag 末位+1 发版交各仓 CI。工作区在操作者 home「代码管家」目录（文件应用可见）。
@@ -1102,12 +1102,39 @@ git tag v0.0.1 && git push origin v0.0.1   # 推送 tag 即触发发布
   虚拟路径 REST 映射；REST 读写经符号链接解析校验拒绝越界），单文件 ≤8MB、单用户
   配额 100MB（另有 2 万文件数上限），用户间完全隔离；文件写删/重命名/上传/分享
   全部入审计；REST 写入受配额约束，终端 shell 写入不强制（沿用沙箱语义）
-- 终端为服务端 `sh -c` 受控执行（沙箱目录 + 超时 + 截断 + 命令入审计；2026-10 起
-  虚拟终端已移除，沙箱即统一 home），**默认关闭**（`OPENOS_REAL_SHELL=on` 开启受限
-  沙箱、`=full` 解除目录限制；独立演示部署的 compose/run.sh 已显式开启）；终端与
-  goder 子进程环境一律白名单化（`safeenv` 包），绝不继承 `OPENOS_*` 秘密
-- goder-serve 仅允许绑定回环地址（`OPENOS_GODER_ADDR` 非回环拒绝启动）；
-  osmcp 桌面控制插件的 MCP 令牌**按用户分发**（令牌↔用户成对校验）
+- 终端为服务端 `sh -c` 受控执行（**默认关闭**，`OPENOS_REAL_SHELL=on` 开启、
+  `=full` 解除目录限制；独立演示部署的 compose/run.sh 已显式开启）。**如实声明
+  （2026-10 安全审计第二轮）：`on` 模式的「受限沙箱」只限制 cd/工作目录跟踪，
+  不是文件系统沙箱——命令以服务进程权限执行，可读写服务器本地数据（其他用户
+  home、SQLite 库、附件等）；面向公网的部署应保持 off 或由运维自行加固
+  （chroot/容器卷隔离）**。护栏比较带 `/` 分隔符边界；命令入审计 + 超时 + 截断；
+  终端与 goder 子进程环境一律白名单化（`safeenv` 包，含 SSL_CERT_*），绝不继承
+  `OPENOS_*` 秘密
+- goder-serve 仅允许绑定回环地址（`OPENOS_GODER_ADDR` 非回环拒绝启动）；osmcp
+  桌面控制插件的 MCP 令牌**按用户分发**（令牌↔用户成对校验），监听地址同样强制
+  回环（`OPENOS_OSMCP_ADDR` 非回环拒绝启动，跨网络分容器部署显式
+  `OPENOS_OSMCP_ALLOW_REMOTE=1` 并自行保证网络边界）
+- 登录防爆破：每 用户名+IP 10 分钟 8 次失败锁定 15 分钟；反代/NAT 部署（compose
+  端口映射等）下全部外部用户共享同一来源 IP，可被定向锁号——`OPENOS_TRUST_PROXY=1`
+  按 X-Forwarded-For 末位分桶（单层反代语义，默认关）；用户不存在路径跑等成本
+  哑哈希抹平用户名枚举时延差；登出仅 POST（GET 副作用形态已移除）
+- **2026-10 安全审计第二轮修复清单**：REST 侧持 `users.manage` 的非 admin 操作者
+  不得经 创建/批量同步/删除 三条路径触及 admin 语义（此前 sync 路径 operatorAdmin
+  硬编码 true、create/delete 无判定，属提权漏洞）；总线客户端发布的
+  `sys:open`/`sys:notify`/`fs:changed` 仅投递给同一用户（消费语义=本人跨端，此前
+  全员投递可被冒充任意 appId 伪造系统通知/拉起/文件事件），`sys:key` 移出客户端
+  发布白名单；幻灯片应用的 HTML 解析做白名单净化（脚本/嵌入元素/事件属性/style
+  一律剥除，防跨用户存储型 XSS）；Markdown 渲染链接/图片 scheme 白名单（拒
+  `javascript:`）；steward 的 gh 兜底执行器改 `safeenv` 白名单环境（auto_approve
+  语境下 OPENOS_* 秘密不得进入 AI 子进程链）、git 凭据经 `GIT_CONFIG_*` 环境变量
+  注入一次性 credential helper（token 不进 argv/URL/日志，输出流兜底脱敏）、
+  `CloneURL` scheme 白名单（拒 `ext::sh` 命令执行形态）、`crypto/rand` 失败不再
+  退化时间熵；商店目录可选 `sha256` 字段（顶层与 versions 条目，声明即校验组件
+  完整性）、目录拉取重定向逐跳复检 https 与源豁免（防可信源 302 跨源携带内网
+  拨号豁免与明文降级）；`/api/fs/upload` 请求体硬限 `配额+8MB`（超限体不再先落盘
+  临时目录）、Write/Touch 请求体硬限 9MB、Read 64MB 上限、Raw 改流式输出；
+  `atomicfile` 暂存改同目录随机名独占创建（防固定 `.tmp` 符号链接劫持）；
+  isPublicIP 补拒 CGNAT/保留/基准网段与 IPv6 site-local（webproxy 与 market 同步）
 - 审计日志记录登录/用户/授权/AI 配置/文件操作/真实终端/设置写入等敏感操作（系统设置 → 系统信息可查）
 - AI 密钥仅存服务端，接口返回始终脱敏；goder 托管供应商指向 OpenOS 自身的 OpenAI
   兼容代理端点（`POST /api/ai/v1/chat/completions`，每用户代理密钥鉴权、模型恒以平台

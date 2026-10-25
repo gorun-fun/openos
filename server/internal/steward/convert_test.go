@@ -188,7 +188,7 @@ func TestConvertEndToEnd(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "tok-gl", "expires_in": 7200})
 	})
 	mux.HandleFunc("GET /api/v4/user", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"username": "wenjun"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"username": "octocat"})
 	})
 	mux.HandleFunc("POST /api/v4/projects", func(w http.ResponseWriter, r *http.Request) {
 		createdProject++
@@ -220,7 +220,7 @@ func TestConvertEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = eng.st.Mutate(func(s *State) error {
-		s.Connections = append(s.Connections, &Connection{ID: "c-1", Platform: PlatformGitLab, BaseURL: gl.URL, PAT: "p", Login: "wenjun", Active: true})
+		s.Connections = append(s.Connections, &Connection{ID: "c-1", Platform: PlatformGitLab, BaseURL: gl.URL, PAT: "p", Login: "octocat", Active: true})
 		return nil
 	})
 

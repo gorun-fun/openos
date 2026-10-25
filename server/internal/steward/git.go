@@ -1,5 +1,8 @@
-// git.go — 仓库工作区 git 操作。凭据安全：remote 始终存净 URL，clone/fetch/push
-// 时才把 token 拼进命令行 URL（进程环境短暂可见，不落 .git/config 与日志）。
+// git.go — 仓库工作区 git 操作。凭据安全（2026-10 安全审计第二版）：remote 与
+// 命令行恒为净 URL，clone/fetch/push 的凭据经 GIT_CONFIG_* 环境变量注入一次性
+// credential helper——token 不进 argv（多用户主机 ps 可见）、不进 URL（git 网络
+// 报错的 stderr 会把 URL 原样吐进运行日志与 API 错误回显）、不落 .git/config；
+// 输出流另做 token 兜底脱敏（redactWriter），双保险。
 package steward
 
 import (
@@ -7,7 +10,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,24 +17,45 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"openos/server/internal/safeenv"
 )
 
 // runCmd 通用子进程：stdout 返回调用方，stderr 同时写日志并进错误信息。
 func (e *Engine) runCmd(ctx context.Context, dir string, logw io.Writer, name string, args ...string) (string, error) {
+	return e.runCmdEnv(ctx, dir, logw, nil, nil, name, args...)
+}
+
+// runCmdEnv 带环境与脱敏清单的子进程：env 非空时**整体替换**子进程环境
+// （调用方经 safeenv/envGitAuth 构造）；secrets 非空时 stderr 尾部与日志流中的
+// 敏感值替换为 ***（错误串会进 Run.Error → 管理面/上报接口回显，必须过筛）。
+func (e *Engine) runCmdEnv(ctx context.Context, dir string, logw io.Writer, env, secrets []string, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
+	if env != nil {
+		cmd.Env = env
+	}
 	var out bytes.Buffer
 	var errBuf bytes.Buffer
+	lw := logwOrDiscard(logw)
+	if len(secrets) > 0 {
+		lw = &redactWriter{w: lw, secrets: secrets}
+	}
 	if logw != nil {
-		cmd.Stdout = io.MultiWriter(&out, logw)
+		cmd.Stdout = io.MultiWriter(&out, lw)
 	} else {
 		cmd.Stdout = &out
 	}
-	cmd.Stderr = io.MultiWriter(&errBuf, logwOrDiscard(logw))
+	cmd.Stderr = io.MultiWriter(&errBuf, lw)
 	if err := cmd.Run(); err != nil {
 		tail := strings.TrimSpace(errBuf.String())
+		for _, sec := range secrets {
+			if sec != "" {
+				tail = strings.ReplaceAll(tail, sec, "***")
+			}
+		}
 		if len(tail) > 400 {
 			tail = tail[len(tail)-400:]
 		}
@@ -44,6 +67,25 @@ func (e *Engine) runCmd(ctx context.Context, dir string, logw io.Writer, name st
 	return out.String(), nil
 }
 
+// redactWriter 把流经内容中的敏感值替换为 ***（覆盖日志落盘路径）。
+type redactWriter struct {
+	w       io.Writer
+	secrets []string
+}
+
+func (rw *redactWriter) Write(p []byte) (int, error) {
+	s := string(p)
+	for _, sec := range rw.secrets {
+		if sec != "" {
+			s = strings.ReplaceAll(s, sec, "***")
+		}
+	}
+	if _, err := rw.w.Write([]byte(s)); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
 func logwOrDiscard(w io.Writer) io.Writer {
 	if w == nil {
 		return io.Discard
@@ -51,22 +93,34 @@ func logwOrDiscard(w io.Writer) io.Writer {
 	return w
 }
 
-// authURL 把凭据拼进 https URL（token 作用户名或 user:token）；非 http(s) 或
-// 无 token 原样返回（ssh 形态不支持凭据注入，v1 仅 https）。
-func authURL(raw, user, token string) string {
+// shQuote 单引号包裹（内嵌单引号转义为 '\”），保证值作为 shell 单词安全。
+func shQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// credHelper 一次性 credential helper 的 shell 片段（经 GIT_CONFIG_VALUE_* 注入）。
+// 凭据语义与旧 authURL 一致：无 user 时 token 作用户名（GitHub PAT / Gitea 均接受，
+// password 位回填 token 兼容校验双凭据的平台）；有 user 时 user:token。
+func credHelper(user, token string) string {
+	u := user
+	if u == "" {
+		u = token
+	}
+	return "!f() { echo username=" + shQuote(u) + "; echo password=" + shQuote(token) + "; }; f"
+}
+
+// envGitAuth 带 git 凭据的子进程环境（safeenv 白名单 + helper 注入）。
+// token 为空返回 nil = 沿用默认环境（本地/匿名仓库不受影响）。
+func envGitAuth(user, token string) []string {
 	if token == "" {
-		return raw
+		return nil
 	}
-	u, err := url.Parse(raw)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
-		return raw
-	}
-	if user == "" {
-		u.User = url.User(token) // token 直接作用户名（GitHub PAT / Gitea 均接受）
-	} else {
-		u.User = url.UserPassword(user, token)
-	}
-	return u.String()
+	return append(safeenv.Env(),
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=credential.helper",
+		"GIT_CONFIG_VALUE_0="+credHelper(user, token),
+	)
 }
 
 // prepareWorkspace 确保工作区就绪并返回生效分支：目标工作区在操作者 home 下
@@ -90,8 +144,8 @@ func (e *Engine) prepareWorkspace(ctx context.Context, r *Repo, ws string, logw 
 			args = append(args, "--branch", branch)
 		}
 		gitUser, gitTok := e.repoAuth(ctx, r)
-		args = append(args, authURL(r.CloneURL, gitUser, gitTok), ws)
-		if _, err := e.runCmd(ctx, "", logw, e.gitBin(), args...); err != nil {
+		args = append(args, r.CloneURL, ws)
+		if _, err := e.runCmdEnv(ctx, "", logw, envGitAuth(gitUser, gitTok), []string{gitTok}, e.gitBin(), args...); err != nil {
 			return "", fmt.Errorf("clone 失败: %w", err)
 		}
 		// remote 换回净 URL（clone 命令行的带凭据 URL 会存进 .git/config）
@@ -117,8 +171,8 @@ func (e *Engine) prepareWorkspace(ctx context.Context, r *Repo, ws string, logw 
 			}
 		}
 		gitUser, gitTok := e.repoAuth(ctx, r)
-		if _, err := e.runCmd(ctx, ws, logw, e.gitBin(), "fetch", "--quiet",
-			authURL(r.CloneURL, gitUser, gitTok), branch); err != nil {
+		if _, err := e.runCmdEnv(ctx, ws, logw, envGitAuth(gitUser, gitTok), []string{gitTok}, e.gitBin(),
+			"fetch", "--quiet", r.CloneURL, branch); err != nil {
 			return "", fmt.Errorf("fetch %s 失败: %w", branch, err)
 		}
 		// checkout -B 钉回目标分支：工作区对用户可见，可能被切到别的分支——
@@ -253,8 +307,8 @@ func (e *Engine) commitAll(ctx context.Context, ws string, msg string, logw io.W
 // pushBranch 推送当前 HEAD 到远端分支（直推配置分支）。
 func (e *Engine) pushBranch(ctx context.Context, r *Repo, ws, branch string, logw io.Writer) error {
 	gitUser, gitTok := e.repoAuth(ctx, r)
-	_, err := e.runCmd(ctx, ws, logw, e.gitBin(), "push", "--quiet",
-		authURL(r.CloneURL, gitUser, gitTok), "HEAD:refs/heads/"+branch)
+	_, err := e.runCmdEnv(ctx, ws, logw, envGitAuth(gitUser, gitTok), []string{gitTok}, e.gitBin(), "push", "--quiet",
+		r.CloneURL, "HEAD:refs/heads/"+branch)
 	if err != nil {
 		return fmt.Errorf("push %s 失败: %w", branch, err)
 	}
@@ -295,8 +349,8 @@ func (e *Engine) releaseTag(ctx context.Context, r *Repo, ws, tag, msg string, l
 		return fmt.Errorf("打 tag %s: %w", tag, err)
 	}
 	gitUser, gitTok := e.repoAuth(ctx, r)
-	if _, err := e.runCmd(ctx, ws, logw, e.gitBin(), "push", "--quiet",
-		authURL(r.CloneURL, gitUser, gitTok), "refs/tags/"+tag); err != nil {
+	if _, err := e.runCmdEnv(ctx, ws, logw, envGitAuth(gitUser, gitTok), []string{gitTok}, e.gitBin(), "push", "--quiet",
+		r.CloneURL, "refs/tags/"+tag); err != nil {
 		return fmt.Errorf("推送 tag %s: %w", tag, err)
 	}
 	return nil

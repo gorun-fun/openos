@@ -20,6 +20,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"openos/server/internal/safeenv"
 )
 
 // fetchModels 拉模型清单（60s 缓存；OpenAI 兼容 /v1/models）。
@@ -136,7 +138,9 @@ func (e *Engine) ghRun(ctx context.Context, workspace, task string, logw io.Writ
 	}
 	cmd := exec.CommandContext(ctx, bin, task)
 	cmd.Dir = workspace
-	cmd.Env = append(os.Environ(), "GRF_HOME="+e.grfHome)
+	// safeenv 白名单环境（2026-10 安全审计第二版）：gh 任务文本来自外部 issue/上报，
+	// auto_approve 下提示注入可让 agent 执行 env——绝不让 OPENOS_* 秘密进入该链
+	cmd.Env = safeenv.Env("GRF_HOME=" + e.grfHome)
 	cmd.Stdout = logw
 	cmd.Stderr = logw
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
