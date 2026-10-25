@@ -56,7 +56,7 @@ func sanitizeOutRequest(out, orig *http.Request, id string, cfg *proxyConfig, tu
 	// 剥掉 hook 还原标记：它只服务于文档地址与逃逸回捕，不应到达目标站；
 	// 并把回跳参数（redirect_uri，含 hook 改写的代理路径与 JS 拼 host 的宿主
 	// 绝对地址两种形态）还原为目标站注册的原始值——白名单/风控校验依赖原始值
-	out.URL.RawQuery = restorePxParam(id, stripPxMark(out.URL.RawQuery), cfg, orig.Host)
+	out.URL.RawQuery = restorePxParam(id, stripPxMark(out.URL.RawQuery), cfg, orig.Host, out.Header.Get("Referer"))
 	// domain 参数还原：站点 JS 以 location.origin 拼出自身域作查询参数（美团
 	// ebooking 权限接口 auth/resource/menu/url/list 的 domain 参数），代理下
 	// origin 已是宿主源——目标站按域名匹配菜单/权限配置，宿主域查不到配置，
@@ -136,7 +136,16 @@ func rewriteReferer(ref, id string) string {
 //
 // 无命中时 query 原样返回。注意预检不能按明文前缀匹配 query——参数值经
 // encodeURIComponent 编码后是 %2Fapp%2F<id>%2F 形态，判断须在解码后进行。
-func restorePxParam(id, q string, cfg *proxyConfig, selfHost string) string {
+//
+// 无前缀的「宿主绝对地址」continue 还原为【发起页（Referer）的目标域】而非应用
+// 配置域：回跳是登录发起页以 location.origin 拼接的（代理还原模式下 origin 是
+// OpenOS 宿主），发起页的域才是回跳语义域——挂配置域只对「单域站点/入口即发起
+// 页」成立，跨子域登录链（预付对账：tpt.meituan.com 对账页发起登录，continue
+// 回跳 /msc-biz/eb/index.html 只在 tpt 域存在）会把回跳挂到配置域 me.meituan.com
+// → 404、登录链断、对账/发票接口持续 403「无访问权限」（线上实证 2026-10-26）。
+// Referer（调用点上已还原为目标站绝对地址）不可解析时回落配置域（原语义）。
+// redirect_uri/redirectUri 是 IdP 白名单注册回跳，语义域是应用配置域，维持不动。
+func restorePxParam(id, q string, cfg *proxyConfig, selfHost, referer string) string {
 	if q == "" || (!strings.Contains(q, "redirect") && !strings.Contains(q, "continue")) {
 		return q
 	}
@@ -145,6 +154,7 @@ func restorePxParam(id, q string, cfg *proxyConfig, selfHost string) string {
 		return q
 	}
 	cfgURL, cfgErr := url.Parse(cfg.URL)
+	refURL, refErr := url.Parse(referer)
 	changed := false
 	for _, k := range []string{"redirect_uri", "redirectUri", "continue", "continueUrl"} {
 		v := vals.Get(k)
@@ -166,7 +176,13 @@ func restorePxParam(id, q string, cfg *proxyConfig, selfHost string) string {
 				changed = true
 				continue
 			}
-			u.Scheme, u.Host = cfgURL.Scheme, cfgURL.Host
+			// continue 类回跳优先挂发起页（Referer）域，其余挂配置域（见函数头）
+			if (k == "continue" || k == "continueUrl") && refErr == nil &&
+				(refURL.Scheme == "http" || refURL.Scheme == "https") && refURL.Host != "" {
+				u.Scheme, u.Host = refURL.Scheme, refURL.Host
+			} else {
+				u.Scheme, u.Host = cfgURL.Scheme, cfgURL.Host
+			}
 			vals.Set(k, u.String())
 			changed = true
 		}

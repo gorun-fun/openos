@@ -292,27 +292,27 @@ func TestRestorePxParam(t *testing.T) {
 	wx := &proxyConfig{Kind: "proxy", URL: "https://wx.qq.com/"}
 	// 命中：本应用前缀的值还原为绝对地址（query 重编码属预期）
 	in := "redirect_uri=/app/x/https/play.example/api/auth/sso/callback&state=abc"
-	got := restorePxParam("x", in, wx, "example.com")
+	got := restorePxParam("x", in, wx, "example.com", "")
 	if v, err := url.ParseQuery(got); err != nil || v.Get("redirect_uri") != "https://play.example/api/auth/sso/callback" || v.Get("state") != "abc" {
 		t.Errorf("restorePxParam = %q", got)
 	}
 	// 驼峰变体同样还原
-	got = restorePxParam("x", "redirectUri=/app/x/https/play.example/cb&x=1", wx, "example.com")
+	got = restorePxParam("x", "redirectUri=/app/x/https/play.example/cb&x=1", wx, "example.com", "")
 	if v, err := url.ParseQuery(got); err != nil || v.Get("redirectUri") != "https://play.example/cb" || v.Get("x") != "1" {
 		t.Errorf("restorePxParam(redirectUri) = %q", got)
 	}
 	// 编码形态（页面 JS encodeURIComponent 后的值）：解码后命中前缀同样还原
-	got = restorePxParam("x", "redirectUri=" + url.QueryEscape("/app/x/https/play.example/cb") + "&state=abc", wx, "example.com")
+	got = restorePxParam("x", "redirectUri=" + url.QueryEscape("/app/x/https/play.example/cb") + "&state=abc", wx, "example.com", "")
 	if v, err := url.ParseQuery(got); err != nil || v.Get("redirectUri") != "https://play.example/cb" || v.Get("state") != "abc" {
 		t.Errorf("restorePxParam(编码形态) = %q", got)
 	}
 	// 宿主自身绝对地址（微信 jslogin 场景：页面 JS 读 location.origin 拼的回跳，
 	// http/https 与端口形态等价判定）→ 还原为配置目标域，路径查询保留
-	got = restorePxParam("x", "appid=wx782&fun=new&redirect_uri=http%3A%2F%2Fexample.com%2Fcgi-bin%2Fwebwxnewloginpage", wx, "example.com")
+	got = restorePxParam("x", "appid=wx782&fun=new&redirect_uri=http%3A%2F%2Fexample.com%2Fcgi-bin%2Fwebwxnewloginpage", wx, "example.com", "")
 	if v, err := url.ParseQuery(got); err != nil || v.Get("redirect_uri") != "https://wx.qq.com/cgi-bin/webwxnewloginpage" || v.Get("appid") != "wx782" {
 		t.Errorf("宿主地址还原不符：%q", got)
 	}
-	got = restorePxParam("x", "appid=wx782&fun=new&redirect_uri=https%3A%2F%2Fexample.com%3A8081%2Fcgi-bin%2Fwebwxnewloginpage", wx, "example.com:8081")
+	got = restorePxParam("x", "appid=wx782&fun=new&redirect_uri=https%3A%2F%2Fexample.com%3A8081%2Fcgi-bin%2Fwebwxnewloginpage", wx, "example.com:8081", "")
 	if v, err := url.ParseQuery(got); err != nil || v.Get("redirect_uri") != "https://wx.qq.com/cgi-bin/webwxnewloginpage" {
 		t.Errorf("宿主地址（带端口）还原不符：%q", got)
 	}
@@ -323,12 +323,12 @@ func TestRestorePxParam(t *testing.T) {
 		"client_id=1&state=abc",
 		"",
 	} {
-		if got := restorePxParam("x", q, wx, "example.com"); got != q {
+		if got := restorePxParam("x", q, wx, "example.com", ""); got != q {
 			t.Errorf("restorePxParam(%q) 应原样，得到 %q", q, got)
 		}
 	}
 	// 非法代理前缀形态：解析失败保持原值
-	if got := restorePxParam("x", "redirect_uri=/app/x/ftp/x", wx, "example.com"); got != "redirect_uri=/app/x/ftp/x" {
+	if got := restorePxParam("x", "redirect_uri=/app/x/ftp/x", wx, "example.com", ""); got != "redirect_uri=/app/x/ftp/x" {
 		t.Errorf("非法形态应保持原值，得到 %q", got)
 	}
 	// continue/continueUrl（美团 ebooking：epassport oauth-login 的 continue 指向
@@ -336,17 +336,34 @@ func TestRestorePxParam(t *testing.T) {
 	// 宿主地址、302 被挂到表单所在域，跨主机 callback 落错误主机 404；代理路径
 	// 形态（hook pxQuery 改写后）还原为原始绝对地址，嵌套 query 保留
 	mt := &proxyConfig{Kind: "proxy", URL: "https://me.meituan.com/ebooking/merchant/ebIframe"}
-	got = restorePxParam("m", "service=eb&continue=http%3A%2F%2Flocalhost%3A8081%2Fapi%2Fgw%2Fv1%2Fbase%2Flogin%2Fcallback%3FclientId%3D1", mt, "localhost:8081")
+	got = restorePxParam("m", "service=eb&continue=http%3A%2F%2Flocalhost%3A8081%2Fapi%2Fgw%2Fv1%2Fbase%2Flogin%2Fcallback%3FclientId%3D1", mt, "localhost:8081", "")
 	if v, err := url.ParseQuery(got); err != nil || v.Get("continue") != "https://me.meituan.com/api/gw/v1/base/login/callback?clientId=1" || v.Get("service") != "eb" {
 		t.Errorf("continue 宿主地址还原不符：%q", got)
 	}
-	got = restorePxParam("m", "continue=" + url.QueryEscape("/app/m/https/me.meituan.com/api/gw/v1/base/login/callback?clientId=1&continueUrl=https%3A%2F%2Fme.meituan.com%2Fsettoken%2Findex.html"), mt, "localhost:8081")
+	got = restorePxParam("m", "continue=" + url.QueryEscape("/app/m/https/me.meituan.com/api/gw/v1/base/login/callback?clientId=1&continueUrl=https%3A%2F%2Fme.meituan.com%2Fsettoken%2Findex.html"), mt, "localhost:8081", "")
 	if v, err := url.ParseQuery(got); err != nil || v.Get("continue") != "https://me.meituan.com/api/gw/v1/base/login/callback?clientId=1&continueUrl=https%3A%2F%2Fme.meituan.com%2Fsettoken%2Findex.html" {
 		t.Errorf("continue 代理路径还原不符：%q", got)
 	}
 	// continue 站内相对值（其他站点把 continue 用作普通站内跳转）不受扰动
-	if got := restorePxParam("m", "continue=/home/next&x=1", mt, "localhost:8081"); got != "continue=/home/next&x=1" {
+	if got := restorePxParam("m", "continue=/home/next&x=1", mt, "localhost:8081", ""); got != "continue=/home/next&x=1" {
 		t.Errorf("continue 相对值应原样，得到 %q", got)
+	}
+	// 预付对账场景：跨子域登录链（tpt 对账页发起）的 continue 宿主地址形态——
+	// 发起页（Referer，还原后目标站绝对地址）的域才是回跳语义域，挂配置域
+	// me.meituan.com 会 404（/msc-biz/eb/index.html 只在 tpt 域存在）
+	got = restorePxParam("m", "continue=http%3A%2F%2Flocalhost%3A8081%2Fmsc-biz%2Feb%2Findex.html", mt, "localhost:8081", "https://tpt.meituan.com/msc/biz/balance-account/hotel/statement-party")
+	if v, err := url.ParseQuery(got); err != nil || v.Get("continue") != "https://tpt.meituan.com/msc-biz/eb/index.html" {
+		t.Errorf("continue 应挂 Referer 域（tpt）：%q", got)
+	}
+	// Referer 不可解析（空/非 http(s)）回落配置域（原语义）
+	got = restorePxParam("m", "continue=http%3A%2F%2Flocalhost%3A8081%2Fmsc-biz%2Feb%2Findex.html", mt, "localhost:8081", "")
+	if v, err := url.ParseQuery(got); err != nil || v.Get("continue") != "https://me.meituan.com/msc-biz/eb/index.html" {
+		t.Errorf("无 Referer 应回落配置域：%q", got)
+	}
+	// redirect_uri 维持配置域语义（IdP 白名单注册回跳），不受 Referer 影响
+	got = restorePxParam("m", "redirect_uri=http%3A%2F%2Flocalhost%3A8081%2Fcgi-bin%2Fcb", mt, "localhost:8081", "https://tpt.meituan.com/msc/biz/x")
+	if v, err := url.ParseQuery(got); err != nil || v.Get("redirect_uri") != "https://me.meituan.com/cgi-bin/cb" {
+		t.Errorf("redirect_uri 应维持配置域：%q", got)
 	}
 }
 
