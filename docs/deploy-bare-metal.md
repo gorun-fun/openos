@@ -16,7 +16,7 @@
 ## 构建
 
 ```bash
-git clone <本仓库地址> && cd openos
+git clone https://github.com/gorun-fun/openos.git && cd openos
 
 # 生产构建：前端 dist + 服务端单二进制
 make build        # → server/openos-server + web/dist
