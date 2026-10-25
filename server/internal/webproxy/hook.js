@@ -298,13 +298,29 @@
   // 放行器定义于本帧 realm，经父窗 hook 预埋的 __osNativePM 原生引用投递，
   // source=本帧（真实发送者）✓。①绝对源 targetOrigin 同时放行为 '*'；②父窗
   // 自发（targetOrigin 非绝对源）转交父窗原目标侧包装器（父 realm 执行，
-  // source=父窗自身 ✓）。幂等标记防多子帧叠加（后装子帧的发送经先装者的
-  // realm，source 失真但不劣于旧；美团拓扑为单子链，先装者即唯一活跃子帧）。
+  // source=父窗自身 ✓）。
+  //
+  // 幂等 + 死 realm 自愈：放行器闭包属于【装它的子帧】的 realm——内容 iframe
+  // 槽位复用换页（美团门户点菜单/「上次访问」恢复：master 在同一 iframe 上换
+  // src，Vue 换元素也同一槽位语义）后旧帧文档销毁，放行器仍霸占着
+  // parent.postMessage 却已属死 realm：后续子帧经它投递的消息
+  // MessageEvent.source=NULL（发送方 window 已销毁），master 侧 @post-me 门全拒、
+  // Auto reply（t.source.postMessage）直接 TypeError——握手超时、single-spa 子
+  // 应用死亡、降级跳 me-spu、内容区 404（美团订单管理线上实证）。因此幂等标记
+  // 必须伴随 owner 存活检测：记录装者文档（__osPxRelaxDoc），文档销毁后
+  // defaultView 为 null（DOM 标准判据，同帧导航同样命中——旧文档被新文档替换），
+  // 新子帧装时发现已死即重装接管。多活子帧叠装仍由标记挡（同父窗并发子帧场景
+  // 后装者跳过，语义与旧版一致）。
   try {
     if (window.parent !== window) {
       var pxpw = window.parent;
-      if (!pxpw.__osPxParentRelax) {
+      var pxRelaxDead = true;
+      try {
+        if (pxpw.__osPxParentRelax && pxpw.__osPxRelaxDoc && pxpw.__osPxRelaxDoc.defaultView) pxRelaxDead = false;
+      } catch (e) { }
+      if (!pxpw.__osPxParentRelax || pxRelaxDead) {
         pxpw.__osPxParentRelax = true;
+        pxpw.__osPxRelaxDoc = window.document;
         var pxpnat = pxpw.__osNativePM || pxpw.postMessage.bind(pxpw);
         pxpw.postMessage = function (msg, t, tr) {
           var to2 = t;
