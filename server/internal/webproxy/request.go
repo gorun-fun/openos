@@ -153,7 +153,16 @@ func restorePxParam(id, q string, cfg *proxyConfig, selfHost, referer string) st
 	if err != nil {
 		return q
 	}
-	cfgURL, cfgErr := url.Parse(cfg.URL)
+	// cfgURL 配置目标域（宿主地址形态还原的落点）。/px/ 通用转发 cfg 为空：
+	// 无配置域可挂，该形态还原整体跳过——代理前缀形态因 id 空恒不命中，query
+	// 原样透传。（曾在此对 cfg 空指针解引用 panic：query 含 redirect/continue
+	// 子串即在 url.Parse(cfg.URL) 崩溃，/px/ 通道整体 500，回归见 TestRestorePxParamNilCfg）
+	var cfgURL *url.URL
+	if cfg != nil {
+		if u, perr := url.Parse(cfg.URL); perr == nil {
+			cfgURL = u
+		}
+	}
 	refURL, refErr := url.Parse(referer)
 	changed := false
 	for _, k := range []string{"redirect_uri", "redirectUri", "continue", "continueUrl"} {
@@ -168,7 +177,7 @@ func restorePxParam(id, q string, cfg *proxyConfig, selfHost, referer string) st
 			}
 			continue
 		}
-		if u, err := url.Parse(v); err == nil && u.Host != "" && cfgErr == nil && isSelfHost(u.Host, selfHost) {
+		if u, err := url.Parse(v); err == nil && u.Host != "" && cfgURL != nil && isSelfHost(u.Host, selfHost) {
 			if tu, ok := selfRefTarget(u, id); ok {
 				// hook pxQuery 产物：宿主绝对地址 + path 携带 /app/<id>/ 前缀——
 				// 按前缀还原出完整目标（比 cfg 域更准，跨主机引用也正确）

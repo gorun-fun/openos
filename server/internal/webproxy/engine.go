@@ -33,22 +33,36 @@ type forwardOpts struct {
 
 // serveForward 统一转发主链路：清洗请求 → 拨号上游 → 头改写 →（模式开启时）
 // 文本响应读入重写 → 回写；非文本与不可重写响应流式透传。
-// 幂等 GET 的传输层失败（拨号错误/读体中途连接重置）在写响应头前单次透明重试
-// （见 serveForwardOnce 的返回值语义）：长连接池空闲超时后首个请求常撞死连接
-// （H2 GOAWAY 未及感知/RST），上游 ~200ms 返回连接错误 → 502，页面侧无重试即
-// 整轮启动失败（线上实证：每轮子页启动首请求 menus/chunk-vendors 恒 502、同一
-// URL 立即重取恒 200——新连接即好）。已开始写响应（流式透传段）不可重试。
+// 幂等 GET 的传输层失败（拨号错误/读体中途连接重置）在写响应头前带退避重试，
+// 至多 3 次尝试（见 serveForwardOnce 的返回值语义）：长连接池空闲超时后首个请求
+// 常撞死连接（H2 GOAWAY 未及感知/RST），上游 ~200ms 返回连接错误 → 502，页面侧
+// 无重试即整轮启动失败（线上实证：每轮子页启动首请求 menus/chunk-vendors 恒 502、
+// 同一 URL 立即重取恒 200——新连接即好）。已开始写响应（流式透传段）不可重试。
 func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request, tu *url.URL, opts forwardOpts) {
+	// 外层中间件（安全头等）在本函数之前已写入 w.Header()：重试清头须回填，
+	// 否则重试响应丢掉预置头、与首试响应不一致（回归见 TestForwardRetryKeepsPresetHeaders）
+	preset := w.Header().Clone()
 	for try := 0; ; try++ {
-		if !p.serveForwardOnce(w, r, tu, opts) && try < 2 {
+		if !p.serveForwardOnce(w, r, tu, opts) {
+			if try >= 2 {
+				// 重试耗尽仍是可重试失败（传输层错误）：可重试分支本身不写响应，
+				// 静默返回会是空 200（比 502 更糟），此处必须以 502 收尾
+				http.Error(w, "代理请求失败：重试耗尽（上游传输错误）", http.StatusBadGateway)
+				return
+			}
 			// 重试前清空首次尝试积累的未发送响应头（copyRespHeaders 全 Add 语义，
-			// 不清会双份 Set-Cookie 等）。带退避：首请求集中失败实证为冷 DNS 并发
-			// 解析雪崩（容器初起/空闲后首轮突发，瞬时再试仍在冷窗内），150/250ms
-			// 让解析落地。
+			// 不清会双份 Set-Cookie 等），再回填中间件预置头。带退避：首请求集中
+			// 失败实证为冷 DNS 并发解析雪崩（容器初起/空闲后首轮突发，瞬时再试
+			// 仍在冷窗内），100/200ms 让解析落地。
 			time.Sleep(time.Duration(100+try*100) * time.Millisecond)
 			h := w.Header()
 			for k := range h {
 				delete(h, k)
+			}
+			for k, vs := range preset {
+				for _, v := range vs {
+					h.Add(k, v)
+				}
 			}
 			continue
 		}
@@ -97,8 +111,12 @@ func (p *Proxy) serveForwardOnce(w http.ResponseWriter, r *http.Request, tu *url
 
 	resp, err := p.client.Do(outReq)
 	if err != nil {
-		// 上下文已取消（页面导航走了）不重试；非幂等 GET 不重试
-		if r.Method == http.MethodGet && r.Context().Err() == nil && outReq.Body == nil {
+		// 上下文已取消（页面导航走了）不重试；带体的请求不重试（体不可重读）。
+		// 无体判定必须用 ContentLength==0：net/http 服务端收到的请求 Body 恒非
+		// nil（无体 GET 也是 http.noBody/eofReader），== nil 只对手工构造的请求
+		// 成立——原判定在真实流量上恒假，本重试长期是死代码（回归见
+		// TestForwardRetryKeepsPresetHeaders）
+		if r.Method == http.MethodGet && r.Context().Err() == nil && outReq.ContentLength == 0 {
 			return false
 		}
 		http.Error(w, "代理请求失败："+err.Error(), http.StatusBadGateway)
@@ -141,8 +159,9 @@ func (p *Proxy) serveForwardOnce(w http.ResponseWriter, r *http.Request, tu *url
 	enc := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
 	body, rewritable, err := readRewritable(resp, enc)
 	if err != nil {
-		// 读体中途连接重置：GET 未写出任何字节，可整段重试一次
-		if r.Method == http.MethodGet && r.Context().Err() == nil {
+		// 读体中途连接重置：GET 未写出任何字节，可整段重试。同样要求无体请求
+		//（见上方拨号错误分支）：首试已把请求体发完，重放共享同一已耗尽的 reader
+		if r.Method == http.MethodGet && r.Context().Err() == nil && outReq.ContentLength == 0 {
 			return false
 		}
 		http.Error(w, "读取上游响应失败", http.StatusBadGateway)
@@ -173,6 +192,7 @@ func (p *Proxy) serveForwardOnce(w http.ResponseWriter, r *http.Request, tu *url
 	wh.Del("Expires")
 	wh.Set("Cache-Control", "no-cache")
 	wh.Set("Content-Length", strconv.Itoa(len(body)))
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(streamWriteTimeout))
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)
 	return true
@@ -216,6 +236,7 @@ func readRewritable(resp *http.Response, enc string) (body []byte, ok bool, err 
 			return body, false, nil // 损坏的 gzip 流：原文透传，改写只会破坏
 		}
 		ub, uerr := io.ReadAll(io.LimitReader(zr, maxRewriteBody+1))
+		_ = zr.Close() // reader 释放（基于 bytes.Reader 无系统资源，纯习惯性收尾）
 		if uerr != nil || len(ub) > maxRewriteBody {
 			return body, false, nil // 解压超限（炸弹/超大文档）：按压缩态透传
 		}
@@ -226,6 +247,11 @@ func readRewritable(resp *http.Response, enc string) (body []byte, ok bool, err 
 	}
 }
 
+// streamWriteTimeout 单次写响应的超时窗口：http.Server 未配全局 WriteTimeout
+//（流式转发不能配全局超时），死客户端（TCP 半开/恶意慢读）只能靠单写窗口兜底
+//——一个窗口内 32KB 都发不出去即放弃，回收转发 goroutine 与上游连接。
+const streamWriteTimeout = 2 * time.Minute
+
 // streamCopy 流式透传并逐块冲刷（SSE/大文件/视频等需要即时下发）。
 func streamCopy(w http.ResponseWriter, src io.Reader) {
 	rc := http.NewResponseController(w)
@@ -233,6 +259,7 @@ func streamCopy(w http.ResponseWriter, src io.Reader) {
 	for {
 		n, rerr := src.Read(buf)
 		if n > 0 {
+			_ = rc.SetWriteDeadline(time.Now().Add(streamWriteTimeout))
 			if _, werr := w.Write(buf[:n]); werr != nil {
 				return
 			}

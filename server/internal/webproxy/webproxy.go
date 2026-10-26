@@ -83,6 +83,16 @@ func New(db *store.DB) *Proxy {
 	}}
 }
 
+// Close 停机兜底：Cookie 登记簿（清除缓存端点配套）防抖窗口内的登记立即落库，
+// 防优雅停机丢最后一批（main 停机序列调用；OPENOS_PROXY=off 时 px 为 nil，
+// 空接收者安全）。
+func (p *Proxy) Close() {
+	if p == nil {
+		return
+	}
+	p.ck.Close()
+}
+
 // Handler 处理 /app/{id}/... 全部子路径（须在 authSvc.Middleware 内挂载，
 // 同源 iframe 的请求经 openos_token Cookie 自动携带登录态）。
 func (p *Proxy) Handler(w http.ResponseWriter, r *http.Request) {

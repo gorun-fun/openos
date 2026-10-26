@@ -1256,8 +1256,9 @@ func main() {
 	// 同源 iframe 的子资源请求经 openos_token Cookie 自动携带登录态，
 	// 包内再按 role_apps 校验该用户对此应用的访问权。
 	root := http.Handler(mux)
+	var px *webproxy.Proxy
 	if proxyEnabled {
-		px := webproxy.New(db)
+		px = webproxy.New(db)
 		mux.Handle("/app/{id}/", authSvc.Middleware(http.HandlerFunc(px.Handler)))
 		// /px/ 通用转发：网络请求类应用（http-client / 声明式应用 dataSource 等）
 		// 的统一 CORS 通道，无应用绑定、须登录、仅公网目标（SSRF 防线无配置放行）
@@ -1290,6 +1291,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	hub.Close()
+	px.Close() // 统一代理：登记簿防抖窗口内的数据落盘（未启用时 nil 安全）
 	goderMgr.Stop()
 	osmcpMgr.Stop()
 	stewardCancel() // 代码管家 worker：ctx 取消后当前步中断标记可重试

@@ -5,12 +5,17 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
 
 	"openos/server/internal/store"
 )
@@ -1245,4 +1250,130 @@ func TestCookieReg(t *testing.T) {
 	if strings.Contains(join, "@/\n") || strings.HasSuffix(join, "@/") { // 根路径宿主 Cookie 不入册
 		t.Errorf("不应登记根路径：%s", join)
 	}
+}
+
+// TestRestorePxParamNilCfg /px/ 通用转发形态（cfg 为空）的回归：restorePxParam
+// 曾对 cfg 空指针解引用——query 含 redirect/continue 子串即在 url.Parse(cfg.URL)
+// panic，先于拨号发生在请求清洗段，/px/ 通道整体 500。现应安静透传：配置域落点
+// 不存在（宿主地址形态还原跳过），代理前缀形态因 id 空恒不命中。
+func TestRestorePxParamNilCfg(t *testing.T) {
+	for _, q := range []string{
+		"redirect_uri=http%3A%2F%2Fexample.com%2Fcb&state=1",
+		"continue=http%3A%2F%2Fexample.com%3A8081%2Fnext",
+		"redirectUri=" + url.QueryEscape("/app/x/https/play.example/cb"),
+		"continueUrl=/home/next&x=1",
+	} {
+		if got := restorePxParam("", q, nil, "example.com", ""); got != q {
+			t.Errorf("restorePxParam(nil cfg, %q) 应原样透传，得到 %q", q, got)
+		}
+	}
+}
+
+// failOnceTransport 首次请求返回传输错误、后续放行（模拟空闲池死连接：
+// 拨号错误/读体重置，见 serveForward 的重试语义）。
+type failOnceTransport struct {
+	inner http.RoundTripper
+	n     int32
+}
+
+func (f *failOnceTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if atomic.AddInt32(&f.n, 1) == 1 {
+		return nil, errors.New("simulated dead connection")
+	}
+	return f.inner.RoundTrip(r)
+}
+
+// TestForwardRetryKeepsPresetHeaders 重试路径的响应头一致性回归：重试前清空
+// w.Header() 旨在丢弃首试积累的头（copyRespHeaders 全 Add 语义，不清会双份
+// Set-Cookie），但曾把外层中间件预置的安全头一并清掉——首试与重试的响应头
+// 不一致。快照回填后：预置头保留、上游头不重复。
+func TestForwardRetryKeepsPresetHeaders(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Set-Cookie", "sid=9; Path=/")
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+	p := New(nil)
+	p.client.Transport = &failOnceTransport{inner: p.client.Transport}
+	r := httptest.NewRequest("GET", "/px/x", nil)
+	w := httptest.NewRecorder()
+	// 模拟 withSecurityHeaders 在 handler 之前写入的预置头
+	w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+	w.Header().Set("Permissions-Policy", "camera=()")
+	pcfg := &proxyConfig{Kind: "proxy", URL: upstream.URL}
+	p.serveForward(w, r, mustURL(t, upstream.URL), forwardOpts{prefix: "/px/", cfg: pcfg})
+	if w.Code != 200 || w.Body.String() != "ok" {
+		t.Fatalf("重试后应成功：code=%d body=%q", w.Code, w.Body.String())
+	}
+	if w.Header().Get("X-Frame-Options") != "SAMEORIGIN" || w.Header().Get("Permissions-Policy") != "camera=()" {
+		t.Errorf("中间件预置头应保留：%v", w.Header())
+	}
+	if n := len(w.Header().Values("Set-Cookie")); n != 1 {
+		t.Errorf("重试后 Set-Cookie 应恰好一份（防首试残留），得到 %d 份：%v", n, w.Header().Values("Set-Cookie"))
+	}
+}
+
+// TestServeWSEcho WS 泵转基本语义：拨号/升级双向打通、消息回显、连接关闭后
+// 泵转与保活 goroutine 全部退出（保活 ping 周期 30s 不在测试窗口内触发，
+// 读超时/读上限为防御配置）。
+func TestServeWSEcho(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		for {
+			mt, msg, err := c.ReadMessage()
+			if err != nil {
+				return
+			}
+			if err := c.WriteMessage(mt, msg); err != nil {
+				return
+			}
+		}
+	}))
+	defer upstream.Close()
+	p := New(nil)
+	ps := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p.serveWS(w, r, mustURL(t, "ws"+strings.TrimPrefix(upstream.URL, "http")+"/echo"),
+			&proxyConfig{Kind: "proxy", URL: upstream.URL})
+	}))
+	defer ps.Close()
+	c, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(ps.URL, "http")+"/x", nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close()
+	for i := 0; i < 3; i++ {
+		msg := fmt.Sprintf("ping-%d", i)
+		if err := c.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		mt, got, err := c.ReadMessage()
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if mt != websocket.TextMessage || string(got) != msg {
+			t.Fatalf("echo = %q（mt=%d）", got, mt)
+		}
+	}
+	c.Close() // 触发两条泵转退出（上游读到错误）——serveWS 返回即无 goroutine 泄漏
+}
+
+// TestCookieRegClose 停机落盘兜底：挂起的防抖 timer 停止、幂等可重入。
+func TestCookieRegClose(t *testing.T) {
+	r := newCookieReg(nil) // db 为 nil：登记簿仅内存态
+	r.record("a", "x\t/app/a/")
+	if r.timer == nil {
+		t.Fatalf("record 后应有防抖 timer")
+	}
+	r.Close()
+	if r.timer != nil {
+		t.Errorf("Close 应清掉防抖 timer")
+	}
+	r.Close() // 无挂起 timer 时幂等
+	var nilReg *cookieReg
+	nilReg.Close() // 空接收者安全
 }

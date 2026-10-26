@@ -88,6 +88,22 @@ func (r *cookieReg) record(app, entry string) {
 	}
 }
 
+// Close 停机兜底：防抖窗口（≤3s）内尚未落库的登记立即落盘（优雅停机时经
+// Proxy.Close 调用）。停机路径上不再有并发写入；正常运行期误调也无害——
+// 快照落库幂等，后续登记照常走防抖。
+func (r *cookieReg) Close() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	if r.timer != nil {
+		r.timer.Stop()
+		r.timer = nil
+	}
+	r.mu.Unlock()
+	r.flush()
+}
+
 // flush 快照落库（防抖到期调用）。
 func (r *cookieReg) flush() {
 	r.mu.Lock()
