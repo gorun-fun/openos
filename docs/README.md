@@ -1,5 +1,7 @@
 # OpenOS 文档
 
+**简体中文** | [English](README.en.md)
+
 | 文档 | 内容 |
 |---|---|
 | [Docker 部署](deploy-docker.md) | 镜像构建上下文准备、compose 启动、升级备份、HTTPS 反代 |
@@ -14,3 +16,5 @@
 | [常见问题](faq.md) | 登录 / 部署 / 功能 / 数据的常见排障 |
 
 快速入口：[README](../README.md) · 演示：<https://openos.gorun.fun>
+
+> 每份文档均有英文版：同目录同名 `.en.md`（[英文索引](README.en.md)）；修改文档时请同步中英两版。

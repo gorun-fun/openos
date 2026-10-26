@@ -1,5 +1,7 @@
 # OpenOS
 
+**简体中文** | [English](README.en.md)
+
 仿 macOS 的**网页桌面操作系统**：单二进制 Go 后端 + Vue 3 前端，以 WebSocket 事件总线为核心通信，内置 goder **AI 编程 IDE**——AI 不只写代码，还能操控整个桌面。面向产品级使用：多用户权限、安全加固、审计日志与容器化部署。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) ![Go](https://img.shields.io/badge/Go-1.26-00ADD8) ![Vue](https://img.shields.io/badge/Vue-3.5-42b883) ![SQLite](https://img.shields.io/badge/SQLite-WAL-003B57) ![Docker](https://img.shields.io/badge/Docker-ready-2496ED) [![Demo](https://img.shields.io/badge/%E5%9C%A8%E7%BA%BF%E6%BC%94%E7%A4%BA-openos.gorun.fun-8A2BE2)](https://openos.gorun.fun/)
@@ -439,7 +441,7 @@ cd web && npm run typecheck  # 前端类型检查（vue-tsc）
 ```
 
 - 深度架构文档与开发约定见 [AGENTS.md](AGENTS.md)（通信协议、安全不变量、各模块边界）
-- 代码注释与文档使用中文
+- 代码注释与文档使用中文；`README.md` 与 `docs/` 文档为中英双语（英文版同名 `.en.md`），修改时请同步两版
 - 版本规则：`v0.0.x` 起每次发布只递增末位；打 tag 推送触发 CI
 
 ## 开源许可

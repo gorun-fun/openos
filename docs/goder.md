@@ -1,5 +1,7 @@
 # goder：AI 编程 IDE 与桌面控制
 
+**简体中文** | [English](goder.en.md)
+
 OpenOS 按 [goder](https://git.gorun.fun/share/goder.git) 官方嵌入约定（`goder/docs/embedding.md`）把 goder 作为内置应用：完整 AI 编程工作台（项目 / 会话 / 聊天 / 代码审查 / 事件台），叠加两条 OpenOS 特有能力——**桌面控制 MCP 插件**与**能力暴露层（CAP）**。
 
 ## 架构与隔离

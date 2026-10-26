@@ -1,5 +1,7 @@
 # 桌面客户端（openos-desktop）
 
+**简体中文** | [English](desktop-client.en.md)
+
 反代（统一代理）之外的另一条网页应用接入路线：**本机 Chrome 以 app 模式直开 OpenOS，网页应用 iframe 直连真实站点**。适合服务端反代难以覆盖的场景（目标站 SSO / 风控 / Cookie 轮换复杂，如美团 ebooking），代价是依赖客户端环境（需本机 Chrome）。
 
 ## 构建与运行

@@ -1,5 +1,7 @@
 # Docker 部署
 
+**简体中文** | [English](deploy-docker.en.md)
+
 OpenOS 以多阶段 Docker 镜像交付（node → go → alpine），运行镜像非 root、数据全部落在 `/data` 卷。本文覆盖从零构建到升级备份的完整流程。
 
 ## 前置要求

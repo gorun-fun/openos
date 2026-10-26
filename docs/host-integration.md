@@ -1,5 +1,7 @@
 # 宿主集成指南
 
+**简体中文** | [English](host-integration.en.md)
+
 业务系统可以**不 fork 壳代码**，把 OpenOS 当作桌面基础框架消费：宿主前端以 `createOpenOS()` 组装桌面，注入业务应用、品牌与单点登录；服务端之间用共享密钥互通用户体系。这是「方式三」，面向完整业务系统（参考实现：grf-hotel 酒店管理系统、grf-os）。
 
 配套的独立 Go module `hostsdk/` 封装了全部机对机调用（子进程托管 / SSO / BootstrapPage / 用户角色应用 declare / AI 同步），宿主后端直接引用可省去手写 HTTP。

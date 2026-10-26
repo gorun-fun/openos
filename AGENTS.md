@@ -1,6 +1,8 @@
 # AGENTS.md — OpenOS 工作区说明
 
-OpenOS：前后端分离的仿 macOS 网页桌面操作系统。Go 后端（单二进制 + SQLite）+ Vite/Vue 3 前端，以 WebSocket 事件总线为核心通信，内置 goder AI 编程 IDE。所有代码注释与文档使用中文，新增注释保持中文。
+OpenOS：前后端分离的仿 macOS 网页桌面操作系统。Go 后端（单二进制 + SQLite）+ Vite/Vue 3 前端，以 WebSocket 事件总线为核心通信，内置 goder AI 编程 IDE。所有代码注释使用中文，新增注释保持中文。
+
+**文档双语约定**：根 `README.md` 与 `docs/*.md` 为中文默认版，英文版为同目录同名 `.en.md`（如 `docs/goder.en.md`、根 `README.en.md`），两版顶部互设语言切换链接；文档内互链中文版链中文版、英文版链 `.en.md`。**修改任一文档必须同步更新中英两版**（新增文档成对创建）。`AGENTS.md` 仅中文。
 
 ## 常用命令
 
